@@ -49,6 +49,61 @@ def _looks_like_orion_only_request(text: str) -> bool:
     return True
 
 
+def _looks_like_team_technical_audit_request(text: str) -> bool:
+    """Detecta @Team/equipe técnica pedindo auditoria read-only de code/runtime.
+
+    Importante: isso NÃO deve virar Orion-only. Orion permanece signer/consolidador,
+    mas o dispatch deve selecionar especialistas técnicos e gerar specialist_reports.
+    """
+    txt = _normalize(text)
+    if not txt:
+        return False
+
+    has_team = bool(re.search(r"@team\b|\bteam\b|\bequipe\b|\bsquad\b|\bespecialistas\b|\bwar room\b", txt, flags=re.IGNORECASE))
+    if not has_team:
+        return False
+
+    has_audit = _contains_any(txt, [
+        "auditoria",
+        "auditar",
+        "audit",
+        "diagnóstico",
+        "diagnostico",
+        "scan",
+        "varredura",
+        "análise técnica",
+        "analise tecnica",
+    ])
+
+    has_technical_scope = _contains_any(txt, [
+        "code",
+        "código",
+        "codigo",
+        "runtime",
+        "backend",
+        "frontend",
+        "repo",
+        "repositório",
+        "repositorio",
+        "main.py",
+        "intent_engine.py",
+        "orion_internal.py",
+        "governança",
+        "governanca",
+        "roteamento",
+        "agentes",
+        "ux",
+        "console",
+    ])
+
+    read_only = (
+        _contains_any(txt, ["read-only", "read only", "somente leitura", "sem escrever", "não escrever", "nao escrever"])
+        or not _contains_any(txt, ["aplicar patch", "criar branch", "abrir pr", "merge", "deploy", "escrever arquivo"])
+    )
+
+    return bool(has_team and has_audit and has_technical_scope and read_only)
+
+
 def _looks_like_privileged_admin_read(text: str) -> bool:
     txt = _normalize(text)
     if not txt:
@@ -172,8 +227,9 @@ def build_intent_package(
     admin_access_mode = "read_privileged" if _looks_like_privileged_admin_read(text) and action_scope in {"read", "diagnose"} else "standard"
     requires_write_approval = action_scope in {"write_branch", "open_pr", "merge", "deploy"}
     orion_only = _looks_like_orion_only_request(user_input or "")
+    team_technical_audit = _looks_like_team_technical_audit_request(user_input or "")
     excluded_agents = _excluded_agents(user_input or "")
-    if orion_only:
+    if orion_only or team_technical_audit:
         capability_name = capability_name or "platform_self_audit"
         intent = "platform_self_audit"
 
@@ -191,19 +247,27 @@ def build_intent_package(
         "capability_name": capability_name,
         "admin_access_mode": admin_access_mode,
         "requires_write_approval": requires_write_approval,
-        "visible_signer_expected": "orion" if orion_only else None,
+        "visible_signer_expected": "orion" if (orion_only or team_technical_audit) else None,
         "excluded_agents": excluded_agents,
+        "team_technical_audit": bool(team_technical_audit),
+        "execution_mode": "read_only_dispatch" if team_technical_audit else None,
+        "expected_specialist_reports": ["orion", "auditor", "cto"] if team_technical_audit else [],
     }
+    recommended_agents = (
+        ["orion", "auditor", "cto"]
+        if team_technical_audit
+        else (["orion"] if (orion_only or capability_name in {"platform_self_audit", "github_repo_write", "github_pr_prepare"}) else ["orkio"])
+    )
     payload = {
         "intent": intent,
         "confidence": 0.98 if runtime_op.get("kind") else 0.62,
-        "recommended_agents": ["orion"] if (orion_only or capability_name in {"platform_self_audit", "github_repo_write", "github_pr_prepare"}) else ["orkio"],
-        "advisor_agents": ["orion", "metatron"],
+        "recommended_agents": recommended_agents,
+        "advisor_agents": ["orion", "auditor", "cto", "metatron"] if team_technical_audit else ["orion", "metatron"],
         "runtime_operation": runtime_op,
         "requires_runtime_execution": bool(runtime_op.get("kind")),
-        "target_agent": "orion" if (orion_only or capability_name in {"platform_self_audit", "github_repo_write", "github_pr_prepare"}) else "orkio",
-        "delivery_contract": "orkio_governed_runtime_v1",
-        "structured_output": False,
+        "target_agent": "orion" if (orion_only or team_technical_audit or capability_name in {"platform_self_audit", "github_repo_write", "github_pr_prepare"}) else "orkio",
+        "delivery_contract": "orion_team_technical_audit_v1" if team_technical_audit else "orkio_governed_runtime_v1",
+        "structured_output": bool(team_technical_audit),
         "first_win_goal": "execute_orion_runtime" if runtime_op.get("kind") else "clarify_next_step",
         "action_scope": action_scope,
         "target_scope": target_scope,
@@ -213,6 +277,8 @@ def build_intent_package(
         "requires_human_authorization": bool(governance_decision.get("requires_human_authorization")) and requires_write_approval,
         "admin_access_mode": admin_access_mode,
         "requires_write_approval": requires_write_approval,
+        "team_technical_audit": bool(team_technical_audit),
+        "expected_specialist_reports": ["orion", "auditor", "cto"] if team_technical_audit else [],
     }
     payload.update(_runtime_self_audit_override(intent))
     return payload
