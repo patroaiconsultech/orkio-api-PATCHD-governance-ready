@@ -5327,7 +5327,7 @@ def _select_target_agents(
         if re.search(r"auditori|audit|risco|seguran[cç]a|incidente|root cause", txt, flags=re.IGNORECASE):
             requested.append("auditor")
         if re.search(r"github|repo|reposit[oó]rio|branch|pull request|\bpr\b|patch|c[oó]digo|code|frontend|backend", txt, flags=re.IGNORECASE):
-            requested.append("orkio")
+            requested.append("orion")
         ordered: List[str] = []
         for slug in requested:
             if slug not in ordered:
@@ -6222,10 +6222,6 @@ def _github_write_authorization_flags(user_text: str) -> Dict[str, Any]:
     )
     flags["deny_merge"] = bool(re.search(r"(n[ãa]o\s+autorizo\s+merge)", low, flags=re.IGNORECASE))
 
-    # Guardrail: admin/read-only analysis must never be interpreted as GitHub write approval.
-    if _looks_like_admin_privileged_read_request(txt):
-        return flags
-
     m_authorize = re.search(r"\bautorizo\b", low, flags=re.IGNORECASE)
     m_confirm = re.search(r"\b(confirmo|aprov[oa])\b", low, flags=re.IGNORECASE)
     auth_anchor = m_authorize or m_confirm
@@ -6255,6 +6251,9 @@ def _github_write_authorization_flags(user_text: str) -> Dict[str, Any]:
         )
     )
 
+    # PATCH27_12BD — Founder approval for patch/PR on a branch implicitly includes
+    # the prerequisite transactional steps. This avoids a dead-end where the founder
+    # authorizes the patch/PR outcome but create_branch / prepare_commit remain blocked.
     if auth_anchor and not flags["allow_main"]:
         if flags["allow_patch"] or flags["allow_pr"]:
             flags["allow_branch"] = True
@@ -6266,6 +6265,7 @@ def _github_write_authorization_flags(user_text: str) -> Dict[str, Any]:
 
     flags["grant"] = any(bool(flags[k]) for k in ("allow_branch", "allow_patch", "allow_commit", "allow_pr", "allow_main"))
     return flags
+
 
 def _github_write_request_flags(user_text: str) -> Dict[str, Any]:
     txt = (user_text or "").strip()
@@ -6300,7 +6300,7 @@ def _github_write_request_flags(user_text: str) -> Dict[str, Any]:
     }
     if not txt:
         return requested
-    if _is_explicit_read_only_runtime_audit_message(txt) or _looks_like_admin_privileged_read_request(txt):
+    if _is_explicit_read_only_runtime_audit_message(txt):
         return requested
 
     explicit_branch_command = _is_explicit_github_create_branch_command(txt)
@@ -6431,87 +6431,6 @@ def _is_explicit_read_only_runtime_audit_message(user_text: str) -> bool:
         "ignorando qualquer contexto anterior de pr",
     )
     return any(marker in txt for marker in audit_markers) and any(marker in txt for marker in read_only_markers)
-
-
-def _looks_like_admin_privileged_read_request(user_text: str) -> bool:
-    txt = (user_text or "").strip().lower()
-    if not txt:
-        return False
-
-    explicit_write_markers = (
-        "criar branch",
-        "create branch",
-        "aplicar patch",
-        "apply patch",
-        "patch direto",
-        "prepare commit",
-        "preparar commit",
-        "commit",
-        "abrir pr",
-        "open pr",
-        "pull request",
-        "merge",
-        "deploy",
-        "criar arquivo",
-        "create file",
-        "alterar arquivo",
-        "update file",
-        "write file",
-        "escrever na main",
-        "write to main",
-    )
-    if any(marker in txt for marker in explicit_write_markers):
-        return False
-
-    read_markers = (
-        "arquivo em anexo",
-        "arquivo anexado",
-        "anexo",
-        "logs",
-        "log",
-        "analise o arquivo",
-        "análise do arquivo",
-        "analisar o arquivo",
-        "leia o arquivo",
-        "ler o arquivo",
-        "me diga o que é a plataforma",
-        "o que é a plataforma",
-        "explique o que é a plataforma",
-        "auditoria",
-        "diagnóstico",
-        "diagnostico",
-        "war room",
-        "somente leitura",
-        "read only",
-        "read-only",
-    )
-    has_read_marker = any(marker in txt for marker in read_markers)
-    has_admin_marker = any(marker in txt for marker in (
-        "admin master",
-        "como admin",
-        "sou admin",
-        "admin",
-    ))
-    return bool(has_read_marker or (has_admin_marker and ("arquivo" in txt or "log" in txt or "anexo" in txt or "auditoria" in txt or "diagnóstico" in txt or "diagnostico" in txt)))
-
-
-def _build_admin_privileged_read_response_text(
-    *,
-    org: str,
-    thread_id: Optional[str],
-    payload: Optional[Dict[str, Any]],
-    db: Optional[Session] = None,
-) -> str:
-    snapshot = _github_write_policy_snapshot(org=org, thread_id=thread_id, payload=payload, db=db)
-    lines = [
-        "LEITURA PRIVILEGIADA ADMINISTRATIVA RECONHECIDA.",
-        "- mode: admin_read_privileged",
-        "- github_write_approval_created: False",
-        "- rationale: pedido classificado como leitura/análise/auditoria, sem intenção explícita de escrita GitHub.",
-        "",
-        _format_github_write_policy_text(snapshot, thread_id=thread_id, payload=payload),
-    ]
-    return "\n".join(lines)
 
 
 def _has_negated_write_phrase(low: str, *phrases: str) -> bool:
@@ -6663,7 +6582,6 @@ def _build_github_write_response_text(
         req_flags["create_branch"] = True
         req_flags["requested"] = True
     can_govern = bool(snapshot.get("can_govern"))
-    admin_privileged_read = _looks_like_admin_privileged_read_request(user_text)
 
     if auth_flags.get("deny_execution"):
         _github_write_clear_approval(org, thread_id, payload)
@@ -6679,22 +6597,7 @@ def _build_github_write_response_text(
         ]
         return "\n".join(lines)
 
-    if admin_privileged_read and not req_flags.get("requested"):
-        return _build_admin_privileged_read_response_text(
-            org=org,
-            thread_id=thread_id,
-            payload=payload,
-            db=db,
-        )
-
     if auth_flags.get("grant"):
-        if not req_flags.get("requested"):
-            return _build_admin_privileged_read_response_text(
-                org=org,
-                thread_id=thread_id,
-                payload=payload,
-                db=db,
-            )
         if not can_govern:
             return "AÇÃO BLOQUEADA PELA POLÍTICA OPERACIONAL.\n- motivo: usuário_sem_permissão_de_governança"
         approval = _github_store_write_approval(org=org, thread_id=thread_id, payload=payload, auth_flags=auth_flags)
@@ -10785,9 +10688,7 @@ def _dispatch_governed_github_write(
         req_flags["create_branch"] = True
         req_flags["requested"] = True
 
-    admin_privileged_read = _looks_like_admin_privileged_read_request(user_text)
-
-    if admin_privileged_read or auth_flags.get("deny_execution") or auth_flags.get("grant") or not req_flags.get("requested"):
+    if auth_flags.get("deny_execution") or auth_flags.get("grant") or not req_flags.get("requested"):
         return {
             "text": _build_github_write_response_text(
                 org=org,
@@ -11930,6 +11831,11 @@ def chat(
     except Exception:
         mention_tokens = [str(x) for x in requested_names]
 
+    orion_only_flags = _orion_only_request_flags(inp.message or "")
+    excluded_agent_names = [str(x).strip().lower() for x in (orion_only_flags.get("excluded_agents") or []) if str(x).strip()]
+    if excluded_agent_names:
+        requested_names = [x for x in requested_names if str(x).strip().lower() not in excluded_agent_names]
+        mention_tokens = [x for x in mention_tokens if str(x).strip().lower() not in excluded_agent_names]
     has_team = any(m.strip().lower() in ("time", "team") for m in mention_tokens) or len(requested_names) > 1
 
     # Build alias map once
@@ -11956,12 +11862,30 @@ def chat(
             mention_tokens = ["orion"]
             has_team = False
 
+    if orion_only_flags.get("requested"):
+        forced_orion_agent = (
+            forced_orion_agent
+            or alias_to_agent.get("orion")
+            or alias_to_agent.get("orion cto")
+        )
+        requested_names = ["orion"]
+        mention_tokens = ["orion"]
+        has_team = False
+
     # STAB: select_target_agents — determinístico, nunca sobrescrito
     if forced_orion_agent is not None:
         target_agents = [forced_orion_agent]
     else:
         target_agents = _select_target_agents(db, org, inp, alias_to_agent, mention_tokens, has_team)
         target_agents = _apply_explicit_agent_request(db, org, target_agents, requested_names)
+
+    if excluded_agent_names:
+        target_agents = [a for a in (target_agents or []) if str(getattr(a, "name", "") or "").strip().lower() not in excluded_agent_names]
+    if orion_only_flags.get("requested") and forced_orion_agent is not None:
+        target_agents = [forced_orion_agent]
+        requested_names = ["orion"]
+        mention_tokens = ["orion"]
+        has_team = False
 
 
     wallet_action_prefix = f"chat:{tid}:"
@@ -12196,7 +12120,7 @@ def chat(
                     )
                     capability_inventory_answer = governed_dispatch.get("text")
                     execution_result = governed_dispatch.get("execution_result") if isinstance(governed_dispatch, dict) else None
-                elif _is_runtime_source_audit_request(inp.message):
+                elif _is_runtime_source_audit_request(inp.message) and not orion_only_flags.get("requested") and not _runtime_orion_dispatch_request_flags(inp.message).get("requested"):
                     capability_inventory_answer = _build_runtime_source_audit_text(
                         db=db,
                         org=org,
@@ -17855,10 +17779,55 @@ async def realtime_start(
 
 
 
+def _detect_excluded_agent_names(message: str) -> List[str]:
+    raw = (message or "").strip().lower()
+    if not raw:
+        return []
+
+    aliases = {
+        "orkio": [r"@orkio\b", r"\borkio\b"],
+        "chris": [r"@chris\b", r"\bchris\b", r"\bcfo\b"],
+        "orion": [r"@orion\b", r"\borion\b", r"\bcto\b"],
+    }
+
+    pre_negation = r"(?:sem|exceto|exclude|excluding|without|bloque(?:ar|ie)|remov(?:er|a)|nao\s+incluir|não\s+incluir|nao\s+chamar|não\s+chamar|nao\s+usar|não\s+usar)"
+    post_negation = r"(?:nao\s+pode|não\s+pode|nao\s+deve|não\s+deve|nao\s+responder|não\s+responder|nao\s+assinar|não\s+assinar|nao\s+interceptar|não\s+interceptar|nao\s+substituir|não\s+substituir|fora\s+deste\s+teste)"
+
+    excluded: List[str] = []
+    for canonical, pats in aliases.items():
+        hit = False
+        for alias_pat in pats:
+            if re.search(rf"{pre_negation}\s+{alias_pat}", raw, flags=re.IGNORECASE):
+                hit = True
+                break
+            if re.search(rf"{alias_pat}.*?{post_negation}", raw, flags=re.IGNORECASE):
+                hit = True
+                break
+        if hit and canonical not in excluded:
+            excluded.append(canonical)
+    return excluded
+
+def _orion_only_request_flags(message: str) -> Dict[str, Any]:
+    raw = (message or "").strip().lower()
+    if not raw:
+        return {"requested": False, "excluded_agents": []}
+    excluded = _detect_excluded_agent_names(message)
+    explicit_orion = bool(re.search(r"@orion\b|\borion\b", raw, flags=re.IGNORECASE))
+    explicit_team = bool(re.search(r"@team\b|\bteam\b|\bequipe\b|\bboard\b|\bconselho\b", raw, flags=re.IGNORECASE))
+    explicit_other = []
+    for other in ("chris", "orkio"):
+        if other in excluded:
+            continue
+        if re.search(rf"@{other}\b|\b{other}\b", raw, flags=re.IGNORECASE):
+            explicit_other.append(other)
+    requested = bool(explicit_orion and not explicit_team and not explicit_other)
+    return {"requested": requested, "excluded_agents": excluded}
+
 def _detect_requested_agent_names(message: str) -> List[str]:
     raw = (message or "").strip().lower()
     if not raw:
         return []
+    excluded = set(_detect_excluded_agent_names(message))
     requested: List[str] = []
     patterns = [
         ("Orkio", [r"@orkio\b", r"\borkio\b", r"host\b", r"moderador", r"moderator"]),
@@ -17866,12 +17835,16 @@ def _detect_requested_agent_names(message: str) -> List[str]:
         ("Orion", [r"@orion\b", r"\borion\b", r"\bcto\b", r"tecnolog", r"technical", r"arquitetur", r"engineering"]),
     ]
     for name, pats in patterns:
+        if name.strip().lower() in excluded:
+            continue
         for pat in pats:
             if re.search(pat, raw, flags=re.IGNORECASE):
                 requested.append(name)
                 break
     if re.search(r"@team\b|\bteam\b|\bequipe\b|\bboard\b|\bconselho\b|\bambos\b|\btodos\b", raw, flags=re.IGNORECASE):
         for name in ("Chris", "Orion"):
+            if name.strip().lower() in excluded:
+                continue
             if name not in requested:
                 requested.append(name)
     return requested
@@ -17889,25 +17862,32 @@ def _build_realtime_handoff_line(host_name: str, requested: List[str]) -> Option
 def _explicit_agent_override(db: Session, org: str, text: str) -> List[Agent]:
     """
     Detecta pedido explícito de agente por nome/alias e resolve diretamente do banco.
+    Respeita exclusões explícitas como "Chris não pode responder" / "sem Chris".
     Ignora planner e AgentLink.
     """
     raw = (text or "").strip().lower()
     if not raw:
         return []
 
+    excluded = set(_detect_excluded_agent_names(text))
     requested: List[str] = []
 
     patterns = {
         "Orion": ["orion", "cto", "@orion"],
         "Chris": ["chris", "cfo", "@chris"],
+        "Orkio": ["orkio", "@orkio"],
     }
 
     for canonical, aliases in patterns.items():
+        if canonical.strip().lower() in excluded:
+            continue
         if any(alias in raw for alias in aliases):
             requested.append(canonical)
 
     if re.search(r"@team\b|\bteam\b|\bequipe\b|\bboard\b|\bconselho\b|\bambos\b|\btodos\b", raw, flags=re.IGNORECASE):
         for canonical in ("Chris", "Orion"):
+            if canonical.strip().lower() in excluded:
+                continue
             if canonical not in requested:
                 requested.append(canonical)
 
