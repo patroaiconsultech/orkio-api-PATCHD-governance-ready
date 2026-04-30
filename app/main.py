@@ -6222,6 +6222,10 @@ def _github_write_authorization_flags(user_text: str) -> Dict[str, Any]:
     )
     flags["deny_merge"] = bool(re.search(r"(n[ãa]o\s+autorizo\s+merge)", low, flags=re.IGNORECASE))
 
+    # Guardrail: admin/read-only analysis must never be interpreted as GitHub write approval.
+    if _looks_like_admin_privileged_read_request(txt):
+        return flags
+
     m_authorize = re.search(r"\bautorizo\b", low, flags=re.IGNORECASE)
     m_confirm = re.search(r"\b(confirmo|aprov[oa])\b", low, flags=re.IGNORECASE)
     auth_anchor = m_authorize or m_confirm
@@ -6251,9 +6255,6 @@ def _github_write_authorization_flags(user_text: str) -> Dict[str, Any]:
         )
     )
 
-    # PATCH27_12BD — Founder approval for patch/PR on a branch implicitly includes
-    # the prerequisite transactional steps. This avoids a dead-end where the founder
-    # authorizes the patch/PR outcome but create_branch / prepare_commit remain blocked.
     if auth_anchor and not flags["allow_main"]:
         if flags["allow_patch"] or flags["allow_pr"]:
             flags["allow_branch"] = True
@@ -6265,7 +6266,6 @@ def _github_write_authorization_flags(user_text: str) -> Dict[str, Any]:
 
     flags["grant"] = any(bool(flags[k]) for k in ("allow_branch", "allow_patch", "allow_commit", "allow_pr", "allow_main"))
     return flags
-
 
 def _github_write_request_flags(user_text: str) -> Dict[str, Any]:
     txt = (user_text or "").strip()
@@ -6300,7 +6300,7 @@ def _github_write_request_flags(user_text: str) -> Dict[str, Any]:
     }
     if not txt:
         return requested
-    if _is_explicit_read_only_runtime_audit_message(txt):
+    if _is_explicit_read_only_runtime_audit_message(txt) or _looks_like_admin_privileged_read_request(txt):
         return requested
 
     explicit_branch_command = _is_explicit_github_create_branch_command(txt)
@@ -6431,6 +6431,87 @@ def _is_explicit_read_only_runtime_audit_message(user_text: str) -> bool:
         "ignorando qualquer contexto anterior de pr",
     )
     return any(marker in txt for marker in audit_markers) and any(marker in txt for marker in read_only_markers)
+
+
+def _looks_like_admin_privileged_read_request(user_text: str) -> bool:
+    txt = (user_text or "").strip().lower()
+    if not txt:
+        return False
+
+    explicit_write_markers = (
+        "criar branch",
+        "create branch",
+        "aplicar patch",
+        "apply patch",
+        "patch direto",
+        "prepare commit",
+        "preparar commit",
+        "commit",
+        "abrir pr",
+        "open pr",
+        "pull request",
+        "merge",
+        "deploy",
+        "criar arquivo",
+        "create file",
+        "alterar arquivo",
+        "update file",
+        "write file",
+        "escrever na main",
+        "write to main",
+    )
+    if any(marker in txt for marker in explicit_write_markers):
+        return False
+
+    read_markers = (
+        "arquivo em anexo",
+        "arquivo anexado",
+        "anexo",
+        "logs",
+        "log",
+        "analise o arquivo",
+        "análise do arquivo",
+        "analisar o arquivo",
+        "leia o arquivo",
+        "ler o arquivo",
+        "me diga o que é a plataforma",
+        "o que é a plataforma",
+        "explique o que é a plataforma",
+        "auditoria",
+        "diagnóstico",
+        "diagnostico",
+        "war room",
+        "somente leitura",
+        "read only",
+        "read-only",
+    )
+    has_read_marker = any(marker in txt for marker in read_markers)
+    has_admin_marker = any(marker in txt for marker in (
+        "admin master",
+        "como admin",
+        "sou admin",
+        "admin",
+    ))
+    return bool(has_read_marker or (has_admin_marker and ("arquivo" in txt or "log" in txt or "anexo" in txt or "auditoria" in txt or "diagnóstico" in txt or "diagnostico" in txt)))
+
+
+def _build_admin_privileged_read_response_text(
+    *,
+    org: str,
+    thread_id: Optional[str],
+    payload: Optional[Dict[str, Any]],
+    db: Optional[Session] = None,
+) -> str:
+    snapshot = _github_write_policy_snapshot(org=org, thread_id=thread_id, payload=payload, db=db)
+    lines = [
+        "LEITURA PRIVILEGIADA ADMINISTRATIVA RECONHECIDA.",
+        "- mode: admin_read_privileged",
+        "- github_write_approval_created: False",
+        "- rationale: pedido classificado como leitura/análise/auditoria, sem intenção explícita de escrita GitHub.",
+        "",
+        _format_github_write_policy_text(snapshot, thread_id=thread_id, payload=payload),
+    ]
+    return "\n".join(lines)
 
 
 def _has_negated_write_phrase(low: str, *phrases: str) -> bool:
@@ -6582,6 +6663,7 @@ def _build_github_write_response_text(
         req_flags["create_branch"] = True
         req_flags["requested"] = True
     can_govern = bool(snapshot.get("can_govern"))
+    admin_privileged_read = _looks_like_admin_privileged_read_request(user_text)
 
     if auth_flags.get("deny_execution"):
         _github_write_clear_approval(org, thread_id, payload)
@@ -6597,7 +6679,22 @@ def _build_github_write_response_text(
         ]
         return "\n".join(lines)
 
+    if admin_privileged_read and not req_flags.get("requested"):
+        return _build_admin_privileged_read_response_text(
+            org=org,
+            thread_id=thread_id,
+            payload=payload,
+            db=db,
+        )
+
     if auth_flags.get("grant"):
+        if not req_flags.get("requested"):
+            return _build_admin_privileged_read_response_text(
+                org=org,
+                thread_id=thread_id,
+                payload=payload,
+                db=db,
+            )
         if not can_govern:
             return "AÇÃO BLOQUEADA PELA POLÍTICA OPERACIONAL.\n- motivo: usuário_sem_permissão_de_governança"
         approval = _github_store_write_approval(org=org, thread_id=thread_id, payload=payload, auth_flags=auth_flags)
@@ -10688,7 +10785,9 @@ def _dispatch_governed_github_write(
         req_flags["create_branch"] = True
         req_flags["requested"] = True
 
-    if auth_flags.get("deny_execution") or auth_flags.get("grant") or not req_flags.get("requested"):
+    admin_privileged_read = _looks_like_admin_privileged_read_request(user_text)
+
+    if admin_privileged_read or auth_flags.get("deny_execution") or auth_flags.get("grant") or not req_flags.get("requested"):
         return {
             "text": _build_github_write_response_text(
                 org=org,
