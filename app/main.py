@@ -7030,6 +7030,22 @@ def _should_force_runtime_dispatch_over_catalog(
         or response_profile in {"orion_objective_diagnostic", "premium_platform_audit", "controlled_self_evolution_propose_only"}
     )
 
+def _is_team_technical_audit_request(user_text: str) -> bool:
+    txt = (user_text or "").strip().lower()
+    if not txt:
+        return False
+    has_team = bool(re.search(r"@team\b|\bteam\b|\bequipe\b|\bsquad\b|\bespecialistas\b|\bwar room\b", txt, flags=re.IGNORECASE))
+    if not has_team:
+        return False
+    has_audit = bool(re.search(r"auditoria|auditar|audit|diagn[óo]stico|diagnostico|scan|varredura|an[áa]lise t[ée]cnica|analise tecnica", txt, flags=re.IGNORECASE))
+    has_technical_scope = bool(re.search(r"code|c[óo]digo|codigo|runtime|backend|frontend|repo|reposit[óo]rio|repositorio|main\.py|intent_engine\.py|orion_internal\.py|governan[çc]a|roteamento|agentes|ux|console", txt, flags=re.IGNORECASE))
+    read_only = (
+        bool(re.search(r"read[- ]only|somente leitura|sem escrever|n[ãa]o escrever", txt, flags=re.IGNORECASE))
+        or not bool(re.search(r"aplicar patch|criar branch|abrir pr|merge|deploy|escrever arquivo", txt, flags=re.IGNORECASE))
+    )
+    return bool(has_team and has_audit and has_technical_scope and read_only)
+
+
 def _apply_forced_orion_runtime_dispatch_enrichment(
     runtime_enrichment: Optional[Dict[str, Any]],
     user_text: str,
@@ -11814,7 +11830,7 @@ def chat(
     blocked_reply = _block_if_sensitive(inp.message)
     orion_self_knowledge_flags = _orion_self_knowledge_request_flags(inp.message)
     orion_operational_maturity_flags = _orion_operational_maturity_request_flags(inp.message)
-    if orion_self_knowledge_flags.get("requested") or orion_operational_maturity_flags.get("requested"):
+    if (orion_self_knowledge_flags.get("requested") or orion_operational_maturity_flags.get("requested")) and not team_technical_audit:
         blocked_reply = None
     active_founder_guidance = _get_founder_guidance(org, tid, inp.message)
 
@@ -11832,6 +11848,7 @@ def chat(
         mention_tokens = [str(x) for x in requested_names]
 
     orion_only_flags = _orion_only_request_flags(inp.message or "")
+    team_technical_audit = _is_team_technical_audit_request(inp.message or "")
     excluded_agent_names = [str(x).strip().lower() for x in (orion_only_flags.get("excluded_agents") or []) if str(x).strip()]
     if excluded_agent_names:
         requested_names = [x for x in requested_names if str(x).strip().lower() not in excluded_agent_names]
@@ -11862,7 +11879,7 @@ def chat(
             mention_tokens = ["orion"]
             has_team = False
 
-    if orion_only_flags.get("requested"):
+    if orion_only_flags.get("requested") and not team_technical_audit:
         forced_orion_agent = (
             forced_orion_agent
             or alias_to_agent.get("orion")
@@ -11881,7 +11898,21 @@ def chat(
 
     if excluded_agent_names:
         target_agents = [a for a in (target_agents or []) if str(getattr(a, "name", "") or "").strip().lower() not in excluded_agent_names]
-    if orion_only_flags.get("requested") and forced_orion_agent is not None:
+    if team_technical_audit:
+        preferred_team_aliases = ["orion", "orion cto", "auditor", "technical auditor", "cto", "cto runtime"]
+        team_targets: List[Any] = []
+        seen_team_ids: set = set()
+        for alias in preferred_team_aliases:
+            a = alias_to_agent.get(alias)
+            if a and getattr(a, "id", None) not in seen_team_ids:
+                team_targets.append(a)
+                seen_team_ids.add(getattr(a, "id", None))
+        if team_targets:
+            target_agents = team_targets
+            requested_names = ["orion", "auditor", "cto"]
+            mention_tokens = ["orion", "team"]
+            has_team = True
+    if orion_only_flags.get("requested") and forced_orion_agent is not None and not team_technical_audit:
         target_agents = [forced_orion_agent]
         requested_names = ["orion"]
         mention_tokens = ["orion"]
