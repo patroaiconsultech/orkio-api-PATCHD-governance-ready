@@ -8,7 +8,7 @@ CAPABILITY_EXECUTION_BINDINGS = {
     "github_repo_read": {
         "executor": "orion_internal.github_execute",
         "mode": "runtime",
-        "allowed_agents": ["orkio", "orion", "chris", "auditor"],
+        "allowed_agents": ["orkio", "orion", "auditor"],
         "write": False,
     },
     "github_repo_write": {
@@ -38,7 +38,7 @@ CAPABILITY_EXECUTION_BINDINGS = {
     "github_pr_compare_status": {
         "executor": "orion_internal.github_execute",
         "mode": "runtime",
-        "allowed_agents": ["orkio", "orion", "chris", "auditor"],
+        "allowed_agents": ["orkio", "orion", "auditor"],
         "write": False,
     },
     "github_pr_prepare": {
