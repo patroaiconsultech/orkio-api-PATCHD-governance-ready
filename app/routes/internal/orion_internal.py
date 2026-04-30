@@ -126,6 +126,22 @@ def _is_orion_only_request(message: str) -> bool:
         return False
     return True
 
+
+def _is_team_technical_audit_request(message: str) -> bool:
+    raw = (message or "").strip().lower()
+    if not raw:
+        return False
+    has_team = bool(re.search(r"@team\b|\bteam\b|\bequipe\b|\bsquad\b|\bespecialistas\b|\bwar room\b", raw, flags=re.IGNORECASE))
+    if not has_team:
+        return False
+    has_audit = bool(re.search(r"auditoria|auditar|audit|diagn[óo]stico|diagnostico|scan|varredura|an[áa]lise t[ée]cnica|analise tecnica", raw, flags=re.IGNORECASE))
+    has_technical_scope = bool(re.search(r"code|c[óo]digo|codigo|runtime|backend|frontend|repo|reposit[óo]rio|repositorio|main\.py|intent_engine\.py|orion_internal\.py|governan[çc]a|roteamento|agentes|ux|console", raw, flags=re.IGNORECASE))
+    read_only = (
+        bool(re.search(r"read[- ]only|somente leitura|sem escrever|n[ãa]o escrever", raw, flags=re.IGNORECASE))
+        or not bool(re.search(r"aplicar patch|criar branch|abrir pr|merge|deploy|escrever arquivo", raw, flags=re.IGNORECASE))
+    )
+    return bool(has_team and has_audit and has_technical_scope and read_only)
+
 def _filter_specialists_for_message(selected: List[str], message: str) -> List[str]:
     excluded = set(_excluded_agents_from_message(message))
     out: List[str] = []
@@ -1765,8 +1781,11 @@ def _build_platform_self_audit_payload(inp: "OrionRuntimeIn", visible_agent: str
     premium_mode = _is_premium_platform_audit_request(inp.message)
     if premium_mode:
         scope = "specialist"
-    direct_orion_diagnostic = _is_orion_direct_diagnostic_request(inp.message, visible_agent) and not premium_mode
-    execute_full = premium_mode or _audit_wants_full_execution(inp.message, bool(inp.prepare_only)) or direct_orion_diagnostic
+    team_technical_audit = _is_team_technical_audit_request(inp.message)
+    if team_technical_audit:
+        scope = "specialist"
+    direct_orion_diagnostic = _is_orion_direct_diagnostic_request(inp.message, visible_agent) and not premium_mode and not team_technical_audit
+    execute_full = premium_mode or team_technical_audit or _audit_wants_full_execution(inp.message, bool(inp.prepare_only)) or direct_orion_diagnostic
     repo_targets = _build_repo_targets()
     audit_plan = {
         "requested_by": visible_agent,
@@ -1827,7 +1846,11 @@ def _build_platform_self_audit_payload(inp: "OrionRuntimeIn", visible_agent: str
             "generated_at": _now_ts(),
         }
 
-    selected_specialists = ["orion"] if direct_orion_diagnostic else _audit_selected_specialists(scope, bool(inp.include_frontend), premium_mode=premium_mode)
+    selected_specialists = (
+        ["orion", "auditor", "cto"]
+        if team_technical_audit
+        else (["orion"] if direct_orion_diagnostic else _audit_selected_specialists(scope, bool(inp.include_frontend), premium_mode=premium_mode))
+    )
     dispatch_receipts = _audit_dispatch_receipts(selected_specialists, scope)
     specialist_reports = _audit_specialist_reports(selected_specialists, scope)
     followup_subtype = _infer_progressive_dispatch_followup_subtype(inp.message)
@@ -1879,6 +1902,8 @@ def _build_platform_self_audit_payload(inp: "OrionRuntimeIn", visible_agent: str
             "dispatch_receipts_appendix",
             "specialist_reports",
             "specialist_reports_appendix",
+            "frontend_render_cards",
+            "team_technical_audit",
             "final_consolidation",
         ],
         "execution_depth": "dispatch",
@@ -1906,6 +1931,18 @@ def _build_platform_self_audit_payload(inp: "OrionRuntimeIn", visible_agent: str
         "selected_specialists": selected_specialists,
         "selected_specialists_count": counts.get("selected_specialists_count", 0),
         "selected_specialists_summary": ", ".join(str(item) for item in list(selected_specialists or [])[:20]),
+        "team_technical_audit": bool(team_technical_audit),
+        "frontend_render_cards": [
+            {
+                "type": "specialist_report",
+                "agent": report.get("agent"),
+                "role": report.get("role"),
+                "focus": report.get("focus"),
+                "findings": report.get("findings", []),
+                "next_actions": report.get("next_actions", []),
+            }
+            for report in list(specialist_reports or [])
+        ],
         "dispatch_receipts": body_dispatch_receipts,
         "dispatch_receipts_count": counts.get("dispatch_receipts_count", 0),
         "dispatch_receipts_appendix": dispatch_receipts_appendix,
