@@ -15,8 +15,56 @@ def _contains_any(text: str, terms: list[str]) -> bool:
     return any(_normalize(term) in txt for term in terms if term)
 
 
+def _looks_like_privileged_admin_read(text: str) -> bool:
+    txt = _normalize(text)
+    if not txt:
+        return False
+    has_admin = _contains_any(txt, ["admin master", "como admin", "sou admin", "admin"])
+    has_read = _contains_any(txt, [
+        "analise o arquivo",
+        "análise do arquivo",
+        "analisar o arquivo",
+        "leia o arquivo",
+        "arquivo em anexo",
+        "arquivo anexado",
+        "anexo",
+        "logs",
+        "log",
+        "me diga o que é a plataforma",
+        "o que é a plataforma",
+        "auditoria",
+        "diagnóstico",
+        "diagnostico",
+        "war room",
+        "read only",
+        "somente leitura",
+    ])
+    has_write = _contains_any(txt, [
+        "criar branch",
+        "branch",
+        "aplicar patch",
+        "patch",
+        "commit",
+        "abrir pr",
+        "open pr",
+        "pull request",
+        "merge",
+        "deploy",
+        "criar arquivo",
+        "alterar arquivo",
+        "write file",
+        "create file",
+        "update file",
+        "escrever na main",
+        "write to main",
+    ])
+    return bool((has_admin or has_read) and has_read and not has_write)
+
+
 def _infer_action_scope(text: str) -> str:
     txt = _normalize(text)
+    if _looks_like_privileged_admin_read(txt):
+        return "read"
     if _contains_any(txt, ["merge", "mergear"]):
         return "merge"
     if _contains_any(txt, ["deploy", "publicar"]):
@@ -27,7 +75,7 @@ def _infer_action_scope(text: str) -> str:
         return "write_branch"
     if _contains_any(txt, ["patch", "proposta de patch", "plano de patch"]):
         return "propose_patch"
-    if _contains_any(txt, ["audit", "auditoria", "scan", "diagnóstico", "diagnostico", "self audit"]):
+    if _contains_any(txt, ["audit", "auditoria", "scan", "diagnóstico", "diagnostico", "self audit", "war room"]):
         return "diagnose"
     return "read"
 
@@ -47,7 +95,7 @@ def _infer_target_scope(text: str) -> str:
 
 def _infer_capability(action_scope: str, text: str) -> Optional[str]:
     txt = _normalize(text)
-    if _contains_any(txt, ["audit", "auditoria", "scan", "self audit", "runtime diagnostic"]):
+    if _contains_any(txt, ["audit", "auditoria", "scan", "self audit", "runtime diagnostic", "war room"]):
         return "platform_self_audit"
     if action_scope == "open_pr":
         return "github_pr_prepare"
@@ -87,6 +135,8 @@ def build_intent_package(
     target_scope = _infer_target_scope(text)
     capability_name = _infer_capability(action_scope, text)
     intent = "platform_self_audit" if capability_name == "platform_self_audit" else ("platform_audit" if action_scope == "diagnose" else "general_guidance")
+    admin_access_mode = "read_privileged" if _looks_like_privileged_admin_read(text) and action_scope in {"read", "diagnose"} else "standard"
+    requires_write_approval = action_scope in {"write_branch", "open_pr", "merge", "deploy"}
 
     governance_decision = evaluate_governance_action(
         action_scope=action_scope,
@@ -100,6 +150,8 @@ def build_intent_package(
         "action_scope": action_scope,
         "target_scope": target_scope,
         "capability_name": capability_name,
+        "admin_access_mode": admin_access_mode,
+        "requires_write_approval": requires_write_approval,
     }
     payload = {
         "intent": intent,
@@ -117,7 +169,9 @@ def build_intent_package(
         "capability_name": capability_name,
         "governance_decision": governance_decision,
         "allowed": bool(governance_decision.get("allowed")),
-        "requires_human_authorization": bool(governance_decision.get("requires_human_authorization")),
+        "requires_human_authorization": bool(governance_decision.get("requires_human_authorization")) and requires_write_approval,
+        "admin_access_mode": admin_access_mode,
+        "requires_write_approval": requires_write_approval,
     }
     payload.update(_runtime_self_audit_override(intent))
     return payload
