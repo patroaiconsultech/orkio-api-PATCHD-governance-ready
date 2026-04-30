@@ -1265,82 +1265,6 @@ def _patch_diagnostics_snapshot(extra: Optional[Dict[str, Any]] = None) -> Dict[
     return snap
 
 
-def _sanitize_runtime_error_detail(detail: Any) -> str:
-    if isinstance(detail, dict):
-        candidates = [
-            detail.get("safe_detail"),
-            detail.get("message"),
-            detail.get("detail"),
-            detail.get("github_error"),
-            detail.get("error"),
-            detail.get("reason"),
-        ]
-        for item in candidates:
-            msg = str(item or "").strip()
-            if msg:
-                return msg[:400]
-        try:
-            raw = json.dumps(detail, ensure_ascii=False)
-            return raw[:400]
-        except Exception:
-            return ""
-    return str(detail or "").strip()[:400]
-
-
-def _runtime_failure_payload(
-    *,
-    message: Optional[str] = None,
-    provider: str = "runtime",
-    trace_id: Optional[str] = None,
-    error_code: str = "RUNTIME_CAPABILITY_EVAL_FAILED",
-    capability_name: Optional[str] = None,
-    runtime_kind: Optional[str] = None,
-    safe_detail: Optional[str] = None,
-    exception_type: Optional[str] = None,
-) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {
-        "handled": True,
-        "success": False,
-        "provider": provider,
-        "message": (message or "Falha ao avaliar capability operacional solicitada.").strip(),
-        "error_code": str(error_code or "RUNTIME_CAPABILITY_EVAL_FAILED").strip(),
-    }
-    if trace_id:
-        payload["trace_id"] = str(trace_id).strip()
-    if capability_name:
-        payload["capability_name"] = str(capability_name).strip()
-    if runtime_kind:
-        payload["runtime_kind"] = str(runtime_kind).strip()
-    if safe_detail:
-        payload["safe_detail"] = str(safe_detail).strip()[:400]
-    if exception_type:
-        payload["exception_type"] = str(exception_type).strip()
-    return payload
-
-
-def _build_runtime_error_message(result: Dict[str, Any]) -> str:
-    if not result:
-        return "Falha ao avaliar capability operacional solicitada."
-    msg = str(result.get("message") or "Falha ao avaliar capability operacional solicitada.").strip()
-    details: List[str] = []
-    safe_detail = str(result.get("safe_detail") or "").strip()
-    error_code = str(result.get("error_code") or "").strip()
-    trace_id = str(result.get("trace_id") or "").strip()
-    capability_name = str(result.get("capability_name") or "").strip()
-    runtime_kind = str(result.get("runtime_kind") or "").strip()
-    if safe_detail:
-        details.append(f"detail: {safe_detail}")
-    if error_code:
-        details.append(f"code: {error_code}")
-    if capability_name:
-        details.append(f"capability: {capability_name}")
-    if runtime_kind:
-        details.append(f"runtime_kind: {runtime_kind}")
-    if trace_id:
-        details.append(f"trace_id: {trace_id}")
-    return "\n".join([msg] + details) if details else msg
-
-
 def new_id() -> str:
     return uuid.uuid4().hex
 
@@ -5898,6 +5822,93 @@ def _runtime_catalog(db: Optional[Session], org: Optional[str], *, include_hidde
     return _privileged_runtime_catalog(db, org, include_hidden=include_hidden) if privileged else _db_runtime_catalog(db, org)
 
 
+def _capability_inventory_payload(
+    db: Optional[Session] = None,
+    org: Optional[str] = None,
+    include_hidden: bool = False,
+    privileged: bool = False,
+) -> List[Dict[str, Any]]:
+    """
+    Backward-compatible runtime inventory helper used by operational maturity / audit flows.
+
+    Primary source:
+    - privileged/public runtime catalog already consolidated by `_runtime_catalog(...)`
+
+    Safe fallbacks:
+    - governed capability overlay from `load_runtime_governed_capabilities()`
+    - raw capability registry from `get_capability_registry()`
+
+    This helper must NEVER raise, because it is also used by read-only diagnostic flows.
+    """
+    try:
+        catalog = _runtime_catalog(db, org, include_hidden=include_hidden, privileged=privileged)
+        if isinstance(catalog, list) and catalog:
+            return catalog
+    except Exception:
+        logger.exception(
+            "CAPABILITY_INVENTORY_PRIMARY_FAILED org=%s include_hidden=%s privileged=%s",
+            org,
+            include_hidden,
+            privileged,
+        )
+
+    normalized: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+
+    try:
+        governed = load_runtime_governed_capabilities()
+        if isinstance(governed, list):
+            for item in governed:
+                if not isinstance(item, dict):
+                    continue
+                slug = str(item.get("slug") or item.get("name") or "").strip().lower()
+                if not slug or slug in seen:
+                    continue
+                seen.add(slug)
+                normalized.append({
+                    "id": item.get("id") or f"governed::{slug}",
+                    "slug": slug,
+                    "name": item.get("name") or slug.title(),
+                    "role": item.get("role") or "specialist",
+                    "hidden": bool(item.get("hidden", False)),
+                    "internal": bool(item.get("internal", False)),
+                    "system": bool(item.get("system", False)),
+                    "available_to_runtime": bool(item.get("available_to_runtime", True)),
+                    "description": item.get("description") or "",
+                })
+    except Exception:
+        logger.exception("CAPABILITY_INVENTORY_GOVERNED_FALLBACK_FAILED org=%s", org)
+
+    if normalized:
+        return normalized
+
+    try:
+        registry = get_capability_registry() or {}
+        if isinstance(registry, dict):
+            for slug, item in registry.items():
+                if not isinstance(item, dict):
+                    continue
+                key = str(slug or item.get("slug") or item.get("name") or "").strip().lower()
+                if not key or key in seen:
+                    continue
+                seen.add(key)
+                normalized.append({
+                    "id": item.get("id") or f"registry::{key}",
+                    "slug": key,
+                    "name": item.get("name") or key.title(),
+                    "role": item.get("role") or "specialist",
+                    "hidden": bool(item.get("hidden", False)),
+                    "internal": bool(item.get("internal", False)),
+                    "system": bool(item.get("system", False)),
+                    "available_to_runtime": bool(item.get("available_to_runtime", True)),
+                    "description": item.get("description") or "",
+                })
+    except Exception:
+        logger.exception("CAPABILITY_INVENTORY_REGISTRY_FALLBACK_FAILED org=%s", org)
+
+    return normalized
+
+
 
 def _runtime_available_agents(db: Optional[Session] = None, org: Optional[str] = None, include_hidden: bool = False, privileged: bool = False) -> List[str]:
     discovered: List[str] = []
@@ -8110,7 +8121,8 @@ def _build_execution_result_payload(result: Dict[str, Any]) -> str:
         return "\n".join([str(x).rstrip() for x in parts if str(x).strip()])
 
     if not result.get("success"):
-        return _build_runtime_error_message(result)
+        msg = (result.get("message") or "Não foi possível concluir a ação solicitada.").strip()
+        return msg
 
     parts = ["Ação executada com confirmação operacional verificável."]
     if event:
@@ -10976,40 +10988,31 @@ def _execute_capability_if_authorized(
             return _coerce_platform_audit_dispatch_result(normalized, runtime_enrichment)
     except HTTPException as e:
         detail = getattr(e, "detail", None)
-        safe_detail = _sanitize_runtime_error_detail(detail)
-        logger.exception(
-            "RUNTIME_EXECUTION_HTTP_EXCEPTION trace_id=%s capability=%s runtime_kind=%s detail=%s",
-            trace_id,
-            required_capability or None,
-            runtime_kind or None,
-            safe_detail or None,
-        )
-        return _runtime_failure_payload(
-            provider="runtime",
-            trace_id=trace_id,
-            error_code="RUNTIME_EXECUTION_HTTP_EXCEPTION",
-            capability_name=required_capability or None,
-            runtime_kind=runtime_kind or None,
-            safe_detail=safe_detail or None,
-            exception_type=type(e).__name__,
-            message=safe_detail or "Falha ao avaliar capability operacional solicitada.",
-        )
-    except Exception as e:
-        logger.exception(
-            "RUNTIME_EXECUTION_UNEXPECTED_EXCEPTION trace_id=%s capability=%s runtime_kind=%s",
-            trace_id,
-            required_capability or None,
-            runtime_kind or None,
-        )
-        return _runtime_failure_payload(
-            provider="runtime",
-            trace_id=trace_id,
-            error_code="RUNTIME_EXECUTION_UNEXPECTED_EXCEPTION",
-            capability_name=required_capability or None,
-            runtime_kind=runtime_kind or None,
-            safe_detail=_sanitize_runtime_error_detail(str(e)),
-            exception_type=type(e).__name__,
-        )
+        message = ""
+        if isinstance(detail, dict):
+            message = str(
+                detail.get("message")
+                or detail.get("detail")
+                or detail.get("github_error")
+                or ""
+            ).strip()
+        else:
+            message = str(detail or "").strip()
+        logging.exception("RUNTIME_EXECUTION_HTTP_EXCEPTION trace_id=%s", trace_id)
+        return {
+            "handled": True,
+            "success": False,
+            "provider": "runtime",
+            "message": message or "Falha ao avaliar capability operacional solicitada.",
+        }
+    except Exception:
+        logging.exception("RUNTIME_EXECUTION_UNEXPECTED_EXCEPTION trace_id=%s", trace_id)
+        return {
+            "handled": True,
+            "success": False,
+            "provider": "github",
+            "message": "Falha ao avaliar capability operacional solicitada.",
+        }
 
     req_read = _github_extract_read_file_request(txt)
     if req_read:
@@ -12162,22 +12165,13 @@ def chat(
                         trace_id=getattr(inp, "trace_id", None),
                         runtime_enrichment=runtime_enrichment,
                     )
-            except Exception as e:
-                logger.exception(
-                    "RUNTIME_CAPABILITY_EVAL_FAILED trace_id=%s capability=%s runtime_kind=%s context=chat_request",
-                    getattr(inp, "trace_id", None),
-                    str(((runtime_enrichment or {}).get("planner_snapshot") or {}).get("requires_capability") or "").strip() or None,
-                    str((((runtime_enrichment or {}).get("intent_package") or {}).get("runtime_operation") or {}).get("kind") or "").strip() or None,
-                )
-                execution_result = _runtime_failure_payload(
-                    provider="runtime",
-                    trace_id=getattr(inp, "trace_id", None),
-                    error_code="RUNTIME_CAPABILITY_EVAL_FAILED",
-                    capability_name=str(((runtime_enrichment or {}).get("planner_snapshot") or {}).get("requires_capability") or "").strip() or None,
-                    runtime_kind=str((((runtime_enrichment or {}).get("intent_package") or {}).get("runtime_operation") or {}).get("kind") or "").strip() or None,
-                    safe_detail=_sanitize_runtime_error_detail(str(e)),
-                    exception_type=type(e).__name__,
-                )
+            except Exception:
+                execution_result = {
+                    "handled": True,
+                    "success": False,
+                    "provider": "github",
+                    "message": "Falha ao avaliar capability operacional solicitada.",
+                }
 
         if capability_inventory_answer is not None:
             ans_obj = {
@@ -16003,22 +15997,13 @@ async def chat_stream(
                                     trace_id=trace_id,
                                     runtime_enrichment=runtime_enrichment,
                                 )
-                    except Exception as e:
-                        logger.exception(
-                            "RUNTIME_CAPABILITY_EVAL_FAILED trace_id=%s capability=%s runtime_kind=%s context=chat_stream",
-                            trace_id,
-                            str(((runtime_enrichment or {}).get("planner_snapshot") or {}).get("requires_capability") or "").strip() or None,
-                            str((((runtime_enrichment or {}).get("intent_package") or {}).get("runtime_operation") or {}).get("kind") or "").strip() or None,
-                        )
-                        execution_result = _runtime_failure_payload(
-                            provider="runtime",
-                            trace_id=trace_id,
-                            error_code="RUNTIME_CAPABILITY_EVAL_FAILED",
-                            capability_name=str(((runtime_enrichment or {}).get("planner_snapshot") or {}).get("requires_capability") or "").strip() or None,
-                            runtime_kind=str((((runtime_enrichment or {}).get("intent_package") or {}).get("runtime_operation") or {}).get("kind") or "").strip() or None,
-                            safe_detail=_sanitize_runtime_error_detail(str(e)),
-                            exception_type=type(e).__name__,
-                        )
+                    except Exception:
+                        execution_result = {
+                            "handled": True,
+                            "success": False,
+                            "provider": "github",
+                            "message": "Falha ao avaliar capability operacional solicitada.",
+                        }
 
                 llm_task = None
                 if capability_inventory_answer is not None:
