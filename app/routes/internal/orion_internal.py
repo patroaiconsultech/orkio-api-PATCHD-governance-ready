@@ -97,8 +97,48 @@ def _extract_agent_handles(message: str) -> List[str]:
     return [x.strip().lower() for x in found if x.strip()]
 
 
+def _excluded_agents_from_message(message: str) -> List[str]:
+    raw = (message or "").strip().lower()
+    if not raw:
+        return []
+    patterns = {
+        "chris": [
+            r"(?:sem|exceto|without|exclude|bloque(?:ar|ie)|remover)\s+@?chris\b",
+            r"@?chris\b.*?(?:nao\s+pode|não\s+pode|nao\s+deve|não\s+deve|nao\s+responder|não\s+responder|nao\s+assinar|não\s+assinar|nao\s+interceptar|não\s+interceptar|nao\s+substituir|não\s+substituir)",
+        ],
+    }
+    excluded: List[str] = []
+    for canonical, pats in patterns.items():
+        if any(re.search(p, raw, flags=re.IGNORECASE) for p in pats):
+            excluded.append(canonical)
+    return excluded
+
+def _is_orion_only_request(message: str) -> bool:
+    raw = (message or "").strip().lower()
+    if not raw:
+        return False
+    if not re.search(r"@orion\b|\borion\b", raw, flags=re.IGNORECASE):
+        return False
+    if re.search(r"@team\b|\bteam\b|\bequipe\b|\bboard\b|\bconselho\b", raw, flags=re.IGNORECASE):
+        return False
+    excluded = set(_excluded_agents_from_message(message))
+    if "chris" not in excluded and re.search(r"@chris\b|\bchris\b|\bcfo\b", raw, flags=re.IGNORECASE):
+        return False
+    return True
+
+def _filter_specialists_for_message(selected: List[str], message: str) -> List[str]:
+    excluded = set(_excluded_agents_from_message(message))
+    out: List[str] = []
+    for item in list(selected or []):
+        slug = str(item or "").strip().lower()
+        if slug and slug not in excluded:
+            out.append(item)
+    return out
+
 def _resolve_visible_agent(message: str, default: str = "orion") -> str:
     handles = _extract_agent_handles(message)
+    if _is_orion_only_request(message):
+        return "orion"
     if "orion" in handles:
         return "orion"
     if "orkio" in handles:
@@ -901,7 +941,7 @@ def _build_controlled_self_evolution_sections(selected_specialists: List[str]) -
 
 def platform_self_evolution_plan(inp: "OrionRuntimeIn") -> Dict[str, Any]:
     visible_agent = _resolve_visible_agent(inp.message, default="orion")
-    selected_specialists = _audit_selected_specialists("specialist", bool(inp.include_frontend), premium_mode=True)
+    selected_specialists = _filter_specialists_for_message(_audit_selected_specialists("specialist", bool(inp.include_frontend), premium_mode=True), inp.message)
     dispatch_receipts = _audit_dispatch_receipts(selected_specialists, "specialist")
     specialist_reports = _audit_specialist_reports(selected_specialists, "specialist")
     counts = _dispatch_receipt_counts(dispatch_receipts, specialist_reports, selected_specialists)
@@ -2301,7 +2341,7 @@ def list_squad_agents() -> Dict[str, Any]:
 
 @router.post("/squad/list")
 def list_squad_agents_post(inp: OrionRuntimeIn) -> Dict[str, Any]:
-    visible_agent = _resolve_visible_agent(inp.message, default="orkio")
+    visible_agent = _resolve_visible_agent(inp.message, default="orion")
     return {
         "ok": True,
         "service": "orion_internal",
