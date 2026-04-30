@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
+import re
 
 from app.config.runtime import RUNTIME_FLAGS
 from app.services.governance_service import evaluate_governance_action
@@ -13,6 +14,39 @@ def _normalize(text: str) -> str:
 def _contains_any(text: str, terms: list[str]) -> bool:
     txt = _normalize(text)
     return any(_normalize(term) in txt for term in terms if term)
+
+def _excluded_agents(text: str) -> list[str]:
+    txt = _normalize(text)
+    if not txt:
+        return []
+    patterns = {
+        "chris": [
+            r"(?:sem|exceto|without|exclude|bloquear)\s+chris",
+            r"chris.*?(?:nao pode|não pode|nao deve|não deve|nao responder|não responder|nao assinar|não assinar|nao interceptar|não interceptar|nao substituir|não substituir)",
+        ],
+        "orion": [
+            r"(?:sem|exceto|without|exclude|bloquear)\s+orion",
+            r"orion.*?(?:nao pode|não pode|nao deve|não deve)",
+        ],
+    }
+    out: list[str] = []
+    for name, pats in patterns.items():
+        if any(re.search(p, txt, flags=re.IGNORECASE) for p in pats):
+            out.append(name)
+    return out
+
+def _looks_like_orion_only_request(text: str) -> bool:
+    txt = _normalize(text)
+    if not txt:
+        return False
+    if not re.search(r"@orion\b|\borion\b", txt, flags=re.IGNORECASE):
+        return False
+    if re.search(r"@team\b|\bteam\b|\bequipe\b|\bboard\b|\bconselho\b", txt, flags=re.IGNORECASE):
+        return False
+    excluded = set(_excluded_agents(text))
+    if "chris" not in excluded and re.search(r"@chris\b|\bchris\b|\bcfo\b", txt, flags=re.IGNORECASE):
+        return False
+    return True
 
 
 def _looks_like_privileged_admin_read(text: str) -> bool:
@@ -137,6 +171,11 @@ def build_intent_package(
     intent = "platform_self_audit" if capability_name == "platform_self_audit" else ("platform_audit" if action_scope == "diagnose" else "general_guidance")
     admin_access_mode = "read_privileged" if _looks_like_privileged_admin_read(text) and action_scope in {"read", "diagnose"} else "standard"
     requires_write_approval = action_scope in {"write_branch", "open_pr", "merge", "deploy"}
+    orion_only = _looks_like_orion_only_request(user_input or "")
+    excluded_agents = _excluded_agents(user_input or "")
+    if orion_only:
+        capability_name = capability_name or "platform_self_audit"
+        intent = "platform_self_audit"
 
     governance_decision = evaluate_governance_action(
         action_scope=action_scope,
@@ -152,15 +191,17 @@ def build_intent_package(
         "capability_name": capability_name,
         "admin_access_mode": admin_access_mode,
         "requires_write_approval": requires_write_approval,
+        "visible_signer_expected": "orion" if orion_only else None,
+        "excluded_agents": excluded_agents,
     }
     payload = {
         "intent": intent,
         "confidence": 0.98 if runtime_op.get("kind") else 0.62,
-        "recommended_agents": ["orion"] if capability_name in {"platform_self_audit", "github_repo_write", "github_pr_prepare"} else ["orkio"],
+        "recommended_agents": ["orion"] if (orion_only or capability_name in {"platform_self_audit", "github_repo_write", "github_pr_prepare"}) else ["orkio"],
         "advisor_agents": ["orion", "metatron"],
         "runtime_operation": runtime_op,
         "requires_runtime_execution": bool(runtime_op.get("kind")),
-        "target_agent": "orion" if capability_name in {"platform_self_audit", "github_repo_write", "github_pr_prepare"} else "orkio",
+        "target_agent": "orion" if (orion_only or capability_name in {"platform_self_audit", "github_repo_write", "github_pr_prepare"}) else "orkio",
         "delivery_contract": "orkio_governed_runtime_v1",
         "structured_output": False,
         "first_win_goal": "execute_orion_runtime" if runtime_op.get("kind") else "clarify_next_step",
