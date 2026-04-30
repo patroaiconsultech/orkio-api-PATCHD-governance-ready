@@ -922,6 +922,94 @@ def _is_controlled_self_evolution_propose_request(message: str) -> bool:
     return any(marker in txt for marker in evolution_markers) and any(marker in txt for marker in scope_markers)
 
 
+def _is_platform_improvement_review_request(message: str) -> bool:
+    txt = (message or "").strip().lower()
+    if not txt:
+        return False
+
+    source_audit_markers = (
+        "auditoria de fonte do runtime",
+        "catálogo público",
+        "catalogo publico",
+        "catálogo privilegiado",
+        "catalogo privilegiado",
+        "agentes ocultos",
+        "agentes internos",
+        "agentes system",
+        "seed oculto",
+        "divergências entre fontes",
+        "divergencias entre fontes",
+    )
+    if any(marker in txt for marker in source_audit_markers):
+        return False
+
+    explicit_review_markers = (
+        "mesa de melhorias",
+        "rodada de melhorias",
+        "review de melhorias",
+        "improvement review",
+        "platform improvement review",
+        "melhorias da plataforma",
+        "propostas de melhoria",
+        "sugestões de melhoria",
+        "sugestoes de melhoria",
+        "quick wins",
+        "melhorias estruturais",
+        "ordem recomendada de implementação",
+        "ordem recomendada de implementacao",
+        "ordem de implementação",
+        "ordem de implementacao",
+    )
+    if any(marker in txt for marker in explicit_review_markers):
+        return True
+
+    improvement_markers = (
+        "melhoria",
+        "melhorias",
+        "improvement",
+        "quick wins",
+        "estruturais",
+        "priorizadas",
+        "priorizados",
+        "sugestões",
+        "sugestoes",
+        "propostas",
+    )
+    scope_markers = (
+        "plataforma",
+        "app console",
+        "landing",
+        "fluxo de entrada",
+        "receipts",
+        "specialist reports",
+        "dispatch",
+        "observabilidade",
+        "logs",
+        "governança",
+        "governanca",
+        "capabilities",
+        "comandos",
+        "chat/stream",
+        "streaming",
+        "performance percebida",
+        "multiagente",
+        "multi-tenant",
+        "segurança",
+        "seguranca",
+        "ux",
+        "frontend",
+    )
+    write_markers = (
+        "aplicar patch",
+        "criar branch",
+        "abrir pr",
+        "merge",
+        "deploy",
+        "escrever arquivo",
+    )
+    return any(marker in txt for marker in improvement_markers) and any(marker in txt for marker in scope_markers) and not any(marker in txt for marker in write_markers)
+
+
 def _build_controlled_self_evolution_sections(selected_specialists: List[str]) -> Dict[str, Any]:
     premium = _build_premium_platform_audit_sections(selected_specialists)
     probable_files = [
@@ -1015,6 +1103,28 @@ def platform_self_evolution_plan(inp: "OrionRuntimeIn") -> Dict[str, Any]:
         ],
         "generated_at": _now_ts(),
     }
+
+
+def platform_improvement_review(inp: "OrionRuntimeIn") -> Dict[str, Any]:
+    payload = platform_self_evolution_plan(inp)
+    payload["mode"] = "platform_improvement_review"
+    payload["event"] = "PLATFORM_IMPROVEMENT_REVIEW_EXECUTED"
+    payload["report_format"] = "platform_improvement_review_v1"
+    payload["delivery_contract"] = "platform_improvement_review_v1"
+    payload["technical_summary"] = "Mesa técnica de melhorias executada em modo read-only/propose-only. A plataforma consolidou propostas novas e priorizadas sem acionar GitHub write, PR, merge ou deploy."
+    payload["focus_areas"] = [
+        "app_console",
+        "landing_and_entry_flow",
+        "dispatch_clarity",
+        "receipts_and_specialist_reports",
+        "observability_and_log_noise",
+        "governance_of_sensitive_actions",
+        "capabilities_and_commands_ux",
+        "chat_stream_performance",
+        "multiagent_coherence",
+        "security_and_multi_tenant_isolation",
+    ]
+    return payload
 
 
 def _audit_wants_full_execution(message: str, prepare_only: bool = False) -> bool:
@@ -2028,6 +2138,8 @@ def orion_runtime_execute(inp: "OrionRuntimeIn") -> Dict[str, Any]:
     message = inp.message or ""
     lowered = message.lower()
     visible_agent = _resolve_visible_agent(message, default="orion")
+    if _is_platform_improvement_review_request(message):
+        return platform_improvement_review(inp)
     if _is_controlled_self_evolution_propose_request(message):
         return platform_self_evolution_plan(inp)
     if _is_orion_direct_diagnostic_request(message, visible_agent):
