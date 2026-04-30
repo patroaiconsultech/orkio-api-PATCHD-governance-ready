@@ -12151,7 +12151,7 @@ def chat(
                     )
                     capability_inventory_answer = governed_dispatch.get("text")
                     execution_result = governed_dispatch.get("execution_result") if isinstance(governed_dispatch, dict) else None
-                elif _is_runtime_source_audit_request(inp.message) and not orion_only_flags.get("requested") and not _runtime_orion_dispatch_request_flags(inp.message).get("requested"):
+                elif _is_runtime_source_audit_request(inp.message) and not _is_controlled_self_evolution_propose_request_message(inp.message, runtime_enrichment=runtime_enrichment) and not orion_only_flags.get("requested") and not _runtime_orion_dispatch_request_flags(inp.message).get("requested"):
                     capability_inventory_answer = _build_runtime_source_audit_text(
                         db=db,
                         org=org,
@@ -15978,7 +15978,13 @@ async def chat_stream(
                     force_governed_branch_dispatch = False
                 if blocked_reply is None:
                     try:
-                        if force_governed_branch_dispatch or _is_github_write_request_or_authorization(message):
+                        if _is_controlled_self_evolution_propose_request_message(message, runtime_enrichment=runtime_enrichment):
+                            execution_result = _execute_capability_if_authorized(
+                                message,
+                                trace_id=trace_id,
+                                runtime_enrichment=runtime_enrichment,
+                            )
+                        elif force_governed_branch_dispatch or _is_github_write_request_or_authorization(message):
                             governed_dispatch = _dispatch_governed_github_write(
                                 org=org,
                                 thread_id=tid,
@@ -15989,7 +15995,7 @@ async def chat_stream(
                             )
                             capability_inventory_answer = governed_dispatch.get("text")
                             execution_result = governed_dispatch.get("execution_result") if isinstance(governed_dispatch, dict) else None
-                        elif _is_runtime_source_audit_request(message):
+                        elif _is_runtime_source_audit_request(message) and not _is_controlled_self_evolution_propose_request_message(message, runtime_enrichment=runtime_enrichment):
                             capability_inventory_answer = _build_runtime_source_audit_text(
                                 db=db,
                                 org=org,
