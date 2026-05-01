@@ -1550,17 +1550,23 @@ def _infer_progressive_dispatch_followup_subtype(message: str) -> str:
         return ""
     if "formato executivo" in txt or "diagnóstico executivo" in txt or "diagnostico executivo" in txt:
         return "executive_format"
+    if (
+        ("root causes" in txt or "causas raiz" in txt)
+        and ("risks" in txt or "riscos" in txt)
+        and ("next actions" in txt or "próximas ações" in txt or "proximas ações" in txt or "proximas acoes" in txt or "próximos passos" in txt or "proximos passos" in txt)
+    ):
+        return "root_causes_risks_next_actions"
     if "causas raiz" in txt and ("riscos estruturais" in txt or "riscos" in txt):
         return "root_causes_risks"
-    if "causas raiz" in txt:
+    if "root causes" in txt or "causas raiz" in txt:
         return "root_causes"
-    if "riscos estruturais" in txt:
+    if "riscos estruturais" in txt or "risks" in txt or "riscos" in txt:
         return "risks"
-    if "próximos passos" in txt or "proximos passos" in txt:
+    if "next actions" in txt or "próximas ações" in txt or "proximas ações" in txt or "proximas acoes" in txt or "próximos passos" in txt or "proximos passos" in txt:
         return "next_steps"
     if "sem perder evidências" in txt or "sem perder evidencias" in txt or "evidências técnicas" in txt or "evidencias tecnicas" in txt:
         return "evidence_preserving"
-    if any(term in txt for term in ("continue", "prossiga", "aprofunde", "desdobre", "expanda", "refine")):
+    if any(term in txt for term in ("continue", "prossiga", "aprofunde", "desdobre", "expanda", "refine", "incremental", "follow-up", "followup")):
         return "continuation"
     return ""
 
@@ -1569,11 +1575,56 @@ def _dispatch_render_strategy(followup_subtype: str) -> str:
     subtype = (followup_subtype or "").strip().lower()
     if subtype == "executive_format":
         return "dispatch_executive_replace"
+    if subtype == "root_causes_risks_next_actions":
+        return "dispatch_incremental_replace"
     if subtype in {"root_causes_risks", "root_causes", "risks", "next_steps", "evidence_preserving"}:
         return "dispatch_progressive_compact"
     if subtype == "continuation":
         return "dispatch_progressive_full"
     return "dispatch_full"
+
+
+def _derive_incremental_root_causes(specialist_reports: List[Dict[str, Any]]) -> List[str]:
+    out: List[str] = []
+    for report in list(specialist_reports or []):
+        findings = report.get("findings") if isinstance(report.get("findings"), list) else []
+        for finding in findings[:6]:
+            item = str(finding or "").strip()
+            if item and item not in out:
+                out.append(item)
+    return out[:4]
+
+
+def _derive_incremental_risks(*, technical_summary: str, confirmed_evidence: str, specialist_reports: List[Dict[str, Any]]) -> List[str]:
+    out: List[str] = []
+    for report in list(specialist_reports or []):
+        findings = report.get("findings") if isinstance(report.get("findings"), list) else []
+        for finding in findings[:4]:
+            item = str(finding or "").strip()
+            if item and item not in out:
+                out.append(f"Derivado de specialist_reports: {item}")
+                if len(out) >= 2:
+                    break
+        if len(out) >= 2:
+            break
+    if technical_summary:
+        out.append(f"Derivado de technical_summary: {technical_summary}")
+    if confirmed_evidence:
+        out.append(f"Confirmado por confirmed_evidence: {confirmed_evidence}")
+    return out[:4]
+
+
+def _derive_incremental_next_actions(*, final_consolidation: str, specialist_reports: List[Dict[str, Any]]) -> List[str]:
+    out: List[str] = []
+    if final_consolidation:
+        out.append(f"Derivado de final_consolidation: {final_consolidation}")
+    for report in list(specialist_reports or []):
+        actions = report.get("next_actions") if isinstance(report.get("next_actions"), list) else []
+        for action in actions[:6]:
+            item = str(action or "").strip()
+            if item and item not in out:
+                out.append(item)
+    return out[:5]
 
 
 def _build_dispatch_executive_sections(
@@ -1595,6 +1646,48 @@ def _build_dispatch_executive_sections(
         report_format = "dispatch_executive_followup_v1"
     elif progressive_followup:
         report_format = "dispatch_progressive_followup_v1"
+
+    if followup_subtype == "root_causes_risks_next_actions":
+        confirmed_evidence = (
+            f"Dispatch preservado com especialistas={counts['selected_specialists_count']}, "
+            f"receipts={counts['dispatch_receipts_count']} e reports={counts['specialist_reports_count']}."
+        )
+        technical_summary = (
+            "Aprofundamento incremental derivado do dispatch já concluído. "
+            "O backend deve responder a partir do contexto preservado, sem voltar ao recibo bruto."
+        )
+        final_consolidation = (
+            "A continuidade deve permanecer incremental: usar o dispatch confirmado como base, "
+            "preservar evidências essenciais e evitar repetir blocos operacionais completos."
+        )
+        return {
+            "report_format": "dispatch_incremental_followup_v1",
+            "technical_summary": technical_summary,
+            "root_causes": _derive_incremental_root_causes(specialist_reports),
+            "risks": _derive_incremental_risks(
+                technical_summary=technical_summary,
+                confirmed_evidence=confirmed_evidence,
+                specialist_reports=specialist_reports,
+            ),
+            "next_actions": _derive_incremental_next_actions(
+                final_consolidation=final_consolidation,
+                specialist_reports=specialist_reports,
+            ),
+            "derivation_basis": [
+                "specialist_reports",
+                "technical_summary",
+                "final_consolidation",
+                "confirmed_evidence",
+            ],
+            "executive_diagnostic": "",
+            "backend_assessment": "",
+            "frontend_assessment": "",
+            "integration_assessment": "",
+            "confirmed_evidence": confirmed_evidence,
+            "main_risk": "",
+            "recommended_actions": [],
+            "final_consolidation": final_consolidation,
+        }
 
     if direct_orion_diagnostic:
         if followup_subtype == "executive_format":
@@ -1965,8 +2058,13 @@ def _build_platform_self_audit_payload(inp: "OrionRuntimeIn", visible_agent: str
     specialist_reports = _audit_specialist_reports(selected_specialists, scope)
     followup_subtype = _infer_progressive_dispatch_followup_subtype(inp.message)
     render_strategy = _dispatch_render_strategy(followup_subtype)
-    executive_body_mode = "executive_replace" if followup_subtype == "executive_format" else ""
-    compact_dispatch_details = bool(executive_body_mode)
+    incremental_followup = followup_subtype == "root_causes_risks_next_actions"
+    executive_body_mode = (
+        "incremental_replace"
+        if incremental_followup
+        else ("executive_replace" if followup_subtype == "executive_format" else "")
+    )
+    compact_dispatch_details = bool(executive_body_mode or render_strategy in {"dispatch_incremental_replace", "dispatch_progressive_compact"})
     dispatch_receipts_appendix = list(dispatch_receipts or []) if compact_dispatch_details else []
     specialist_reports_appendix = list(specialist_reports or []) if compact_dispatch_details else []
     body_dispatch_receipts = [] if compact_dispatch_details else dispatch_receipts
@@ -2019,7 +2117,11 @@ def _build_platform_self_audit_payload(inp: "OrionRuntimeIn", visible_agent: str
         "execution_depth": "dispatch",
         "visible_agent": visible_agent,
         "repo": _github_repo(),
-        "followup_mode": "progressive_dispatch_followup" if followup_subtype else "execution_receipt",
+        "followup_mode": (
+            "incremental_analysis"
+            if incremental_followup
+            else ("progressive_dispatch_followup" if followup_subtype else "execution_receipt")
+        ),
         "followup_subtype": followup_subtype,
         "render_strategy": render_strategy,
         "response_body_mode": ("premium_audit_full_renderer" if premium_mode else executive_body_mode),
@@ -2030,6 +2132,8 @@ def _build_platform_self_audit_payload(inp: "OrionRuntimeIn", visible_agent: str
         "technical_summary": (
             "Varredura premium multiagente executada em modo somente leitura. A equipe técnica consolidou melhorias de UX, confiança, fluidez, mobile/PWA, billing e performance percebida sem acionar GitHub nem escrita governada."
             if premium_mode
+            else (executive_sections.get("technical_summary") or "").strip()
+            if incremental_followup
             else "Síntese executiva progressiva aplicada sobre dispatch confirmado. O backend preservou evidências essenciais e reduziu repetição estrutural."
             if followup_subtype == "executive_format"
             else "Aprofundamento progressivo aplicado sobre dispatch confirmado. A continuidade expandiu a leitura sem regressão de contrato."
@@ -2059,6 +2163,10 @@ def _build_platform_self_audit_payload(inp: "OrionRuntimeIn", visible_agent: str
         "specialist_reports": body_specialist_reports,
         "specialist_reports_count": counts.get("specialist_reports_count", 0),
         "specialist_reports_appendix": specialist_reports_appendix,
+        "root_causes": executive_sections.get("root_causes") or [],
+        "risks": executive_sections.get("risks") or [],
+        "next_actions": executive_sections.get("next_actions") or [],
+        "derivation_basis": executive_sections.get("derivation_basis") or [],
         "final_consolidation": (
             _build_premium_platform_audit_sections(selected_specialists).get("principal_premium_blocker")
             if premium_mode
