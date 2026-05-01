@@ -8179,9 +8179,16 @@ def _build_execution_result_payload(result: Dict[str, Any]) -> str:
     response_body_mode = (result.get("response_body_mode") or "").strip()
     compact_dispatch_details = bool(result.get("compact_dispatch_details"))
     executive_body_only = bool(
-        response_body_mode == "executive_replace"
-        or render_strategy in {"dispatch_executive_compact", "dispatch_executive_replace"}
-        or followup_subtype == "executive_format"
+        response_body_mode in {"executive_replace", "incremental_replace"}
+        or render_strategy in {"dispatch_executive_compact", "dispatch_executive_replace", "dispatch_incremental_replace"}
+        or followup_subtype in {"executive_format", "root_causes_risks_next_actions"}
+        or followup_mode == "incremental_analysis"
+    )
+    incremental_body_only = bool(
+        response_body_mode == "incremental_replace"
+        or render_strategy == "dispatch_incremental_replace"
+        or followup_subtype == "root_causes_risks_next_actions"
+        or followup_mode == "incremental_analysis"
     )
 
     pr_num = int(result.get("pull_request_number") or 0)
@@ -8208,6 +8215,8 @@ def _build_execution_result_payload(result: Dict[str, Any]) -> str:
     fragile_areas = result.get("fragile_areas") if isinstance(result.get("fragile_areas"), list) else None
     corrected_areas = result.get("corrected_areas") if isinstance(result.get("corrected_areas"), list) else None
     root_causes = result.get("root_causes") if isinstance(result.get("root_causes"), list) else None
+    next_actions = result.get("next_actions") if isinstance(result.get("next_actions"), list) else None
+    derivation_basis = result.get("derivation_basis") if isinstance(result.get("derivation_basis"), list) else None
     intent_misclassification_points = result.get("intent_misclassification_points") if isinstance(result.get("intent_misclassification_points"), list) else None
     routing_error_points = result.get("routing_error_points") if isinstance(result.get("routing_error_points"), list) else None
     execution_response_mismatches = result.get("execution_response_mismatches") if isinstance(result.get("execution_response_mismatches"), list) else None
@@ -8259,7 +8268,11 @@ def _build_execution_result_payload(result: Dict[str, Any]) -> str:
     specialist_fanout_applied = result.get("specialist_fanout_applied")
 
     if executive_body_only:
-        compact_parts = ["Diagnóstico executivo com confirmação operacional verificável."]
+        compact_parts = [
+            "Aprofundamento incremental com confirmação operacional verificável."
+            if incremental_body_only else
+            "Diagnóstico executivo com confirmação operacional verificável."
+        ]
         if event:
             compact_parts.append(f"event: {event}")
         if provider:
@@ -8272,27 +8285,41 @@ def _build_execution_result_payload(result: Dict[str, Any]) -> str:
             compact_parts.append(f"selected_specialists_count: {selected_specialists_count}")
         elif selected_specialists:
             compact_parts.append(f"selected_specialists_count: {len(selected_specialists)}")
-        if executive_diagnostic:
+        if incremental_body_only:
+            if root_causes:
+                compact_parts.append("root_causes:")
+                compact_parts.extend(f"- {str(item)}" for item in root_causes[:6])
+            if risks:
+                compact_parts.append("risks:")
+                compact_parts.extend(f"- {str(item)}" for item in risks[:6])
+            if next_actions:
+                compact_parts.append("next_actions:")
+                compact_parts.extend(f"- {str(item)}" for item in next_actions[:6])
+            if derivation_basis:
+                compact_parts.append("derivation_basis:")
+                compact_parts.extend(f"- {str(item)}" for item in derivation_basis[:8])
+        elif executive_diagnostic:
             compact_parts.append("diagnóstico executivo:")
             compact_parts.append(executive_diagnostic)
-        if confirmed_evidence:
-            compact_parts.append("evidências confirmadas:")
-            compact_parts.append(confirmed_evidence)
-        elif dispatch_receipts_count not in (None, "") or specialist_reports_count not in (None, ""):
-            compact_parts.append("evidências confirmadas:")
-            compact_parts.append(
-                "Dispatch preservado com "
-                f"{dispatch_receipts_count or 0} receipt(s) e {specialist_reports_count or 0} relatório(s) especializado(s)."
-            )
-        if main_risk:
-            compact_parts.append("risco principal:")
-            compact_parts.append(main_risk)
-        if recommended_actions:
-            compact_parts.append("próximos passos:")
-            compact_parts.extend(f"- {str(item)}" for item in recommended_actions[:6])
-        if final_consolidation:
-            compact_parts.append("fechamento:")
-            compact_parts.append(final_consolidation)
+        if not incremental_body_only:
+            if confirmed_evidence:
+                compact_parts.append("evidências confirmadas:")
+                compact_parts.append(confirmed_evidence)
+            elif dispatch_receipts_count not in (None, "") or specialist_reports_count not in (None, ""):
+                compact_parts.append("evidências confirmadas:")
+                compact_parts.append(
+                    "Dispatch preservado com "
+                    f"{dispatch_receipts_count or 0} receipt(s) e {specialist_reports_count or 0} relatório(s) especializado(s)."
+                )
+            if main_risk:
+                compact_parts.append("risco principal:")
+                compact_parts.append(main_risk)
+            if recommended_actions:
+                compact_parts.append("próximos passos:")
+                compact_parts.extend(f"- {str(item)}" for item in recommended_actions[:6])
+            if final_consolidation:
+                compact_parts.append("fechamento:")
+                compact_parts.append(final_consolidation)
         return "\n".join([str(x).rstrip() for x in compact_parts if str(x).strip()])
 
     if commit_sha:
@@ -8477,30 +8504,44 @@ def _build_execution_result_payload(result: Dict[str, Any]) -> str:
         return "\n".join([str(x).rstrip() for x in parts if str(x).strip()])
 
     if report_format in {"dispatch_audit_v1", "dispatch_audit_v2", "orion_diagnostic_v1", "orion_diagnostic_prose_v2", "dispatch_executive_followup_v1", "dispatch_progressive_followup_v1"} or event == "PLATFORM_SELF_AUDIT_DISPATCH_EXECUTED" or event == "ORION_RUNTIME_DIAGNOSTIC_EXECUTED" or execution_depth == "dispatch":
-        suppress_dispatch_detail_blocks = compact_dispatch_details or executive_body_only or render_strategy in {"dispatch_executive_compact", "dispatch_executive_replace", "dispatch_progressive_compact"}
-        if executive_diagnostic:
-            parts.append("executive_diagnostic:")
-            parts.append(executive_diagnostic)
-        if backend_assessment:
-            parts.append("backend_assessment:")
-            parts.append(backend_assessment)
-        if frontend_assessment:
-            parts.append("frontend_assessment:")
-            parts.append(frontend_assessment)
-        if integration_assessment:
-            parts.append("integration_assessment:")
-            parts.append(integration_assessment)
-        if confirmed_evidence:
-            parts.append("confirmed_evidence:")
-            parts.append(confirmed_evidence)
-        if main_risk:
-            parts.append("main_risk:")
-            parts.append(main_risk)
-        if recommended_actions:
-            parts.append("recommended_actions:")
-            parts.extend(f"- {str(item)}" for item in recommended_actions[:20])
+        suppress_dispatch_detail_blocks = compact_dispatch_details or executive_body_only or incremental_body_only or render_strategy in {"dispatch_executive_compact", "dispatch_executive_replace", "dispatch_progressive_compact", "dispatch_incremental_replace"}
+        if incremental_body_only:
+            if root_causes:
+                parts.append("root_causes:")
+                parts.extend(f"- {str(item)}" for item in root_causes[:10])
+            if risks:
+                parts.append("risks:")
+                parts.extend(f"- {str(item)}" for item in risks[:10])
+            if next_actions:
+                parts.append("next_actions:")
+                parts.extend(f"- {str(item)}" for item in next_actions[:10])
+            if derivation_basis:
+                parts.append("derivation_basis:")
+                parts.extend(f"- {str(item)}" for item in derivation_basis[:10])
+        else:
+            if executive_diagnostic:
+                parts.append("executive_diagnostic:")
+                parts.append(executive_diagnostic)
+            if backend_assessment:
+                parts.append("backend_assessment:")
+                parts.append(backend_assessment)
+            if frontend_assessment:
+                parts.append("frontend_assessment:")
+                parts.append(frontend_assessment)
+            if integration_assessment:
+                parts.append("integration_assessment:")
+                parts.append(integration_assessment)
+            if confirmed_evidence:
+                parts.append("confirmed_evidence:")
+                parts.append(confirmed_evidence)
+            if main_risk:
+                parts.append("main_risk:")
+                parts.append(main_risk)
+            if recommended_actions:
+                parts.append("recommended_actions:")
+                parts.extend(f"- {str(item)}" for item in recommended_actions[:20])
 
-        if selected_specialists and suppress_dispatch_detail_blocks:
+        if selected_specialists and suppress_dispatch_detail_blocks and not incremental_body_only:
             parts.append("selected_specialists:")
             parts.append(", ".join(str(item) for item in selected_specialists[:20]))
         elif selected_specialists:
@@ -8550,14 +8591,12 @@ def _build_execution_result_payload(result: Dict[str, Any]) -> str:
 
         # suprime os blocos consultivos legados quando o retorno é de dispatch real
         findings = None
-        risks = None
         suggested_actions = None
         facts_observed = None
         evidence_points = None
         inferences = None
         fragile_areas = None
         corrected_areas = None
-        root_causes = None
         intent_misclassification_points = None
         routing_error_points = None
         execution_response_mismatches = None
@@ -8568,6 +8607,14 @@ def _build_execution_result_payload(result: Dict[str, Any]) -> str:
         specialist_views = None
         technical_debts_by_severity = None
         maturity_conclusion = ""
+        if incremental_body_only:
+            risks = None
+            root_causes = None
+            next_actions = None
+            derivation_basis = None
+        else:
+            risks = None
+            root_causes = None
 
     if report_format == "full_audit_v1":
         parts.append("1. Fatos observados")
@@ -8744,6 +8791,21 @@ def _build_execution_result_payload(result: Dict[str, Any]) -> str:
     if suggested_actions:
         parts.append("suggested_actions:")
         for item in suggested_actions[:20]:
+            parts.append(f"- {str(item)}")
+
+    if root_causes:
+        parts.append("root_causes:")
+        for item in root_causes[:20]:
+            parts.append(f"- {str(item)}")
+
+    if next_actions:
+        parts.append("next_actions:")
+        for item in next_actions[:20]:
+            parts.append(f"- {str(item)}")
+
+    if derivation_basis:
+        parts.append("derivation_basis:")
+        for item in derivation_basis[:20]:
             parts.append(f"- {str(item)}")
 
     if key_files:
@@ -10525,13 +10587,15 @@ def _coerce_platform_audit_dispatch_result(
         or ""
     ).strip().lower()
 
-    if runtime_kind not in {"platform_audit", "premium_platform_audit"}:
+    if runtime_kind not in {"platform_audit", "premium_platform_audit", "dispatch_incremental_followup"}:
         return normalized
     if not bool(normalized.get("success")):
         return normalized
 
     wants_dispatch = (
         desired_depth == "dispatch"
+        or runtime_kind == "dispatch_incremental_followup"
+        or runtime_operation.get("incremental_dispatch_followup") is True
         or (
             runtime_operation.get("prepare_only") is False
             and (
@@ -10566,6 +10630,8 @@ def _coerce_platform_audit_dispatch_result(
     normalized["report_format"] = (
         "premium_platform_audit_v1"
         if premium_audit
+        else "dispatch_incremental_followup_v1"
+        if runtime_kind == "dispatch_incremental_followup"
         else "orion_diagnostic_v1" if direct_orion else "dispatch_audit_v1"
     )
     normalized["provider"] = str(normalized.get("provider") or "platform").strip() or "platform"
