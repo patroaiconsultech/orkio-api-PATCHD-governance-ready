@@ -247,6 +247,69 @@ def _looks_like_privileged_admin_read(text: str) -> bool:
     return bool((has_admin or has_read) and has_read and not has_write)
 
 
+def _has_completed_dispatch_context(context: Optional[Dict[str, Any]]) -> bool:
+    ctx = dict(context or {})
+    if str(ctx.get("execution_depth") or "").strip().lower() == "dispatch":
+        return True
+    if int(ctx.get("selected_specialists_count") or 0) > 0:
+        return True
+    if int(ctx.get("dispatch_receipts_count") or 0) > 0:
+        return True
+    if int(ctx.get("specialist_reports_count") or 0) > 0:
+        return True
+
+    runtime_enrichment = ctx.get("runtime_enrichment")
+    if isinstance(runtime_enrichment, dict):
+        if str(runtime_enrichment.get("execution_depth") or "").strip().lower() == "dispatch":
+            return True
+        if int(runtime_enrichment.get("selected_specialists_count") or 0) > 0:
+            return True
+        if int(runtime_enrichment.get("dispatch_receipts_count") or 0) > 0:
+            return True
+        if int(runtime_enrichment.get("specialist_reports_count") or 0) > 0:
+            return True
+
+    return False
+
+
+def _looks_like_incremental_dispatch_followup_request(text: str) -> bool:
+    txt = _normalize(text)
+    if not txt:
+        return False
+
+    followup_markers = [
+        "root causes",
+        "causas raiz",
+        "risks",
+        "riscos",
+        "next actions",
+        "próximas ações",
+        "proximas ações",
+        "proximas acoes",
+        "próximos passos",
+        "proximos passos",
+        "aprofundamento",
+        "incremental",
+        "follow-up",
+        "followup",
+        "derivação do dispatch",
+        "derivacao do dispatch",
+        "derivado do dispatch",
+        "derivam de",
+        "derivado de specialist_reports",
+        "derivado de technical_summary",
+        "derivado de final_consolidation",
+        "derivado de confirmed_evidence",
+        "não repetir o recibo completo",
+        "nao repetir o recibo completo",
+        "não repetir specialist_reports",
+        "nao repetir specialist_reports",
+        "execution_depth=dispatch",
+        "execution depth dispatch",
+    ]
+    return _contains_any(txt, followup_markers)
+
+
 def _infer_action_scope(text: str) -> str:
     txt = _normalize(text)
     if _looks_like_privileged_admin_read(txt):
@@ -321,12 +384,27 @@ def build_intent_package(
     context = dict(context or {})
     context["message"] = user_input or ""
 
-    platform_improvement_review = _looks_like_platform_improvement_review_request(user_input or "")
+    has_completed_dispatch_context = _has_completed_dispatch_context(context)
+    incremental_dispatch_followup = (
+        has_completed_dispatch_context
+        and _looks_like_incremental_dispatch_followup_request(user_input or "")
+    )
+
+    platform_improvement_review = (
+        False if incremental_dispatch_followup
+        else _looks_like_platform_improvement_review_request(user_input or "")
+    )
+
     action_scope = _infer_action_scope(text)
     target_scope = _infer_target_scope(text)
     capability_name = _infer_capability(action_scope, text)
 
-    if platform_improvement_review:
+    if incremental_dispatch_followup:
+        intent = "dispatch_incremental_followup"
+        capability_name = "platform_self_audit"
+        action_scope = "diagnose"
+        target_scope = "platform"
+    elif platform_improvement_review:
         intent = "platform_improvement_review"
     elif capability_name == "platform_self_audit":
         intent = "platform_self_audit"
@@ -341,12 +419,24 @@ def build_intent_package(
     team_technical_audit = _looks_like_team_technical_audit_request(user_input or "")
     excluded_agents = _excluded_agents(user_input or "")
 
-    if orion_only or team_technical_audit:
+    if incremental_dispatch_followup:
+        team_technical_audit = False
+        platform_improvement_review = False
+        orion_only = True
+    elif orion_only or team_technical_audit:
         capability_name = capability_name or "platform_self_audit"
         intent = "platform_self_audit"
         platform_improvement_review = False
 
-    runtime_kind = "controlled_self_evolution_propose_only" if platform_improvement_review else (intent if intent != "general_guidance" else "")
+    runtime_kind = (
+        "dispatch_incremental_followup"
+        if incremental_dispatch_followup
+        else (
+            "controlled_self_evolution_propose_only"
+            if platform_improvement_review
+            else (intent if intent != "general_guidance" else "")
+        )
+    )
 
     governance_decision = evaluate_governance_action(
         action_scope=action_scope,
@@ -356,7 +446,15 @@ def build_intent_package(
         safe_mode=bool(context.get("safe_mode", False)),
     )
 
-    if platform_improvement_review:
+    if incremental_dispatch_followup:
+        recommended_agents = ["orion", "auditor", "cto"]
+        advisor_agents = ["orion", "auditor", "cto", "metatron"]
+        target_agent = "orion"
+        delivery_contract = "orion_incremental_dispatch_followup_v1"
+        structured_output = True
+        expected_specialist_reports = ["orion", "auditor", "cto"]
+        visible_signer_expected = "orion"
+    elif platform_improvement_review:
         recommended_agents = ["orkio", "orion", "auditor", "cto"]
         advisor_agents = ["orion", "auditor", "cto", "metatron"]
         target_agent = "orkio"
@@ -392,14 +490,35 @@ def build_intent_package(
         "excluded_agents": excluded_agents,
         "team_technical_audit": bool(team_technical_audit),
         "platform_improvement_review": bool(platform_improvement_review),
-        "execution_mode": "propose_only_dispatch" if platform_improvement_review else ("read_only_dispatch" if team_technical_audit else None),
+        "incremental_dispatch_followup": bool(incremental_dispatch_followup),
+        "execution_mode": (
+            "incremental_analysis"
+            if incremental_dispatch_followup
+            else (
+                "propose_only_dispatch"
+                if platform_improvement_review
+                else ("read_only_dispatch" if team_technical_audit else None)
+            )
+        ),
+        "followup_mode": "incremental_analysis" if incremental_dispatch_followup else None,
+        "followup_subtype": "root_causes_risks_next_actions" if incremental_dispatch_followup else None,
+        "use_dispatch_context_only": bool(incremental_dispatch_followup),
+        "suppress_receipt_body": bool(incremental_dispatch_followup),
+        "derivation_basis": (
+            ["specialist_reports", "technical_summary", "final_consolidation", "confirmed_evidence"]
+            if incremental_dispatch_followup
+            else []
+        ),
         "expected_specialist_reports": expected_specialist_reports,
-        "force_dispatch": bool(platform_improvement_review),
+        "force_dispatch": bool(platform_improvement_review or incremental_dispatch_followup),
     }
 
     payload = {
         "intent": intent,
-        "confidence": 0.99 if platform_improvement_review else (0.98 if runtime_op.get("kind") else 0.62),
+        "confidence": (
+            0.99 if platform_improvement_review
+            else (0.99 if incremental_dispatch_followup else (0.98 if runtime_op.get("kind") else 0.62))
+        ),
         "recommended_agents": recommended_agents,
         "advisor_agents": advisor_agents,
         "runtime_operation": runtime_op,
@@ -418,7 +537,9 @@ def build_intent_package(
         "requires_write_approval": requires_write_approval,
         "team_technical_audit": bool(team_technical_audit),
         "platform_improvement_review": bool(platform_improvement_review),
+        "incremental_dispatch_followup": bool(incremental_dispatch_followup),
         "expected_specialist_reports": expected_specialist_reports,
+        "has_completed_dispatch_context": bool(has_completed_dispatch_context),
     }
     payload.update(_runtime_self_audit_override(intent))
     return payload
