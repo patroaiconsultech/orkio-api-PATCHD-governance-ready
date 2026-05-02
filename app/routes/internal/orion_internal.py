@@ -114,18 +114,8 @@ def _excluded_agents_from_message(message: str) -> List[str]:
     return excluded
 
 
-def _strip_constraint_token(value: Any) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    raw = re.sub(r"^\s*[-*•]+\s*", "", raw)
-    raw = re.sub(r"^\s*\d+[.)]\s*", "", raw)
-    return raw.strip()
-
-
 def _canonical_dispatch_actor(value: Any) -> str:
-    cleaned = _strip_constraint_token(value)
-    raw = cleaned.lower().replace("@", "").replace("-", "_").replace(" ", "_")
+    raw = str(value or "").strip().lower().replace("@", "").replace("-", "_").replace(" ", "_")
     if not raw:
         return ""
     aliases = {
@@ -156,7 +146,7 @@ def _extract_constraint_scalar(message: str, keys: List[str]) -> str:
     for key in keys:
         match = re.search(rf"(?im)^\s*{re.escape(key)}\s*[:=]\s*([^\n#]+?)\s*$", raw)
         if match:
-            return _canonical_dispatch_actor(_strip_constraint_token(match.group(1).strip(" -*•")))
+            return _canonical_dispatch_actor(match.group(1).strip(" -"))
     return ""
 
 
@@ -177,7 +167,7 @@ def _extract_constraint_list(message: str, keys: List[str]) -> List[str]:
             active = True
             inline = stripped.split(":", 1)[1].strip()
             if inline:
-                out.extend([_strip_constraint_token(p) for p in re.split(r"[,;]", inline) if _strip_constraint_token(p)])
+                out.extend([p.strip() for p in re.split(r"[,;]", inline) if p.strip()])
             continue
         if not active:
             continue
@@ -185,15 +175,8 @@ def _extract_constraint_list(message: str, keys: List[str]) -> List[str]:
             if out:
                 break
             continue
-        if re.match(r"^\s*[-*•]\s+", line):
-            item = _strip_constraint_token(stripped)
-            if item:
-                out.append(item)
-            continue
-        if re.match(r"^\s*\d+[.)]\s+", line):
-            item = _strip_constraint_token(stripped)
-            if item:
-                out.append(item)
+        if stripped.startswith("-"):
+            out.append(stripped[1:].strip())
             continue
         if re.match(r"^[A-Za-z0-9_/@.-]+\s*[:=]", stripped):
             break
@@ -204,11 +187,7 @@ def _extract_constraint_list(message: str, keys: List[str]) -> List[str]:
     for key in keys:
         match = re.search(rf"(?im)^\s*{re.escape(key)}\s*[:=]\s*([^\n#]+?)\s*$", raw)
         if match:
-            return _dedupe_dispatch_actors([
-                _strip_constraint_token(p)
-                for p in re.split(r"[,;]", match.group(1))
-                if _strip_constraint_token(p)
-            ])
+            return _dedupe_dispatch_actors([p.strip() for p in re.split(r"[,;]", match.group(1)) if p.strip()])
     return []
 
 
@@ -315,6 +294,9 @@ def _constraint_violation_payload(message: str, *, constraints: Dict[str, Any], 
 def _is_orion_only_request(message: str) -> bool:
     raw = (message or "").strip().lower()
     if not raw:
+        return False
+    constraints = _extract_hard_constraints(message)
+    if len(list(constraints.get("specialists_required") or [])) > 1:
         return False
     if not re.search(r"@orion\b|\borion\b", raw, flags=re.IGNORECASE):
         return False
