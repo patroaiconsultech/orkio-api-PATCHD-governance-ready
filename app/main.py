@@ -16118,6 +16118,7 @@ async def chat_stream(
     _stream_started_at = now_ts()
     _stream_started_monotonic = time.monotonic()
     _stream_final_text = ""
+    _stream_persisted_assistant_message_id: Optional[str] = None
     _stream_final_agent_id = None
     _stream_final_agent_name = None
     _stream_final_voice_id = None
@@ -16132,7 +16133,14 @@ async def chat_stream(
             return 0
 
     def sse_event(ev: str, data: Dict[str, Any]) -> str:
-        return f"event: {ev}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+        try:
+            payload_json = json.dumps(data, ensure_ascii=False, default=str)
+        except Exception:
+            try:
+                payload_json = json.dumps({"event": ev, "fallback_payload": str(data)}, ensure_ascii=False, default=str)
+            except Exception:
+                payload_json = "{}"
+        return f"event: {ev}\ndata: {payload_json}\n\n"
 
     def sse_execution(
         step: str,
@@ -16875,6 +16883,7 @@ async def chat_stream(
                     )
                     db.add(m_ass)
                     db.commit()
+                    _stream_persisted_assistant_message_id = m_ass_id
                     try:
                         db.refresh(m_ass)
                     except Exception:
@@ -17198,6 +17207,49 @@ async def chat_stream(
                 db.rollback()
             except Exception:
                 pass
+            try:
+                if not _stream_persisted_assistant_message_id and not await request.is_disconnected():
+                    fallback_signer = None
+                    try:
+                        fallback_signer = _resolve_runtime_final_signer(
+                            runtime_primary_agent or (target_agents[0] if target_agents else None),
+                            runtime_primary_agent,
+                            should_execute_runtime,
+                        )
+                    except Exception:
+                        fallback_signer = runtime_primary_agent or (target_agents[0] if target_agents else None)
+
+                    fallback_agent_id = _agent_attr(fallback_signer, "id", None)
+                    fallback_agent_name = _agent_attr(fallback_signer, "name", "Orion") or "Orion"
+                    fallback_voice_id = _agent_attr(fallback_signer, "voice_id", None)
+                    fallback_avatar_url = _agent_attr(fallback_signer, "avatar_url", None)
+                    fallback_text = (
+                        "Execução interrompida antes da resposta final. "
+                        "Nenhuma conclusão operacional foi registrada neste turno."
+                    )
+                    m_fail = Message(
+                        id=new_id(),
+                        org_slug=org,
+                        thread_id=tid,
+                        role="assistant",
+                        content=fallback_text,
+                        agent_id=fallback_agent_id,
+                        agent_name=fallback_agent_name,
+                        created_at=now_ts(),
+                    )
+                    db.add(m_fail)
+                    db.commit()
+                    _stream_persisted_assistant_message_id = m_fail.id
+                    _stream_final_text = fallback_text
+                    _stream_final_agent_id = fallback_agent_id
+                    _stream_final_agent_name = fallback_agent_name
+                    _stream_final_voice_id = fallback_voice_id
+                    _stream_final_avatar_url = fallback_avatar_url
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
             try:
                 yield sse_execution(
                     "stream_failed",
