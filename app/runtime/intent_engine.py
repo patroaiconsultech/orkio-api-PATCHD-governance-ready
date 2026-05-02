@@ -38,8 +38,20 @@ def _excluded_agents(text: str) -> list[str]:
 
 
 
+def _strip_constraint_token(value: Any) -> str:
+    raw = str(value or "").strip()
+    prev = None
+    while raw and raw != prev:
+        prev = raw
+        raw = re.sub(r"^\s*[-*•]+\s*", "", raw)
+        raw = re.sub(r"^\s*\d+[.)]\s*", "", raw)
+        raw = raw.strip()
+    return raw
+
+
 def _canonical_dispatch_actor(value: Any) -> str:
-    raw = _normalize(str(value or "").replace("@", " ").replace("-", "_").replace(" ", "_"))
+    cleaned = _strip_constraint_token(value)
+    raw = _normalize(str(cleaned or "").replace("@", " ").replace("-", "_").replace(" ", "_"))
     if not raw:
         return ""
     aliases = {
@@ -53,7 +65,6 @@ def _canonical_dispatch_actor(value: Any) -> str:
         "cto_runtime": "orion",
     }
     return aliases.get(raw, raw)
-
 
 def _dedupe_preserve(items: list[str]) -> list[str]:
     out: list[str] = []
@@ -72,7 +83,7 @@ def _extract_constraint_scalar(text: str, keys: list[str]) -> str:
         pattern = rf"(?im)^\s*{re.escape(key)}\s*[:=]\s*([^\n#]+?)\s*$"
         match = re.search(pattern, raw)
         if match:
-            return _canonical_dispatch_actor(match.group(1).strip(" -"))
+            return _canonical_dispatch_actor(_strip_constraint_token(match.group(1)))
     return ""
 
 
@@ -91,10 +102,10 @@ def _extract_constraint_list(text: str, keys: list[str]) -> list[str]:
                 break
         if matched_key is not None:
             active = True
-            inline = stripped.split(":", 1)[1].strip()
+            inline = _strip_constraint_token(stripped.split(":", 1)[1].strip())
             if inline:
-                parts = [p.strip() for p in re.split(r"[,;]", inline) if p.strip()]
-                collected.extend(parts)
+                parts = [_strip_constraint_token(p) for p in re.split(r"[,;]", inline)]
+                collected.extend([p for p in parts if p])
             continue
         if not active:
             continue
@@ -102,8 +113,8 @@ def _extract_constraint_list(text: str, keys: list[str]) -> list[str]:
             if collected:
                 break
             continue
-        if stripped.startswith("-"):
-            collected.append(stripped[1:].strip())
+        if re.match(r"^\s*(?:[-*•]\s+|\d+[.)]\s+)", stripped):
+            collected.append(_strip_constraint_token(stripped))
             continue
         if re.match(r"^[A-Za-z0-9_/@.-]+\s*[:=]", stripped):
             break
@@ -116,9 +127,9 @@ def _extract_constraint_list(text: str, keys: list[str]) -> list[str]:
         pattern = rf"(?im)^\s*{re.escape(key)}\s*[:=]\s*([^\n#]+?)\s*$"
         match = re.search(pattern, raw)
         if match:
-            return _dedupe_preserve([p.strip() for p in re.split(r"[,;]", match.group(1)) if p.strip()])
+            parts = [_strip_constraint_token(p) for p in re.split(r"[,;]", match.group(1))]
+            return _dedupe_preserve([p for p in parts if p])
     return []
-
 
 def _extract_constraint_count(text: str) -> Optional[int]:
     raw = text or ""
