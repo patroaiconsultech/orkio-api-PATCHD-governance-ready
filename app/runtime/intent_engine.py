@@ -38,18 +38,8 @@ def _excluded_agents(text: str) -> list[str]:
 
 
 
-def _strip_constraint_token(value: Any) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    raw = re.sub(r"^\s*[-*•]+\s*", "", raw)
-    raw = re.sub(r"^\s*\d+[.)]\s*", "", raw)
-    return raw.strip()
-
-
 def _canonical_dispatch_actor(value: Any) -> str:
-    cleaned = _strip_constraint_token(value)
-    raw = _normalize(cleaned.replace("@", " ").replace("-", "_").replace(" ", "_"))
+    raw = _normalize(str(value or "").replace("@", " ").replace("-", "_").replace(" ", "_"))
     if not raw:
         return ""
     aliases = {
@@ -82,7 +72,7 @@ def _extract_constraint_scalar(text: str, keys: list[str]) -> str:
         pattern = rf"(?im)^\s*{re.escape(key)}\s*[:=]\s*([^\n#]+?)\s*$"
         match = re.search(pattern, raw)
         if match:
-            return _canonical_dispatch_actor(_strip_constraint_token(match.group(1).strip(" -*•")))
+            return _canonical_dispatch_actor(match.group(1).strip(" -"))
     return ""
 
 
@@ -103,7 +93,7 @@ def _extract_constraint_list(text: str, keys: list[str]) -> list[str]:
             active = True
             inline = stripped.split(":", 1)[1].strip()
             if inline:
-                parts = [_strip_constraint_token(p) for p in re.split(r"[,;]", inline) if _strip_constraint_token(p)]
+                parts = [p.strip() for p in re.split(r"[,;]", inline) if p.strip()]
                 collected.extend(parts)
             continue
         if not active:
@@ -112,15 +102,8 @@ def _extract_constraint_list(text: str, keys: list[str]) -> list[str]:
             if collected:
                 break
             continue
-        if re.match(r"^\s*[-*•]\s+", line):
-            item = _strip_constraint_token(stripped)
-            if item:
-                collected.append(item)
-            continue
-        if re.match(r"^\s*\d+[.)]\s+", line):
-            item = _strip_constraint_token(stripped)
-            if item:
-                collected.append(item)
+        if stripped.startswith("-"):
+            collected.append(stripped[1:].strip())
             continue
         if re.match(r"^[A-Za-z0-9_/@.-]+\s*[:=]", stripped):
             break
@@ -133,11 +116,7 @@ def _extract_constraint_list(text: str, keys: list[str]) -> list[str]:
         pattern = rf"(?im)^\s*{re.escape(key)}\s*[:=]\s*([^\n#]+?)\s*$"
         match = re.search(pattern, raw)
         if match:
-            return _dedupe_preserve([
-                _strip_constraint_token(p)
-                for p in re.split(r"[,;]", match.group(1))
-                if _strip_constraint_token(p)
-            ])
+            return _dedupe_preserve([p.strip() for p in re.split(r"[,;]", match.group(1)) if p.strip()])
     return []
 
 
@@ -191,6 +170,9 @@ def _apply_dispatch_constraints(default_agents: list[str], *, required: list[str
 def _looks_like_orion_only_request(text: str) -> bool:
     txt = _normalize(text)
     if not txt:
+        return False
+    hard_constraints = _extract_hard_constraints(text or "")
+    if len(list(hard_constraints.get("specialists_required") or [])) > 1:
         return False
     if not re.search(r"@orion\b|\borion\b", txt, flags=re.IGNORECASE):
         return False
@@ -571,8 +553,11 @@ def build_intent_package(
     specialists_required = list(hard_constraints.get("specialists_required") or [])
     specialists_forbidden = list(hard_constraints.get("specialists_forbidden") or [])
     selected_specialists_count_must_be = hard_constraints.get("selected_specialists_count_must_be")
+    multi_specialist_constraint = len(specialists_required) > 1
     orion_only = _looks_like_orion_only_request(user_input or "")
-    if required_signer == "orion":
+    if multi_specialist_constraint:
+        orion_only = False
+    elif required_signer == "orion":
         orion_only = True
     team_technical_audit = _looks_like_team_technical_audit_request(user_input or "")
     excluded_agents = _dedupe_preserve(_excluded_agents(user_input or "") + specialists_forbidden)
