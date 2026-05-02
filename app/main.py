@@ -5674,6 +5674,250 @@ def _canonical_runtime_agent_slug(name: Any) -> Optional[str]:
 
 
 
+
+def _canonical_dispatch_specialist_slug(name: Any) -> Optional[str]:
+    raw = str(name or "").strip().lower().replace("@", "").replace("-", "_").replace(" ", "_")
+    if not raw:
+        return None
+    aliases = {
+        "ux/frontend": "ux_frontend",
+        "ux_frontend": "ux_frontend",
+        "ux": "ux_frontend",
+        "frontend": "ux_frontend",
+        "front_end": "ux_frontend",
+        "orion_cto": "orion",
+        "cto_runtime": "orion",
+        "technical_auditor": "auditor",
+        "systems_architect": "cto",
+    }
+    slug = aliases.get(raw, raw)
+    if slug.startswith("orion"):
+        return "orion"
+    if slug.startswith("orkio"):
+        return "orkio"
+    if slug.startswith("chris"):
+        return "chris"
+    if slug.startswith("auditor") or "auditor" in slug:
+        return "auditor"
+    if slug.startswith("cto"):
+        return "cto"
+    if slug in {"architect", "devops", "security", "memory_ops", "stage_manager", "ux_frontend"}:
+        return slug
+    return slug
+
+
+def _runtime_hard_constraints_from_enrichment(runtime_enrichment: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(runtime_enrichment, dict):
+        return {}
+    intent_package = runtime_enrichment.get("intent_package") if isinstance(runtime_enrichment.get("intent_package"), dict) else {}
+    runtime_operation = intent_package.get("runtime_operation") if isinstance(intent_package.get("runtime_operation"), dict) else {}
+    required_signer = _canonical_dispatch_specialist_slug(runtime_operation.get("required_signer"))
+    specialists_required = [
+        slug for slug in (_canonical_dispatch_specialist_slug(item) for item in list(runtime_operation.get("specialists_required") or runtime_operation.get("requested_specialists") or []))
+        if slug
+    ]
+    seen_required = set()
+    specialists_required = [slug for slug in specialists_required if not (slug in seen_required or seen_required.add(slug))]
+    specialists_forbidden = [
+        slug for slug in (_canonical_dispatch_specialist_slug(item) for item in list(runtime_operation.get("specialists_forbidden") or runtime_operation.get("excluded_agents") or []))
+        if slug
+    ]
+    seen_forbidden = set()
+    specialists_forbidden = [slug for slug in specialists_forbidden if not (slug in seen_forbidden or seen_forbidden.add(slug))]
+    count_must_be = runtime_operation.get("selected_specialists_count_must_be")
+    try:
+        count_must_be = int(count_must_be) if count_must_be is not None else (len(specialists_required) if specialists_required else None)
+    except Exception:
+        count_must_be = len(specialists_required) if specialists_required else None
+    has_hard_constraints = bool(required_signer or specialists_required or specialists_forbidden or count_must_be is not None or runtime_operation.get("hard_constraints_present"))
+    return {
+        "required_signer": required_signer,
+        "specialists_required": specialists_required,
+        "specialists_forbidden": specialists_forbidden,
+        "selected_specialists_count_must_be": count_must_be,
+        "has_hard_constraints": has_hard_constraints,
+    }
+
+
+def _build_runtime_constraint_violation_text(constraints: Dict[str, Any], violations: List[str]) -> str:
+    lines = ["CONSTRAINT_VIOLATION"]
+    if constraints.get("required_signer"):
+        lines.append(f"- required_signer={constraints.get('required_signer')}")
+    if constraints.get("specialists_required"):
+        lines.append("- specialists_required=" + ",".join(list(constraints.get("specialists_required") or [])))
+    if constraints.get("specialists_forbidden"):
+        lines.append("- specialists_forbidden=" + ",".join(list(constraints.get("specialists_forbidden") or [])))
+    if constraints.get("selected_specialists_count_must_be") is not None:
+        lines.append(f"- selected_specialists_count_must_be={int(constraints.get('selected_specialists_count_must_be'))}")
+    if violations:
+        lines.append("- violations:")
+        lines.extend([f"  - {item}" for item in violations])
+    lines.append("- dispatch aborted before execution")
+    return "\n".join(lines)
+
+
+def _apply_runtime_hard_constraints_to_targets(
+    *,
+    target_agents: List[Any],
+    alias_to_agent: Dict[str, Any],
+    requested_names: Optional[List[str]],
+    mention_tokens: Optional[List[str]],
+    has_team: bool,
+    runtime_enrichment: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    constraints = _runtime_hard_constraints_from_enrichment(runtime_enrichment)
+    if not constraints.get("has_hard_constraints"):
+        return {
+            "target_agents": list(target_agents or []),
+            "requested_names": list(requested_names or []),
+            "mention_tokens": list(mention_tokens or []),
+            "has_team": has_team,
+            "violations": [],
+            "constraints": constraints,
+            "runtime_enrichment": runtime_enrichment,
+        }
+
+    unique_agents: List[Any] = []
+    seen_ids: set = set()
+    for ag in list(target_agents or []):
+        agid = getattr(ag, "id", None)
+        if agid in seen_ids:
+            continue
+        unique_agents.append(ag)
+        seen_ids.add(agid)
+
+    def _resolve_by_slug(slug: str) -> Any:
+        if not slug:
+            return None
+        direct = alias_to_agent.get(slug)
+        if direct is not None:
+            return direct
+        for ag in alias_to_agent.values():
+            if _canonical_dispatch_specialist_slug(getattr(ag, "name", None)) == slug:
+                return ag
+        return None
+
+    required_signer = constraints.get("required_signer")
+    specialists_required = list(constraints.get("specialists_required") or [])
+    specialists_forbidden = set(constraints.get("specialists_forbidden") or [])
+    count_must_be = constraints.get("selected_specialists_count_must_be")
+    violations: List[str] = []
+
+    if specialists_required:
+        constrained_targets: List[Any] = []
+        missing: List[str] = []
+        seen_req_ids: set = set()
+        for slug in specialists_required:
+            ag = _resolve_by_slug(slug)
+            if ag is None:
+                missing.append(slug)
+                continue
+            agid = getattr(ag, "id", None)
+            if agid in seen_req_ids:
+                continue
+            constrained_targets.append(ag)
+            seen_req_ids.add(agid)
+        if missing:
+            violations.append("missing required specialists: " + ", ".join(missing))
+        unique_agents = constrained_targets
+    if specialists_forbidden:
+        forbidden_hits = []
+        filtered: List[Any] = []
+        for ag in unique_agents:
+            slug = _canonical_dispatch_specialist_slug(getattr(ag, "name", None))
+            if slug in specialists_forbidden:
+                forbidden_hits.append(slug)
+                continue
+            filtered.append(ag)
+        unique_agents = filtered
+        if forbidden_hits:
+            violations.append("forbidden specialists selected: " + ", ".join(sorted(set(forbidden_hits))))
+    if required_signer:
+        signer_agent = _resolve_by_slug(required_signer)
+        if signer_agent is None:
+            violations.append(f"required signer unavailable: {required_signer}")
+        else:
+            signer_id = getattr(signer_agent, "id", None)
+            if all(getattr(ag, "id", None) != signer_id for ag in unique_agents):
+                unique_agents = [signer_agent] + unique_agents
+
+    # dedupe again after inserts
+    deduped: List[Any] = []
+    seen_ids = set()
+    for ag in unique_agents:
+        agid = getattr(ag, "id", None)
+        if agid in seen_ids:
+            continue
+        deduped.append(ag)
+        seen_ids.add(agid)
+    unique_agents = deduped
+
+    if count_must_be is not None and len(unique_agents) != int(count_must_be):
+        violations.append(f"selected_specialists_count_must_be={int(count_must_be)} but got {len(unique_agents)}")
+
+    requested_out = list(requested_names or [])
+    if specialists_required:
+        requested_out = list(specialists_required)
+    elif required_signer:
+        requested_out = [required_signer] + [name for name in requested_out if _canonical_dispatch_specialist_slug(name) != required_signer]
+
+    mention_out = list(mention_tokens or [])
+    if specialists_required:
+        mention_out = list(specialists_required)
+    elif required_signer:
+        mention_out = [required_signer] + [name for name in mention_out if _canonical_dispatch_specialist_slug(name) != required_signer]
+
+    has_team_out = len(unique_agents) > 1
+
+    if isinstance(runtime_enrichment, dict):
+        intent_package = runtime_enrichment.get("intent_package") if isinstance(runtime_enrichment.get("intent_package"), dict) else {}
+        runtime_operation = intent_package.get("runtime_operation") if isinstance(intent_package.get("runtime_operation"), dict) else {}
+        runtime_operation["required_signer"] = required_signer
+        runtime_operation["specialists_required"] = specialists_required
+        runtime_operation["specialists_forbidden"] = list(specialists_forbidden)
+        runtime_operation["selected_specialists_count_must_be"] = count_must_be
+        runtime_operation["requested_specialists"] = specialists_required or [
+            _canonical_dispatch_specialist_slug(getattr(ag, "name", None)) for ag in unique_agents if _canonical_dispatch_specialist_slug(getattr(ag, "name", None))
+        ]
+        runtime_operation["hard_constraints_present"] = True
+        if required_signer:
+            runtime_operation["visible_only_agent"] = required_signer
+        if violations:
+            runtime_operation["constraint_violations"] = list(violations)
+        intent_package["runtime_operation"] = runtime_operation
+        runtime_enrichment["intent_package"] = intent_package
+
+        planner_snapshot = runtime_enrichment.get("planner_snapshot") if isinstance(runtime_enrichment.get("planner_snapshot"), dict) else {}
+        if required_signer:
+            planner_snapshot["visible_only_agent"] = required_signer
+            planner_snapshot["preferred_visible_node"] = required_signer
+        runtime_enrichment["planner_snapshot"] = planner_snapshot
+
+        dag_snapshot = runtime_enrichment.get("dag_snapshot") if isinstance(runtime_enrichment.get("dag_snapshot"), dict) else {}
+        if required_signer:
+            dag_snapshot["preferred_visible_node"] = required_signer
+            dag_snapshot["visible_node"] = required_signer
+        runtime_enrichment["dag_snapshot"] = dag_snapshot
+
+        runtime_hints = runtime_enrichment.get("runtime_hints") if isinstance(runtime_enrichment.get("runtime_hints"), dict) else {}
+        if required_signer:
+            runtime_hints["force_single_visible_agent"] = required_signer
+        runtime_hints["dispatch_requested_specialists"] = runtime_operation.get("requested_specialists") or []
+        runtime_hints["hard_constraints"] = constraints
+        if violations:
+            runtime_hints["constraint_violations"] = list(violations)
+        runtime_enrichment["runtime_hints"] = runtime_hints
+
+    return {
+        "target_agents": unique_agents,
+        "requested_names": requested_out,
+        "mention_tokens": mention_out,
+        "has_team": has_team_out,
+        "violations": violations,
+        "constraints": constraints,
+        "runtime_enrichment": runtime_enrichment,
+    }
+
 def _payload_has_catalog_privileged_access(payload: Optional[Dict[str, Any]]) -> bool:
     if not isinstance(payload, dict):
         return False
@@ -10425,6 +10669,7 @@ def _normalize_orion_runtime_execution_result(raw: Dict[str, Any]) -> Dict[str, 
         "resolution",
         "github_error",
         "branch_name",
+        "required_signer",
     ]
     scalar_numeric_fields = [
         "selected_specialists_count",
@@ -10439,6 +10684,7 @@ def _normalize_orion_runtime_execution_result(raw: Dict[str, Any]) -> Dict[str, 
         "ahead_by",
         "behind_by",
         "files_count",
+        "selected_specialists_count_must_be",
     ]
     scalar_passthrough_fields = [
         "compact_dispatch_details",
@@ -10481,6 +10727,9 @@ def _normalize_orion_runtime_execution_result(raw: Dict[str, Any]) -> Dict[str, 
         "files",
         "items",
         "dirs",
+        "constraint_violations",
+        "specialists_required",
+        "specialists_forbidden",
     ]
     dict_fields = [
         "findings_by_specialty",
@@ -11736,30 +11985,44 @@ def _looks_like_generic_safe_refusal(answer: str) -> bool:
     ]
     return any(marker in txt for marker in refusal_markers)
 
-def _pick_runtime_primary_agent(target_agents: List[Any], requested_names: Optional[List[str]] = None) -> Optional[Any]:
+def _pick_runtime_primary_agent(
+    target_agents: List[Any],
+    requested_names: Optional[List[str]] = None,
+    runtime_enrichment: Optional[Dict[str, Any]] = None,
+) -> Optional[Any]:
     if not target_agents:
         return None
 
     requested_norm = [str(x).strip().lower() for x in (requested_names or []) if str(x).strip()]
+    hard_constraints = _runtime_hard_constraints_from_enrichment(runtime_enrichment)
+    required_signer = str(hard_constraints.get("required_signer") or "").strip().lower()
 
     def _agent_name(ag: Any) -> str:
         if isinstance(ag, dict):
             return str(ag.get("name") or "").strip().lower()
         return str(getattr(ag, "name", "") or "").strip().lower()
 
+    def _matches(ag: Any, candidate: str) -> bool:
+        name = _agent_name(ag)
+        first = name.split()[0] if name else ""
+        canonical = _canonical_dispatch_specialist_slug(name) or ""
+        candidate_slug = _canonical_dispatch_specialist_slug(candidate) or candidate
+        return candidate == name or candidate == first or candidate_slug == canonical
+
+    if required_signer:
+        for ag in target_agents:
+            if _matches(ag, required_signer):
+                return ag
+
     for req in requested_norm:
         for ag in target_agents:
-            name = _agent_name(ag)
-            first = name.split()[0] if name else ""
-            if req == name or req == first:
+            if _matches(ag, req):
                 return ag
 
     preferred = ("orion", "orkio", "chris")
     for pref in preferred:
         for ag in target_agents:
-            name = _agent_name(ag)
-            first = name.split()[0] if name else ""
-            if pref == name or pref == first:
+            if _matches(ag, pref):
                 return ag
 
     return target_agents[0]
@@ -11896,6 +12159,7 @@ def chat(
     blocked_reply = _block_if_sensitive(inp.message)
     orion_self_knowledge_flags = _orion_self_knowledge_request_flags(inp.message)
     orion_operational_maturity_flags = _orion_operational_maturity_request_flags(inp.message)
+    team_technical_audit = _is_team_technical_audit_request(inp.message or "")
     if (orion_self_knowledge_flags.get("requested") or orion_operational_maturity_flags.get("requested")) and not team_technical_audit:
         blocked_reply = None
     active_founder_guidance = _get_founder_guidance(org, tid, inp.message)
@@ -11914,7 +12178,6 @@ def chat(
         mention_tokens = [str(x) for x in requested_names]
 
     orion_only_flags = _orion_only_request_flags(inp.message or "")
-    team_technical_audit = _is_team_technical_audit_request(inp.message or "")
     excluded_agent_names = [str(x).strip().lower() for x in (orion_only_flags.get("excluded_agents") or []) if str(x).strip()]
     if excluded_agent_names:
         requested_names = [x for x in requested_names if str(x).strip().lower() not in excluded_agent_names]
@@ -12048,6 +12311,56 @@ def chat(
     except Exception:
         pass
 
+    try:
+        _constraint_guard = _apply_runtime_hard_constraints_to_targets(
+            target_agents=target_agents,
+            alias_to_agent=alias_to_agent,
+            requested_names=requested_names,
+            mention_tokens=mention_tokens,
+            has_team=has_team,
+            runtime_enrichment=runtime_enrichment,
+        )
+        target_agents = list(_constraint_guard.get("target_agents") or target_agents)
+        requested_names = list(_constraint_guard.get("requested_names") or requested_names)
+        mention_tokens = list(_constraint_guard.get("mention_tokens") or mention_tokens)
+        has_team = bool(_constraint_guard.get("has_team"))
+        runtime_enrichment = _constraint_guard.get("runtime_enrichment") if isinstance(_constraint_guard.get("runtime_enrichment"), dict) else runtime_enrichment
+        constraint_violations = list(_constraint_guard.get("violations") or [])
+        runtime_constraints = dict(_constraint_guard.get("constraints") or {})
+    except Exception:
+        constraint_violations = []
+        runtime_constraints = {}
+
+    if constraint_violations:
+        violation_text = _build_runtime_constraint_violation_text(runtime_constraints, constraint_violations)
+        signer_slug = str(runtime_constraints.get("required_signer") or "orion").strip().lower() or "orion"
+        signer_agent = alias_to_agent.get(signer_slug)
+        signer_name = getattr(signer_agent, "name", None) if signer_agent is not None else signer_slug.title()
+        signer_id = getattr(signer_agent, "id", None) if signer_agent is not None else None
+        signer_voice_id = resolve_agent_voice(signer_agent) if signer_agent is not None else None
+        signer_avatar_url = getattr(signer_agent, "avatar_url", None) if signer_agent is not None else None
+        m = Message(
+            id=new_id(),
+            org_slug=org,
+            thread_id=tid,
+            role="assistant",
+            agent_id=signer_id,
+            content=violation_text,
+            created_at=now_ts(),
+        )
+        db.add(m)
+        db.commit()
+        return ChatOut(
+            thread_id=tid,
+            answer=violation_text,
+            citations=[],
+            agent_id=signer_id,
+            agent_name=signer_name,
+            voice_id=signer_voice_id,
+            avatar_url=signer_avatar_url,
+            runtime_hints=(runtime_enrichment or {}).get("runtime_hints") if isinstance(runtime_enrichment, dict) else None,
+        )
+
     if runtime_enrichment.get("planner_snapshot") and len(target_agents) > 1:
         target_agents = _reorder_agents_by_planner(target_agents, runtime_enrichment.get("planner_snapshot"))
     try:
@@ -12106,7 +12419,7 @@ def chat(
     runtime_primary_agent = None
     if should_execute_runtime:
         try:
-            runtime_primary_agent = _pick_runtime_primary_agent(target_agents, requested_names)
+            runtime_primary_agent = _pick_runtime_primary_agent(target_agents, requested_names, runtime_enrichment)
         except Exception:
             runtime_primary_agent = None
         if runtime_primary_agent is not None:
@@ -15675,6 +15988,26 @@ async def chat_stream(
     except Exception:
         pass
     try:
+        _constraint_guard = _apply_runtime_hard_constraints_to_targets(
+            target_agents=target_agents,
+            alias_to_agent=alias_to_agent,
+            requested_names=requested_names,
+            mention_tokens=mention_tokens,
+            has_team=has_team,
+            runtime_enrichment=runtime_enrichment,
+        )
+        target_agents = list(_constraint_guard.get("target_agents") or target_agents)
+        requested_names = list(_constraint_guard.get("requested_names") or requested_names)
+        mention_tokens = list(_constraint_guard.get("mention_tokens") or mention_tokens)
+        has_team = bool(_constraint_guard.get("has_team"))
+        runtime_enrichment = _constraint_guard.get("runtime_enrichment") if isinstance(_constraint_guard.get("runtime_enrichment"), dict) else runtime_enrichment
+        constraint_violations = list(_constraint_guard.get("violations") or [])
+        runtime_constraints = dict(_constraint_guard.get("constraints") or {})
+    except Exception:
+        constraint_violations = []
+        runtime_constraints = {}
+
+    try:
         orion_self_knowledge_flags = _orion_self_knowledge_request_flags(message)
         if orion_self_knowledge_flags.get("requested"):
             forced_orion = _pick_target_agent_by_slug(target_agents, "orion")
@@ -15692,6 +16025,47 @@ async def chat_stream(
                     runtime_enrichment["runtime_hints"] = runtime_hints_live
     except Exception:
         pass
+    if constraint_violations:
+        violation_text = _build_runtime_constraint_violation_text(runtime_constraints, constraint_violations)
+        signer_slug = str(runtime_constraints.get("required_signer") or "orion").strip().lower() or "orion"
+        signer_row = alias_to_agent.get(signer_slug)
+        signer_name = getattr(signer_row, "name", None) if signer_row is not None else signer_slug.title()
+        signer_id = getattr(signer_row, "id", None) if signer_row is not None else None
+        signer_voice_id = resolve_agent_voice(signer_row) if signer_row is not None else None
+        signer_avatar_url = getattr(signer_row, "avatar_url", None) if signer_row is not None else None
+
+        async def _constraint_violation_gen():
+            try:
+                yield sse_event("status", {"phase": "blocked", "status": "CONSTRAINT_VIOLATION", "thread_id": tid, "trace_id": trace_id})
+                yield sse_execution(
+                    "constraint_violation",
+                    "Hard constraints bloquearam a execução",
+                    kind="error",
+                    scope="system",
+                    agent_id=signer_id,
+                    agent_name=signer_name,
+                    detail="; ".join(constraint_violations),
+                )
+                yield sse_event(
+                    "chunk",
+                    {
+                        "agent_id": signer_id,
+                        "agent_name": signer_name,
+                        "executor_agent_id": signer_id,
+                        "executor_agent_name": signer_name,
+                        "content": violation_text,
+                        "delta": violation_text,
+                        "thread_id": tid,
+                        "trace_id": trace_id,
+                        "voice_id": signer_voice_id,
+                        "avatar_url": signer_avatar_url,
+                    },
+                )
+                yield sse_event("done", {"done": True, "thread_id": tid, "trace_id": trace_id})
+            except Exception:
+                return
+
+        return StreamingResponse(_constraint_violation_gen(), media_type="text/event-stream")
     try:
         dag_snapshot = runtime_enrichment.get("dag_snapshot") or {}
         if dag_snapshot.get("route_applied"):
@@ -15716,7 +16090,7 @@ async def chat_stream(
 
     if should_execute_runtime:
         try:
-            runtime_primary_agent = _pick_runtime_primary_agent(target_agents, requested_names)
+            runtime_primary_agent = _pick_runtime_primary_agent(target_agents, requested_names, runtime_enrichment)
         except Exception:
             runtime_primary_agent = None
 
