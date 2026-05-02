@@ -38,8 +38,18 @@ def _excluded_agents(text: str) -> list[str]:
 
 
 
+def _strip_constraint_token(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    raw = re.sub(r"^\s*[-*•]+\s*", "", raw)
+    raw = re.sub(r"^\s*\d+[.)]\s*", "", raw)
+    return raw.strip()
+
+
 def _canonical_dispatch_actor(value: Any) -> str:
-    raw = _normalize(str(value or "").replace("@", " ").replace("-", "_").replace(" ", "_"))
+    cleaned = _strip_constraint_token(value)
+    raw = _normalize(cleaned.replace("@", " ").replace("-", "_").replace(" ", "_"))
     if not raw:
         return ""
     aliases = {
@@ -72,7 +82,7 @@ def _extract_constraint_scalar(text: str, keys: list[str]) -> str:
         pattern = rf"(?im)^\s*{re.escape(key)}\s*[:=]\s*([^\n#]+?)\s*$"
         match = re.search(pattern, raw)
         if match:
-            return _canonical_dispatch_actor(match.group(1).strip(" -"))
+            return _canonical_dispatch_actor(_strip_constraint_token(match.group(1).strip(" -*•")))
     return ""
 
 
@@ -93,7 +103,7 @@ def _extract_constraint_list(text: str, keys: list[str]) -> list[str]:
             active = True
             inline = stripped.split(":", 1)[1].strip()
             if inline:
-                parts = [p.strip() for p in re.split(r"[,;]", inline) if p.strip()]
+                parts = [_strip_constraint_token(p) for p in re.split(r"[,;]", inline) if _strip_constraint_token(p)]
                 collected.extend(parts)
             continue
         if not active:
@@ -102,8 +112,15 @@ def _extract_constraint_list(text: str, keys: list[str]) -> list[str]:
             if collected:
                 break
             continue
-        if stripped.startswith("-"):
-            collected.append(stripped[1:].strip())
+        if re.match(r"^\s*[-*•]\s+", line):
+            item = _strip_constraint_token(stripped)
+            if item:
+                collected.append(item)
+            continue
+        if re.match(r"^\s*\d+[.)]\s+", line):
+            item = _strip_constraint_token(stripped)
+            if item:
+                collected.append(item)
             continue
         if re.match(r"^[A-Za-z0-9_/@.-]+\s*[:=]", stripped):
             break
@@ -116,7 +133,11 @@ def _extract_constraint_list(text: str, keys: list[str]) -> list[str]:
         pattern = rf"(?im)^\s*{re.escape(key)}\s*[:=]\s*([^\n#]+?)\s*$"
         match = re.search(pattern, raw)
         if match:
-            return _dedupe_preserve([p.strip() for p in re.split(r"[,;]", match.group(1)) if p.strip()])
+            return _dedupe_preserve([
+                _strip_constraint_token(p)
+                for p in re.split(r"[,;]", match.group(1))
+                if _strip_constraint_token(p)
+            ])
     return []
 
 
