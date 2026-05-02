@@ -16198,20 +16198,22 @@ async def chat_stream(
                 if await request.is_disconnected():
                     return
 
-                ag_id = ag.get("id")
-                ag_name = ag.get("name") or "Agent"
-                ag_voice_id = ag.get("voice_id")
-                ag_avatar_url = ag.get("avatar_url")
+                ag_id = _agent_attr(ag, "id", None)
+                ag_name = _agent_attr(ag, "name", "Agent") or "Agent"
+                ag_voice_id = _agent_attr(ag, "voice_id", None)
+                ag_avatar_url = _agent_attr(ag, "avatar_url", None)
                 final_signer_agent = _resolve_runtime_final_signer(ag, runtime_primary_agent, should_execute_runtime)
                 final_signer_agent_id = _agent_attr(final_signer_agent, "id", ag_id)
                 final_signer_agent_name = _agent_attr(final_signer_agent, "name", ag_name) or ag_name
                 final_signer_voice_id = _agent_attr(final_signer_agent, "voice_id", ag_voice_id)
                 final_signer_avatar_url = _agent_attr(final_signer_agent, "avatar_url", ag_avatar_url)
-                ag_system_prompt = (ag.get("system_prompt") or "").strip()
-                ag_model = ag.get("model") or None
-                ag_temperature_raw = ag.get("temperature")
-                ag_rag_enabled = bool(ag.get("rag_enabled")) if ag.get("rag_enabled") is not None else True
-                ag_rag_top_k = int(ag.get("rag_top_k") or 0) or 6
+                ag_system_prompt = str(_agent_attr(ag, "system_prompt", "") or "").strip()
+                ag_model = _agent_attr(ag, "model", None)
+                ag_temperature_raw = _agent_attr(ag, "temperature", None)
+                _ag_rag_enabled_raw = _agent_attr(ag, "rag_enabled", None)
+                ag_rag_enabled = bool(_ag_rag_enabled_raw) if _ag_rag_enabled_raw is not None else True
+                _ag_rag_top_k_raw = _agent_attr(ag, "rag_top_k", None)
+                ag_rag_top_k = int(_ag_rag_top_k_raw or 0) or 6
 
                 agent_started_monotonic = time.monotonic()
 
