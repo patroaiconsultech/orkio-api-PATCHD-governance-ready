@@ -16036,6 +16036,24 @@ async def chat_stream(
 
         async def _constraint_violation_gen():
             try:
+                try:
+                    m_violation = Message(
+                        id=new_id(),
+                        org_slug=org,
+                        thread_id=tid,
+                        role="assistant",
+                        content=violation_text,
+                        agent_id=signer_id,
+                        agent_name=signer_name,
+                        created_at=now_ts(),
+                    )
+                    db.add(m_violation)
+                    db.commit()
+                except Exception:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
                 yield sse_event("status", {"phase": "blocked", "status": "CONSTRAINT_VIOLATION", "thread_id": tid, "trace_id": trace_id})
                 yield sse_execution(
                     "constraint_violation",
@@ -16118,12 +16136,14 @@ async def chat_stream(
     _stream_started_at = now_ts()
     _stream_started_monotonic = time.monotonic()
     _stream_final_text = ""
-    _stream_persisted_assistant_message_id: Optional[str] = None
     _stream_final_agent_id = None
     _stream_final_agent_name = None
     _stream_final_voice_id = None
     _stream_final_avatar_url = None
     _stream_done_debug: Dict[str, Any] = {}
+    _stream_assistant_persisted = False
+    _stream_assistant_message_id = None
+    _stream_assistant_persist_error = None
 
     def _stream_elapsed_ms(started_monotonic: Optional[float] = None) -> int:
         base_started = started_monotonic if started_monotonic is not None else _stream_started_monotonic
@@ -16133,14 +16153,7 @@ async def chat_stream(
             return 0
 
     def sse_event(ev: str, data: Dict[str, Any]) -> str:
-        try:
-            payload_json = json.dumps(data, ensure_ascii=False, default=str)
-        except Exception:
-            try:
-                payload_json = json.dumps({"event": ev, "fallback_payload": str(data)}, ensure_ascii=False, default=str)
-            except Exception:
-                payload_json = "{}"
-        return f"event: {ev}\ndata: {payload_json}\n\n"
+        return f"event: {ev}\ndata: {json.dumps(data, ensure_ascii=False, default=str)}\n\n"
 
     def sse_execution(
         step: str,
@@ -16172,6 +16185,71 @@ async def chat_stream(
         if extra:
             payload.update({k: v for k, v in extra.items() if v is not None})
         return sse_event("execution", payload)
+
+    def _persist_stream_assistant_message(
+        *,
+        content: str,
+        agent_id: Optional[str],
+        agent_name: Optional[str],
+    ) -> Optional[Message]:
+        nonlocal _stream_assistant_persisted, _stream_assistant_message_id, _stream_assistant_persist_error
+        body = str(content or "").strip()
+        if not body:
+            _stream_assistant_persist_error = "empty_content"
+            return None
+        if _stream_assistant_persisted:
+            return None
+        try:
+            m_ass_id = new_id()
+            m_ass_created_at = now_ts()
+            m_ass = Message(
+                id=m_ass_id,
+                org_slug=org,
+                thread_id=tid,
+                role="assistant",
+                content=body,
+                agent_id=agent_id,
+                agent_name=agent_name,
+                created_at=m_ass_created_at,
+            )
+            db.add(m_ass)
+            db.commit()
+            try:
+                db.refresh(m_ass)
+            except Exception:
+                pass
+            _stream_assistant_persisted = True
+            _stream_assistant_message_id = m_ass_id
+            _stream_assistant_persist_error = None
+            try:
+                logger.info(
+                    "STREAM_ASSISTANT_PERSIST_OK trace_id=%s thread_id=%s message_id=%s agent_id=%s agent_name=%s",
+                    trace_id,
+                    tid,
+                    m_ass_id,
+                    agent_id,
+                    agent_name,
+                )
+            except Exception:
+                pass
+            return m_ass
+        except Exception as persist_err:
+            _stream_assistant_persist_error = str(persist_err)
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            try:
+                logger.exception(
+                    "STREAM_ASSISTANT_PERSIST_FAILED trace_id=%s thread_id=%s agent_id=%s agent_name=%s",
+                    trace_id,
+                    tid,
+                    agent_id,
+                    agent_name,
+                )
+            except Exception:
+                pass
+            return None
 
     async def gen():
         # First status quickly
@@ -16831,8 +16909,9 @@ async def chat_stream(
                 ans = _apply_truthful_execution_mode((ans_obj.get("text") or "").strip(), execution_result=execution_result)
                 ans = _apply_chat_anti_echo(ans, message)
 
-                # PATCH27_12AO — não persistir fallback final sem execução real
-                if _should_skip_assistant_persist(ans, execution_result=execution_result):
+                # PATCH27_12AO — não deixar o stream terminar sem resposta persistida
+                _skip_assistant_persist = _should_skip_assistant_persist(ans, execution_result=execution_result)
+                if _skip_assistant_persist and not str(ans or "").strip():
                     try:
                         yield sse_execution(
                             "assistant_persist_skipped",
@@ -16842,7 +16921,7 @@ async def chat_stream(
                             agent_id=ag_id,
                             agent_name=ag_name,
                             started_monotonic=agent_started_monotonic,
-                            detail="Fallback estrutural do assistant não será gravado no histórico, mesmo com success inconsistente.",
+                            detail="Resposta vazia: persistência foi ignorada com segurança.",
                         )
                         yield sse_event(
                             "agent_done",
@@ -16857,6 +16936,21 @@ async def chat_stream(
                         return
                     continue
 
+                if _skip_assistant_persist and str(ans or "").strip():
+                    try:
+                        yield sse_execution(
+                            "assistant_persist_skip_overridden",
+                            "Persistência preservada para evitar silêncio no chat",
+                            kind="warning",
+                            scope="agent",
+                            agent_id=ag_id,
+                            agent_name=ag_name,
+                            started_monotonic=agent_started_monotonic,
+                            detail="A resposta textual existe; o stream vai persisti-la para manter a thread íntegra.",
+                        )
+                    except Exception:
+                        return
+
                 # Persist assistant message (DB path can fail; must rollback)
                 try:
                     yield sse_execution(
@@ -16869,25 +16963,26 @@ async def chat_stream(
                         started_monotonic=agent_started_monotonic,
                         detail="Gravando resposta no histórico e preparando trilha econômica.",
                     )
-                    m_ass_id = new_id()
-                    m_ass_created_at = now_ts()
-                    m_ass = Message(
-                        id=m_ass_id,
-                        org_slug=org,
-                        thread_id=tid,
-                        role="assistant",
+                    m_ass = _persist_stream_assistant_message(
                         content=ans,
                         agent_id=final_signer_agent_id,
                         agent_name=final_signer_agent_name,
-                        created_at=m_ass_created_at,
                     )
-                    db.add(m_ass)
-                    db.commit()
-                    _stream_persisted_assistant_message_id = m_ass_id
-                    try:
-                        db.refresh(m_ass)
-                    except Exception:
-                        pass
+                    m_ass_id = getattr(m_ass, "id", None)
+                    if not m_ass_id:
+                        try:
+                            yield sse_execution(
+                                "assistant_persist_missing",
+                                "Persistência do assistant não confirmou gravação",
+                                kind="error",
+                                scope="agent",
+                                agent_id=final_signer_agent_id,
+                                agent_name=final_signer_agent_name,
+                                started_monotonic=agent_started_monotonic,
+                                detail=str(_stream_assistant_persist_error or "assistant message was not stored"),
+                            )
+                        except Exception:
+                            return
                     try:
                         tracked_total_usd = _track_cost(
                             db=db,
@@ -17177,6 +17272,8 @@ async def chat_stream(
                     "voice_id": _stream_final_voice_id,
                     "avatar_url": _stream_final_avatar_url,
                     "patch_sentinel": PATCH_SENTINEL,
+                    "assistant_persisted": bool(_stream_assistant_persisted),
+                    "assistant_message_id": _stream_assistant_message_id,
                 }
                 if _stream_done_debug:
                     payload["diagnostics"] = {**dict(_stream_done_debug), "patch_sentinel": PATCH_SENTINEL, "build_fingerprint": _safe_build_fingerprint()}
@@ -17188,6 +17285,39 @@ async def chat_stream(
                             payload["dispatch_summary"] = dispatch_summary
                     except Exception:
                         pass
+                if (not _stream_assistant_persisted) and str(_stream_final_text or "").strip():
+                    persisted_final = _persist_stream_assistant_message(
+                        content=_stream_final_text,
+                        agent_id=_stream_final_agent_id,
+                        agent_name=_stream_final_agent_name,
+                    )
+                    if persisted_final is not None:
+                        payload["message_id"] = getattr(persisted_final, "id", None)
+                        try:
+                            yield sse_execution(
+                                "stream_final_persist_recovered",
+                                "Resposta final persistida no fechamento",
+                                kind="system",
+                                scope="system",
+                                agent_id=_stream_final_agent_id,
+                                agent_name=_stream_final_agent_name,
+                                detail="O fechamento do stream recuperou a persistência da resposta final.",
+                            )
+                        except Exception:
+                            return
+                    else:
+                        try:
+                            yield sse_execution(
+                                "stream_final_persist_missing",
+                                "Fechamento sem persistência confirmada",
+                                kind="error",
+                                scope="system",
+                                agent_id=_stream_final_agent_id,
+                                agent_name=_stream_final_agent_name,
+                                detail=str(_stream_assistant_persist_error or "final assistant message not stored"),
+                            )
+                        except Exception:
+                            return
                 yield sse_execution(
                     "stream_completed",
                     "Execução concluída",
@@ -17196,6 +17326,8 @@ async def chat_stream(
                     executed_nodes=list(_stream_executed_nodes or []),
                     failed_nodes=list(_stream_failed_nodes or []),
                     agent_count=len(list(_stream_executed_nodes or [])),
+                    assistant_persisted=bool(_stream_assistant_persisted),
+                    assistant_message_id=_stream_assistant_message_id,
                 )
                 yield sse_event("done", payload)
             except Exception:
@@ -17207,49 +17339,18 @@ async def chat_stream(
                 db.rollback()
             except Exception:
                 pass
-            try:
-                if not _stream_persisted_assistant_message_id and not await request.is_disconnected():
-                    fallback_signer = None
-                    try:
-                        fallback_signer = _resolve_runtime_final_signer(
-                            runtime_primary_agent or (target_agents[0] if target_agents else None),
-                            runtime_primary_agent,
-                            should_execute_runtime,
-                        )
-                    except Exception:
-                        fallback_signer = runtime_primary_agent or (target_agents[0] if target_agents else None)
-
-                    fallback_agent_id = _agent_attr(fallback_signer, "id", None)
-                    fallback_agent_name = _agent_attr(fallback_signer, "name", "Orion") or "Orion"
-                    fallback_voice_id = _agent_attr(fallback_signer, "voice_id", None)
-                    fallback_avatar_url = _agent_attr(fallback_signer, "avatar_url", None)
-                    fallback_text = (
-                        "Execução interrompida antes da resposta final. "
-                        "Nenhuma conclusão operacional foi registrada neste turno."
-                    )
-                    m_fail = Message(
-                        id=new_id(),
-                        org_slug=org,
-                        thread_id=tid,
-                        role="assistant",
-                        content=fallback_text,
-                        agent_id=fallback_agent_id,
-                        agent_name=fallback_agent_name,
-                        created_at=now_ts(),
-                    )
-                    db.add(m_fail)
-                    db.commit()
-                    _stream_persisted_assistant_message_id = m_fail.id
-                    _stream_final_text = fallback_text
-                    _stream_final_agent_id = fallback_agent_id
-                    _stream_final_agent_name = fallback_agent_name
-                    _stream_final_voice_id = fallback_voice_id
-                    _stream_final_avatar_url = fallback_avatar_url
-            except Exception:
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
+            if (not _stream_assistant_persisted) and str(_stream_final_text or "").strip():
+                _persist_stream_assistant_message(
+                    content=_stream_final_text,
+                    agent_id=_stream_final_agent_id,
+                    agent_name=_stream_final_agent_name,
+                )
+            elif not _stream_assistant_persisted:
+                _persist_stream_assistant_message(
+                    content=f"STREAM_INTERRUPTED\ntrace_id: {trace_id}\nerror: {str(fatal_err)}",
+                    agent_id=_stream_final_agent_id,
+                    agent_name=_stream_final_agent_name or "Orion",
+                )
             try:
                 yield sse_execution(
                     "stream_failed",
