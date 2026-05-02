@@ -113,6 +113,184 @@ def _excluded_agents_from_message(message: str) -> List[str]:
             excluded.append(canonical)
     return excluded
 
+
+def _canonical_dispatch_actor(value: Any) -> str:
+    raw = str(value or "").strip().lower().replace("@", "").replace("-", "_").replace(" ", "_")
+    if not raw:
+        return ""
+    aliases = {
+        "ux/frontend": "ux_frontend",
+        "ux_frontend": "ux_frontend",
+        "ux": "ux_frontend",
+        "frontend": "ux_frontend",
+        "front_end": "ux_frontend",
+        "orion_cto": "orion",
+        "cto_runtime": "orion",
+    }
+    return aliases.get(raw, raw)
+
+
+def _dedupe_dispatch_actors(items: List[str]) -> List[str]:
+    out: List[str] = []
+    seen: set = set()
+    for item in list(items or []):
+        slug = _canonical_dispatch_actor(item)
+        if slug and slug not in seen:
+            out.append(slug)
+            seen.add(slug)
+    return out
+
+
+def _extract_constraint_scalar(message: str, keys: List[str]) -> str:
+    raw = message or ""
+    for key in keys:
+        match = re.search(rf"(?im)^\s*{re.escape(key)}\s*[:=]\s*([^\n#]+?)\s*$", raw)
+        if match:
+            return _canonical_dispatch_actor(match.group(1).strip(" -"))
+    return ""
+
+
+def _extract_constraint_list(message: str, keys: List[str]) -> List[str]:
+    raw = message or ""
+    lines = raw.splitlines()
+    out: List[str] = []
+    active = False
+    for line in lines:
+        stripped = line.strip()
+        lowered = stripped.lower()
+        matched = None
+        for key in keys:
+            if lowered.startswith(f"{key.lower()}:"):
+                matched = key
+                break
+        if matched is not None:
+            active = True
+            inline = stripped.split(":", 1)[1].strip()
+            if inline:
+                out.extend([p.strip() for p in re.split(r"[,;]", inline) if p.strip()])
+            continue
+        if not active:
+            continue
+        if not stripped:
+            if out:
+                break
+            continue
+        if stripped.startswith("-"):
+            out.append(stripped[1:].strip())
+            continue
+        if re.match(r"^[A-Za-z0-9_/@.-]+\s*[:=]", stripped):
+            break
+        if out:
+            break
+    if out:
+        return _dedupe_dispatch_actors(out)
+    for key in keys:
+        match = re.search(rf"(?im)^\s*{re.escape(key)}\s*[:=]\s*([^\n#]+?)\s*$", raw)
+        if match:
+            return _dedupe_dispatch_actors([p.strip() for p in re.split(r"[,;]", match.group(1)) if p.strip()])
+    return []
+
+
+def _extract_constraint_count(message: str) -> Any:
+    raw = message or ""
+    for pattern in (
+        r"(?im)^\s*selected_specialists_count_must_be\s*[:=]\s*(\d+)\s*$",
+        r"(?im)^\s*selected_specialists_count\s*[:=]\s*(\d+)\s*$",
+    ):
+        match = re.search(pattern, raw)
+        if match:
+            try:
+                return int(match.group(1))
+            except Exception:
+                return None
+    return None
+
+
+def _extract_hard_constraints(message: str) -> Dict[str, Any]:
+    required_signer = _extract_constraint_scalar(message, ["required_signer", "signer_must_be", "signer_must"])
+    specialists_required = _extract_constraint_list(message, ["specialists_required", "allowed_specialists_only"])
+    specialists_forbidden = _extract_constraint_list(message, ["specialists_forbidden", "forbidden_specialists"])
+    selected_count = _extract_constraint_count(message)
+    if selected_count is None and specialists_required:
+        selected_count = len(specialists_required)
+    return {
+        "required_signer": required_signer or None,
+        "specialists_required": specialists_required,
+        "specialists_forbidden": specialists_forbidden,
+        "selected_specialists_count_must_be": selected_count,
+        "has_hard_constraints": bool(required_signer or specialists_required or specialists_forbidden or selected_count is not None),
+    }
+
+
+def _apply_specialist_constraints(selected: List[str], *, constraints: Dict[str, Any]) -> List[str]:
+    required = _dedupe_dispatch_actors(list(constraints.get("specialists_required") or []))
+    forbidden = set(_dedupe_dispatch_actors(list(constraints.get("specialists_forbidden") or [])))
+    signer = _canonical_dispatch_actor(constraints.get("required_signer") or "")
+    count = constraints.get("selected_specialists_count_must_be")
+    out = _dedupe_dispatch_actors(required or selected or [])
+    if forbidden:
+        out = [item for item in out if item not in forbidden]
+    if signer and signer not in out and (not required or count is None or len(out) < int(count)):
+        out = [signer] + out
+        out = _dedupe_dispatch_actors(out)
+    if count is not None and int(count) >= 0 and len(out) > int(count):
+        out = out[: int(count)]
+    return out
+
+
+def _validate_dispatch_constraints(*, visible_agent: str, selected_specialists: List[str], constraints: Dict[str, Any]) -> List[str]:
+    violations: List[str] = []
+    required_signer = _canonical_dispatch_actor(constraints.get("required_signer") or "")
+    required = _dedupe_dispatch_actors(list(constraints.get("specialists_required") or []))
+    forbidden = set(_dedupe_dispatch_actors(list(constraints.get("specialists_forbidden") or [])))
+    count = constraints.get("selected_specialists_count_must_be")
+
+    if required_signer and _canonical_dispatch_actor(visible_agent) != required_signer:
+        violations.append(f"required_signer={required_signer} was not satisfied")
+    if forbidden:
+        forbidden_hits = [item for item in selected_specialists if _canonical_dispatch_actor(item) in forbidden]
+        if forbidden_hits:
+            violations.append("forbidden_specialists present in selected_specialists: " + ", ".join(forbidden_hits))
+    if required:
+        missing = [item for item in required if item not in _dedupe_dispatch_actors(selected_specialists)]
+        extras = [item for item in _dedupe_dispatch_actors(selected_specialists) if item not in required]
+        if missing:
+            violations.append("missing required specialists: " + ", ".join(missing))
+        if extras:
+            violations.append("selected_specialists outside required set: " + ", ".join(extras))
+    if count is not None and len(list(selected_specialists or [])) != int(count):
+        violations.append(f"selected_specialists_count_must_be={int(count)} but got {len(list(selected_specialists or []))}")
+    return violations
+
+
+def _constraint_violation_payload(message: str, *, constraints: Dict[str, Any], violations: List[str]) -> Dict[str, Any]:
+    visible_agent = str(constraints.get("required_signer") or _resolve_visible_agent(message, default="orion") or "orion").strip().lower() or "orion"
+    return {
+        "ok": False,
+        "service": "orion_internal",
+        "mode": "constraint_violation",
+        "provider": "platform",
+        "event": "CONSTRAINT_VIOLATION",
+        "status": "blocked",
+        "execution_depth": "pre_dispatch",
+        "delivery_contract": "constraint_violation_v1",
+        "visible_agent": visible_agent,
+        "required_signer": constraints.get("required_signer"),
+        "specialists_required": list(constraints.get("specialists_required") or []),
+        "specialists_forbidden": list(constraints.get("specialists_forbidden") or []),
+        "selected_specialists_count_must_be": constraints.get("selected_specialists_count_must_be"),
+        "message": "CONSTRAINT_VIOLATION",
+        "resolution": "Hard constraints blocked execution before dispatch.",
+        "constraint_violations": list(violations or []),
+        "required_signer": constraints.get("required_signer"),
+        "specialists_required": list(constraints.get("specialists_required") or []),
+        "specialists_forbidden": list(constraints.get("specialists_forbidden") or []),
+        "selected_specialists_count_must_be": constraints.get("selected_specialists_count_must_be"),
+        "recommended_actions": [],
+        "final_consolidation": "Dispatch abortado antes da execução porque as hard constraints solicitadas não puderam ser satisfeitas com segurança.",
+        "generated_at": _now_ts(),
+    }
+
 def _is_orion_only_request(message: str) -> bool:
     raw = (message or "").strip().lower()
     if not raw:
@@ -143,15 +321,19 @@ def _is_team_technical_audit_request(message: str) -> bool:
     return bool(has_team and has_audit and has_technical_scope and read_only)
 
 def _filter_specialists_for_message(selected: List[str], message: str) -> List[str]:
-    excluded = set(_excluded_agents_from_message(message))
+    excluded = set(_dedupe_dispatch_actors(_excluded_agents_from_message(message)))
     out: List[str] = []
     for item in list(selected or []):
-        slug = str(item or "").strip().lower()
+        slug = _canonical_dispatch_actor(item)
         if slug and slug not in excluded:
-            out.append(item)
-    return out
+            out.append(slug)
+    return _dedupe_dispatch_actors(out)
 
 def _resolve_visible_agent(message: str, default: str = "orion") -> str:
+    constraints = _extract_hard_constraints(message)
+    required_signer = _canonical_dispatch_actor(constraints.get("required_signer") or "")
+    if required_signer:
+        return required_signer
     handles = _extract_agent_handles(message)
     if _is_orion_only_request(message):
         return "orion"
@@ -1044,8 +1226,17 @@ def _build_controlled_self_evolution_sections(selected_specialists: List[str]) -
 
 
 def platform_self_evolution_plan(inp: "OrionRuntimeIn") -> Dict[str, Any]:
+    constraints = _extract_hard_constraints(inp.message)
     visible_agent = _resolve_visible_agent(inp.message, default="orion")
     selected_specialists = _filter_specialists_for_message(_audit_selected_specialists("specialist", bool(inp.include_frontend), premium_mode=True), inp.message)
+    selected_specialists = _apply_specialist_constraints(selected_specialists, constraints=constraints)
+    violations = _validate_dispatch_constraints(
+        visible_agent=visible_agent,
+        selected_specialists=selected_specialists,
+        constraints=constraints,
+    )
+    if violations:
+        return _constraint_violation_payload(inp.message, constraints=constraints, violations=violations)
     dispatch_receipts = _audit_dispatch_receipts(selected_specialists, "specialist")
     specialist_reports = _audit_specialist_reports(selected_specialists, "specialist")
     counts = _dispatch_receipt_counts(dispatch_receipts, specialist_reports, selected_specialists)
