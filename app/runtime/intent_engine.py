@@ -37,6 +37,136 @@ def _excluded_agents(text: str) -> list[str]:
     return out
 
 
+
+def _canonical_dispatch_actor(value: Any) -> str:
+    raw = _normalize(str(value or "").replace("@", " ").replace("-", "_").replace(" ", "_"))
+    if not raw:
+        return ""
+    aliases = {
+        "ux/frontend": "ux_frontend",
+        "ux_frontend": "ux_frontend",
+        "ux_front": "ux_frontend",
+        "ux": "ux_frontend",
+        "frontend": "ux_frontend",
+        "front_end": "ux_frontend",
+        "orion_cto": "orion",
+        "cto_runtime": "orion",
+    }
+    return aliases.get(raw, raw)
+
+
+def _dedupe_preserve(items: list[str]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+    for item in items:
+        slug = _canonical_dispatch_actor(item)
+        if slug and slug not in seen:
+            out.append(slug)
+            seen.add(slug)
+    return out
+
+
+def _extract_constraint_scalar(text: str, keys: list[str]) -> str:
+    raw = text or ""
+    for key in keys:
+        pattern = rf"(?im)^\s*{re.escape(key)}\s*[:=]\s*([^\n#]+?)\s*$"
+        match = re.search(pattern, raw)
+        if match:
+            return _canonical_dispatch_actor(match.group(1).strip(" -"))
+    return ""
+
+
+def _extract_constraint_list(text: str, keys: list[str]) -> list[str]:
+    raw = text or ""
+    lines = raw.splitlines()
+    collected: list[str] = []
+    active = False
+    for line in lines:
+        stripped = line.strip()
+        lowered = stripped.lower()
+        matched_key = None
+        for key in keys:
+            if lowered.startswith(f"{key.lower()}:"):
+                matched_key = key
+                break
+        if matched_key is not None:
+            active = True
+            inline = stripped.split(":", 1)[1].strip()
+            if inline:
+                parts = [p.strip() for p in re.split(r"[,;]", inline) if p.strip()]
+                collected.extend(parts)
+            continue
+        if not active:
+            continue
+        if not stripped:
+            if collected:
+                break
+            continue
+        if stripped.startswith("-"):
+            collected.append(stripped[1:].strip())
+            continue
+        if re.match(r"^[A-Za-z0-9_/@.-]+\s*[:=]", stripped):
+            break
+        if collected:
+            break
+    if collected:
+        return _dedupe_preserve(collected)
+
+    for key in keys:
+        pattern = rf"(?im)^\s*{re.escape(key)}\s*[:=]\s*([^\n#]+?)\s*$"
+        match = re.search(pattern, raw)
+        if match:
+            return _dedupe_preserve([p.strip() for p in re.split(r"[,;]", match.group(1)) if p.strip()])
+    return []
+
+
+def _extract_constraint_count(text: str) -> Optional[int]:
+    raw = text or ""
+    patterns = [
+        r"(?im)^\s*selected_specialists_count_must_be\s*[:=]\s*(\d+)\s*$",
+        r"(?im)^\s*selected_specialists_count\s*[:=]\s*(\d+)\s*$",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, raw)
+        if match:
+            try:
+                return int(match.group(1))
+            except Exception:
+                return None
+    return None
+
+
+def _extract_hard_constraints(text: str) -> Dict[str, Any]:
+    required_signer = _extract_constraint_scalar(text, ["required_signer", "signer_must_be", "signer_must"])
+    specialists_required = _extract_constraint_list(text, ["specialists_required", "allowed_specialists_only"])
+    specialists_forbidden = _extract_constraint_list(text, ["specialists_forbidden", "forbidden_specialists"])
+    selected_count = _extract_constraint_count(text)
+    if selected_count is None and specialists_required:
+        selected_count = len(specialists_required)
+    return {
+        "required_signer": required_signer or None,
+        "specialists_required": specialists_required,
+        "specialists_forbidden": specialists_forbidden,
+        "selected_specialists_count_must_be": selected_count,
+        "has_hard_constraints": bool(required_signer or specialists_required or specialists_forbidden or selected_count is not None),
+    }
+
+
+def _apply_dispatch_constraints(default_agents: list[str], *, required: list[str], forbidden: list[str], required_signer: Optional[str] = None, count_must_be: Optional[int] = None) -> list[str]:
+    base = _dedupe_preserve(default_agents)
+    if required:
+        base = _dedupe_preserve(required)
+    if forbidden:
+        forbidden_set = set(_dedupe_preserve(forbidden))
+        base = [item for item in base if item not in forbidden_set]
+    signer_slug = _canonical_dispatch_actor(required_signer or "")
+    if signer_slug and signer_slug not in base and (not required or count_must_be is None or len(base) < int(count_must_be)):
+        base = [signer_slug] + base
+        base = _dedupe_preserve(base)
+    if count_must_be is not None and count_must_be >= 0 and len(base) > int(count_must_be):
+        base = base[: int(count_must_be)]
+    return base
+
 def _looks_like_orion_only_request(text: str) -> bool:
     txt = _normalize(text)
     if not txt:
@@ -415,9 +545,16 @@ def build_intent_package(
 
     admin_access_mode = "read_privileged" if _looks_like_privileged_admin_read(text) and action_scope in {"read", "diagnose"} else "standard"
     requires_write_approval = action_scope in {"write_branch", "open_pr", "merge", "deploy"}
+    hard_constraints = _extract_hard_constraints(user_input or "")
+    required_signer = str(hard_constraints.get("required_signer") or "").strip().lower()
+    specialists_required = list(hard_constraints.get("specialists_required") or [])
+    specialists_forbidden = list(hard_constraints.get("specialists_forbidden") or [])
+    selected_specialists_count_must_be = hard_constraints.get("selected_specialists_count_must_be")
     orion_only = _looks_like_orion_only_request(user_input or "")
+    if required_signer == "orion":
+        orion_only = True
     team_technical_audit = _looks_like_team_technical_audit_request(user_input or "")
-    excluded_agents = _excluded_agents(user_input or "")
+    excluded_agents = _dedupe_preserve(_excluded_agents(user_input or "") + specialists_forbidden)
 
     if incremental_dispatch_followup:
         team_technical_audit = False
@@ -447,37 +584,61 @@ def build_intent_package(
     )
 
     if incremental_dispatch_followup:
-        recommended_agents = ["orion", "auditor", "cto"]
-        advisor_agents = ["orion", "auditor", "cto", "metatron"]
-        target_agent = "orion"
+        recommended_agents = _apply_dispatch_constraints(
+            ["orion", "auditor", "cto"],
+            required=specialists_required,
+            forbidden=specialists_forbidden,
+            required_signer=required_signer or "orion",
+            count_must_be=selected_specialists_count_must_be,
+        )
+        advisor_agents = _dedupe_preserve(recommended_agents + ["metatron"])
+        target_agent = required_signer or "orion"
         delivery_contract = "orion_incremental_dispatch_followup_v1"
         structured_output = True
-        expected_specialist_reports = ["orion", "auditor", "cto"]
-        visible_signer_expected = "orion"
+        expected_specialist_reports = list(recommended_agents or ["orion", "auditor", "cto"])
+        visible_signer_expected = required_signer or "orion"
     elif platform_improvement_review:
-        recommended_agents = ["orkio", "orion", "auditor", "cto"]
-        advisor_agents = ["orion", "auditor", "cto", "metatron"]
-        target_agent = "orkio"
+        recommended_agents = _apply_dispatch_constraints(
+            ["orkio", "orion", "auditor", "cto", "architect", "devops", "security", "ux_frontend"],
+            required=specialists_required,
+            forbidden=specialists_forbidden,
+            required_signer=required_signer or "orkio",
+            count_must_be=selected_specialists_count_must_be,
+        )
+        advisor_agents = _dedupe_preserve((recommended_agents or ["orion", "auditor", "cto"]) + ["metatron"])
+        target_agent = required_signer or (recommended_agents[0] if recommended_agents else "orkio")
         delivery_contract = "platform_improvement_review_v1"
         structured_output = True
-        expected_specialist_reports = ["orion", "auditor", "cto", "architect", "devops", "sre", "security", "ux_frontend"]
-        visible_signer_expected = "orkio"
+        expected_specialist_reports = list(recommended_agents or ["orion", "auditor", "cto", "architect", "devops", "security", "ux_frontend"])
+        visible_signer_expected = required_signer or target_agent
     elif team_technical_audit:
-        recommended_agents = ["orion", "auditor", "cto"]
-        advisor_agents = ["orion", "auditor", "cto", "metatron"]
-        target_agent = "orion"
+        recommended_agents = _apply_dispatch_constraints(
+            ["orion", "auditor", "cto"],
+            required=specialists_required,
+            forbidden=specialists_forbidden,
+            required_signer=required_signer or "orion",
+            count_must_be=selected_specialists_count_must_be,
+        )
+        advisor_agents = _dedupe_preserve(recommended_agents + ["metatron"])
+        target_agent = required_signer or "orion"
         delivery_contract = "orion_team_technical_audit_v1"
         structured_output = True
-        expected_specialist_reports = ["orion", "auditor", "cto"]
-        visible_signer_expected = "orion"
+        expected_specialist_reports = list(recommended_agents or ["orion", "auditor", "cto"])
+        visible_signer_expected = required_signer or "orion"
     else:
-        recommended_agents = ["orion"] if (orion_only or capability_name in {"platform_self_audit", "github_repo_write", "github_pr_prepare"}) else ["orkio"]
-        advisor_agents = ["orion", "metatron"]
-        target_agent = "orion" if (orion_only or capability_name in {"platform_self_audit", "github_repo_write", "github_pr_prepare"}) else "orkio"
+        recommended_agents = _apply_dispatch_constraints(
+            ["orion"] if (orion_only or capability_name in {"platform_self_audit", "github_repo_write", "github_pr_prepare"}) else ["orkio"],
+            required=specialists_required,
+            forbidden=specialists_forbidden,
+            required_signer=required_signer or ("orion" if orion_only else None),
+            count_must_be=selected_specialists_count_must_be,
+        )
+        advisor_agents = _dedupe_preserve(recommended_agents + ["metatron"])
+        target_agent = required_signer or ("orion" if (orion_only or capability_name in {"platform_self_audit", "github_repo_write", "github_pr_prepare"}) else "orkio")
         delivery_contract = "orkio_governed_runtime_v1"
         structured_output = False
-        expected_specialist_reports = []
-        visible_signer_expected = "orion" if orion_only else None
+        expected_specialist_reports = list(recommended_agents if specialists_required else [])
+        visible_signer_expected = required_signer or ("orion" if orion_only else None)
 
     runtime_op = {
         "kind": runtime_kind,
@@ -487,10 +648,17 @@ def build_intent_package(
         "admin_access_mode": admin_access_mode,
         "requires_write_approval": requires_write_approval,
         "visible_signer_expected": visible_signer_expected,
+        "visible_only_agent": required_signer or visible_signer_expected,
         "excluded_agents": excluded_agents,
         "team_technical_audit": bool(team_technical_audit),
         "platform_improvement_review": bool(platform_improvement_review),
         "incremental_dispatch_followup": bool(incremental_dispatch_followup),
+        "hard_constraints_present": bool(hard_constraints.get("has_hard_constraints")),
+        "required_signer": required_signer or None,
+        "specialists_required": specialists_required,
+        "specialists_forbidden": specialists_forbidden,
+        "selected_specialists_count_must_be": selected_specialists_count_must_be,
+        "requested_specialists": list(specialists_required or recommended_agents),
         "execution_mode": (
             "incremental_analysis"
             if incremental_dispatch_followup
@@ -540,6 +708,7 @@ def build_intent_package(
         "incremental_dispatch_followup": bool(incremental_dispatch_followup),
         "expected_specialist_reports": expected_specialist_reports,
         "has_completed_dispatch_context": bool(has_completed_dispatch_context),
+        "hard_constraints": hard_constraints,
     }
     payload.update(_runtime_self_audit_override(intent))
     return payload
