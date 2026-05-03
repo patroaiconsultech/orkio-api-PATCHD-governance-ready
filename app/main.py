@@ -5739,69 +5739,6 @@ def _runtime_hard_constraints_from_enrichment(runtime_enrichment: Optional[Dict[
     }
 
 
-
-
-def _raw_message_requests_multi_specialist_hard_constraints(message: Any) -> bool:
-    raw = str(message or "")
-    if not raw.strip():
-        return False
-
-    count_must_be: Optional[int] = None
-    explicit_items: List[str] = []
-    active = False
-
-    def _clean_item(value: str) -> str:
-        cleaned = re.sub(r"^\s*(?:[-*•]+|\d+[.)])\s*", "", str(value or "")).strip()
-        return cleaned
-
-    for line in raw.splitlines():
-        stripped = line.strip()
-        if not stripped:
-            if active and explicit_items:
-                break
-            continue
-
-        m_count = re.match(r"(?i)^selected_specialists_count_must_be\s*[:=]\s*(\d+)\s*$", stripped)
-        if m_count:
-            try:
-                count_must_be = int(m_count.group(1))
-            except Exception:
-                count_must_be = None
-            continue
-
-        lowered = stripped.lower()
-        if lowered.startswith("specialists_required:") or lowered.startswith("allowed_specialists_only:"):
-            active = True
-            inline = stripped.split(":", 1)[1].strip()
-            if inline:
-                parts = [_clean_item(p) for p in re.split(r"[,;]", inline) if _clean_item(p)]
-                explicit_items.extend(parts)
-            continue
-
-        if not active:
-            continue
-
-        if re.match(r"^[A-Za-z0-9_/@.-]+\s*[:=]", stripped):
-            break
-
-        cleaned = _clean_item(stripped)
-        if cleaned and cleaned != stripped:
-            explicit_items.append(cleaned)
-            continue
-
-        if stripped.startswith(("-", "*", "•")) or re.match(r"^\d+[.)]\s+", stripped):
-            if cleaned:
-                explicit_items.append(cleaned)
-            continue
-
-        if explicit_items:
-            break
-
-    if count_must_be is not None and count_must_be > 1:
-        return True
-    return len([item for item in explicit_items if item]) > 1
-
-
 def _build_runtime_constraint_violation_text(constraints: Dict[str, Any], violations: List[str]) -> str:
     lines = ["CONSTRAINT_VIOLATION"]
     if constraints.get("required_signer"):
@@ -12258,11 +12195,6 @@ def chat(
         first = full.split()[0] if full.split() else full
         if first:
             alias_to_agent.setdefault(first, a)
-        canonical_slug = _canonical_dispatch_specialist_slug(full)
-        if canonical_slug:
-            alias_to_agent.setdefault(canonical_slug, a)
-
-    raw_multi_specialist_hard_constraints = _raw_message_requests_multi_specialist_hard_constraints(inp.message)
 
     # PATCH27_12AY — Orion self-knowledge hard gate BEFORE any fan-out
     forced_orion_agent = None
@@ -12276,7 +12208,7 @@ def chat(
             mention_tokens = ["orion"]
             has_team = False
 
-    if orion_only_flags.get("requested") and not team_technical_audit and not raw_multi_specialist_hard_constraints:
+    if orion_only_flags.get("requested") and not team_technical_audit:
         forced_orion_agent = (
             forced_orion_agent
             or alias_to_agent.get("orion")
@@ -12309,7 +12241,7 @@ def chat(
             requested_names = ["orion", "auditor", "cto"]
             mention_tokens = ["orion", "team"]
             has_team = True
-    if orion_only_flags.get("requested") and forced_orion_agent is not None and not team_technical_audit and not raw_multi_specialist_hard_constraints:
+    if orion_only_flags.get("requested") and forced_orion_agent is not None and not team_technical_audit:
         target_agents = [forced_orion_agent]
         requested_names = ["orion"]
         mention_tokens = ["orion"]
@@ -12373,7 +12305,7 @@ def chat(
                 requested_names=requested_names,
             )
             _forced_orion = _pick_target_agent_by_slug(target_agents, "orion")
-            if _forced_orion is not None and not raw_multi_specialist_hard_constraints:
+            if _forced_orion is not None:
                 target_agents = [_forced_orion]
                 requested_names = ["orion"]
     except Exception:
@@ -18605,6 +18537,240 @@ def _explicit_agent_override(db: Session, org: str, text: str) -> List[Agent]:
     ordered = [by_name[name.strip().lower()] for name in requested if name.strip().lower() in by_name]
     return ordered
 
+
+def _constraint_bullet_clean(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    raw = re.sub(r"^\s*[-*•]+\s*", "", raw)
+    raw = re.sub(r"^\s*\d+[.)]\s*", "", raw)
+    return raw.strip()
+
+
+def _extract_realtime_constraint_scalar(text: str, keys: List[str]) -> Optional[str]:
+    raw = text or ""
+    for key in keys:
+        match = re.search(rf"(?im)^\s*{re.escape(key)}\s*[:=]\s*([^\n#]+?)\s*$", raw)
+        if match:
+            cleaned = _constraint_bullet_clean(match.group(1))
+            slug = _canonical_dispatch_specialist_slug(cleaned)
+            if slug:
+                return slug
+    return None
+
+
+def _extract_realtime_constraint_list(text: str, keys: List[str]) -> List[str]:
+    raw = text or ""
+    lines = raw.splitlines()
+    collected: List[str] = []
+    active = False
+
+    for line in lines:
+        stripped = line.strip()
+        lowered = stripped.lower()
+        matched_key = None
+        for key in keys:
+            if lowered.startswith(f"{key.lower()}:") or lowered.startswith(f"{key.lower()}="):
+                matched_key = key
+                break
+        if matched_key is not None:
+            active = True
+            inline = re.split(r"[:=]", stripped, maxsplit=1)[1].strip() if re.search(r"[:=]", stripped) else ""
+            if inline:
+                parts = [_constraint_bullet_clean(part) for part in re.split(r"[,;]", inline) if _constraint_bullet_clean(part)]
+                collected.extend(parts)
+            continue
+        if not active:
+            continue
+        if not stripped:
+            if collected:
+                break
+            continue
+        if re.match(r"^\s*[-*•]\s+", line) or re.match(r"^\s*\d+[.)]\s+", line):
+            cleaned = _constraint_bullet_clean(stripped)
+            if cleaned:
+                collected.append(cleaned)
+            continue
+        if re.match(r"^[A-Za-z0-9_/@.\-]+\s*[:=]", stripped):
+            break
+        if collected:
+            break
+
+    if not collected:
+        for key in keys:
+            match = re.search(rf"(?im)^\s*{re.escape(key)}\s*[:=]\s*([^\n#]+?)\s*$", raw)
+            if match:
+                parts = [_constraint_bullet_clean(part) for part in re.split(r"[,;]", match.group(1)) if _constraint_bullet_clean(part)]
+                collected.extend(parts)
+                break
+
+    out: List[str] = []
+    seen: set = set()
+    for item in collected:
+        slug = _canonical_dispatch_specialist_slug(item)
+        if slug and slug not in seen:
+            out.append(slug)
+            seen.add(slug)
+    return out
+
+
+def _extract_realtime_constraint_count(text: str) -> Optional[int]:
+    raw = text or ""
+    for pattern in (
+        r"(?im)^\s*selected_specialists_count_must_be\s*[:=]\s*(\d+)\s*$",
+        r"(?im)^\s*selected_specialists_count\s*[:=]\s*(\d+)\s*$",
+    ):
+        match = re.search(pattern, raw)
+        if match:
+            try:
+                return int(match.group(1))
+            except Exception:
+                return None
+    return None
+
+
+def _realtime_hard_constraints_from_message(text: str) -> Dict[str, Any]:
+    required_signer = _extract_realtime_constraint_scalar(text, ["required_signer", "signer_must_be", "signer_must"])
+    specialists_required = _extract_realtime_constraint_list(text, ["specialists_required", "allowed_specialists_only"])
+    specialists_forbidden = _extract_realtime_constraint_list(text, ["specialists_forbidden", "forbidden_specialists"])
+    count_must_be = _extract_realtime_constraint_count(text)
+    if count_must_be is None and specialists_required:
+        count_must_be = len(specialists_required)
+    return {
+        "required_signer": required_signer,
+        "specialists_required": specialists_required,
+        "specialists_forbidden": specialists_forbidden,
+        "selected_specialists_count_must_be": count_must_be,
+        "has_hard_constraints": bool(required_signer or specialists_required or specialists_forbidden or count_must_be is not None),
+    }
+
+
+def _apply_realtime_hard_constraints_to_targets(
+    *,
+    target_agents: List[Any],
+    alias_to_agent: Dict[str, Any],
+    requested_names: Optional[List[str]],
+    mention_tokens: Optional[List[str]],
+    message_text: str,
+) -> Dict[str, Any]:
+    constraints = _realtime_hard_constraints_from_message(message_text)
+    if not constraints.get("has_hard_constraints"):
+        return {
+            "target_agents": list(target_agents or []),
+            "requested_names": list(requested_names or []),
+            "mention_tokens": list(mention_tokens or []),
+            "violations": [],
+            "constraints": constraints,
+            "hard_multi": False,
+        }
+
+    unique_agents: List[Any] = []
+    seen_ids: set = set()
+    for ag in list(target_agents or []):
+        agid = getattr(ag, "id", None)
+        if agid in seen_ids:
+            continue
+        unique_agents.append(ag)
+        seen_ids.add(agid)
+
+    def _resolve_by_slug(slug: str) -> Any:
+        if not slug:
+            return None
+        direct = alias_to_agent.get(slug)
+        if direct is not None:
+            return direct
+        for ag in alias_to_agent.values():
+            if _canonical_dispatch_specialist_slug(getattr(ag, "name", None)) == slug:
+                return ag
+        return None
+
+    required_signer = constraints.get("required_signer")
+    specialists_required = list(constraints.get("specialists_required") or [])
+    specialists_forbidden = set(constraints.get("specialists_forbidden") or [])
+    count_must_be = constraints.get("selected_specialists_count_must_be")
+    violations: List[str] = []
+
+    if specialists_required:
+        constrained_targets: List[Any] = []
+        missing: List[str] = []
+        seen_req_ids: set = set()
+        for slug in specialists_required:
+            ag = _resolve_by_slug(slug)
+            if ag is None:
+                missing.append(slug)
+                continue
+            agid = getattr(ag, "id", None)
+            if agid in seen_req_ids:
+                continue
+            constrained_targets.append(ag)
+            seen_req_ids.add(agid)
+        if missing:
+            violations.append("missing required specialists: " + ", ".join(missing))
+        unique_agents = constrained_targets
+
+    if specialists_forbidden:
+        forbidden_hits: List[str] = []
+        filtered: List[Any] = []
+        for ag in unique_agents:
+            slug = _canonical_dispatch_specialist_slug(getattr(ag, "name", None))
+            if slug in specialists_forbidden:
+                forbidden_hits.append(slug)
+                continue
+            filtered.append(ag)
+        unique_agents = filtered
+        if forbidden_hits:
+            violations.append("forbidden specialists selected: " + ", ".join(sorted(set(forbidden_hits))))
+
+    if required_signer:
+        signer_agent = _resolve_by_slug(required_signer)
+        if signer_agent is None:
+            violations.append(f"required signer unavailable: {required_signer}")
+        else:
+            signer_id = getattr(signer_agent, "id", None)
+            if all(getattr(ag, "id", None) != signer_id for ag in unique_agents):
+                unique_agents = [signer_agent] + unique_agents
+
+    deduped: List[Any] = []
+    seen_ids = set()
+    for ag in unique_agents:
+        agid = getattr(ag, "id", None)
+        if agid in seen_ids:
+            continue
+        deduped.append(ag)
+        seen_ids.add(agid)
+    unique_agents = deduped
+
+    if count_must_be is not None:
+        try:
+            expected_count = int(count_must_be)
+        except Exception:
+            expected_count = None
+        if expected_count is not None and len(unique_agents) != expected_count:
+            violations.append(f"selected_specialists_count_must_be={expected_count} but got {len(unique_agents)}")
+
+    requested_out = list(requested_names or [])
+    if specialists_required:
+        requested_out = list(specialists_required)
+
+    mention_out = list(mention_tokens or [])
+    if specialists_required:
+        mention_out = [f"@{slug}" for slug in specialists_required]
+
+    hard_multi = bool(
+        len(list(specialists_required or [])) > 1
+        or ((count_must_be is not None) and int(count_must_be or 0) > 1)
+    )
+
+    return {
+        "target_agents": unique_agents,
+        "requested_names": requested_out,
+        "mention_tokens": mention_out,
+        "violations": violations,
+        "constraints": constraints,
+        "hard_multi": hard_multi,
+    }
+
+
 def _run_realtime_multi_agent_turn(
     db: Session,
     *,
@@ -18657,7 +18823,6 @@ def _run_realtime_multi_agent_turn(
             target_agents = [host_agent]
 
     requested_names = _detect_requested_agent_names(text_in)
-    raw_multi_specialist_hard_constraints = _raw_message_requests_multi_specialist_hard_constraints(text_in)
 
     if requested_names:
         requested_norm = [x.strip().lower() for x in requested_names]
@@ -18682,13 +18847,39 @@ def _run_realtime_multi_agent_turn(
             # When the user explicitly requests specialists, skip host-only answer and bring them immediately.
             target_agents = filtered
 
-    # Realtime turn-taking policy:
-    # - explicit single specialist -> only that specialist speaks
-    # - explicit multi/team/board -> only one specialist speaks per realtime turn
-    # - default multi-agent team mode -> also limit to one specialist per turn
-    # - hard-constrained multi-specialist requests must preserve the internal squad
-    if len(target_agents) > 1 and not raw_multi_specialist_hard_constraints:
-        target_agents = target_agents[:1]
+    all_org_agents = db.execute(
+        select(Agent).where(Agent.org_slug == org)
+    ).scalars().all()
+    alias_to_agent: Dict[str, Any] = {}
+    for ag in list(all_org_agents or []):
+        if not ag:
+            continue
+        ag_name = (getattr(ag, "name", None) or "").strip()
+        if not ag_name:
+            continue
+        full = ag_name.lower()
+        alias_to_agent.setdefault(full, ag)
+        first = full.split()[0] if full.split() else full
+        if first:
+            alias_to_agent.setdefault(first, ag)
+        slug = _canonical_dispatch_specialist_slug(ag_name)
+        if slug:
+            alias_to_agent.setdefault(slug, ag)
+
+    mention_tokens: List[str] = [f"@{name}" for name in requested_names]
+    _realtime_constraint_guard = _apply_realtime_hard_constraints_to_targets(
+        target_agents=target_agents,
+        alias_to_agent=alias_to_agent,
+        requested_names=requested_names,
+        mention_tokens=mention_tokens,
+        message_text=text_in,
+    )
+    target_agents = list(_realtime_constraint_guard.get("target_agents") or target_agents)
+    requested_names = list(_realtime_constraint_guard.get("requested_names") or requested_names)
+    mention_tokens = list(_realtime_constraint_guard.get("mention_tokens") or mention_tokens)
+    realtime_constraint_violations = list(_realtime_constraint_guard.get("violations") or [])
+    realtime_constraints = dict(_realtime_constraint_guard.get("constraints") or {})
+    hard_multi = bool(_realtime_constraint_guard.get("hard_multi"))
 
     tid = rs.thread_id
     uid = user.get("sub")
@@ -18699,8 +18890,66 @@ def _run_realtime_multi_agent_turn(
         .order_by(Message.created_at.asc())
     ).scalars().all()
 
-    has_team = len(target_agents) > 1
-    mention_tokens: List[str] = [f"@{name}" for name in requested_names]
+    if realtime_constraint_violations:
+        violation_text = _build_runtime_constraint_violation_text(realtime_constraints, realtime_constraint_violations)
+        signer_slug = str(realtime_constraints.get("required_signer") or "orion").strip().lower() or "orion"
+        signer_agent = alias_to_agent.get(signer_slug) or host_agent
+        signer_id = getattr(signer_agent, "id", None) if signer_agent is not None else None
+        signer_name = getattr(signer_agent, "name", None) if signer_agent is not None else signer_slug.title()
+        try:
+            db.add(
+                Message(
+                    id=new_id(),
+                    org_slug=org,
+                    thread_id=tid,
+                    user_id=None,
+                    user_name=None,
+                    role="assistant",
+                    content=violation_text,
+                    agent_id=signer_id,
+                    agent_name=signer_name,
+                    created_at=now_ts(),
+                )
+            )
+            db.add(
+                RealtimeEvent(
+                    id=new_id(),
+                    org_slug=org,
+                    session_id=rs.id,
+                    thread_id=tid,
+                    speaker_type="agent",
+                    speaker_id=signer_id,
+                    agent_id=signer_id,
+                    agent_name=signer_name,
+                    event_type="response.final",
+                    transcript_raw=violation_text,
+                    transcript_punct=violation_text,
+                    created_at=now_ts(),
+                    client_event_id=None,
+                    meta=json.dumps({"source": "realtime_constraint_violation"}, ensure_ascii=False),
+                )
+            )
+            db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+        return [{
+            "agent_id": signer_id,
+            "agent_name": signer_name,
+            "text": violation_text,
+        }]
+
+    # Realtime turn-taking policy:
+    # - explicit single specialist -> only that specialist speaks
+    # - explicit multi/team/board -> only one specialist speaks per realtime turn
+    # - default multi-agent team mode -> also limit to one specialist per turn
+    # IMPORTANT: hard multi-agent constraints preserve the full internal squad for this execution.
+    if len(target_agents) > 1 and not hard_multi:
+        target_agents = target_agents[:1]
+
+    has_team = bool(hard_multi or len(target_agents) > 1)
     answers: List[Dict[str, Any]] = []
 
     handoff_line = _build_realtime_handoff_line(getattr(host_agent, "name", None) or "Orkio", requested_names)
