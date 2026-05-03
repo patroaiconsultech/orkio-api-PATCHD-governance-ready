@@ -5739,6 +5739,69 @@ def _runtime_hard_constraints_from_enrichment(runtime_enrichment: Optional[Dict[
     }
 
 
+
+
+def _raw_message_requests_multi_specialist_hard_constraints(message: Any) -> bool:
+    raw = str(message or "")
+    if not raw.strip():
+        return False
+
+    count_must_be: Optional[int] = None
+    explicit_items: List[str] = []
+    active = False
+
+    def _clean_item(value: str) -> str:
+        cleaned = re.sub(r"^\s*(?:[-*•]+|\d+[.)])\s*", "", str(value or "")).strip()
+        return cleaned
+
+    for line in raw.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            if active and explicit_items:
+                break
+            continue
+
+        m_count = re.match(r"(?i)^selected_specialists_count_must_be\s*[:=]\s*(\d+)\s*$", stripped)
+        if m_count:
+            try:
+                count_must_be = int(m_count.group(1))
+            except Exception:
+                count_must_be = None
+            continue
+
+        lowered = stripped.lower()
+        if lowered.startswith("specialists_required:") or lowered.startswith("allowed_specialists_only:"):
+            active = True
+            inline = stripped.split(":", 1)[1].strip()
+            if inline:
+                parts = [_clean_item(p) for p in re.split(r"[,;]", inline) if _clean_item(p)]
+                explicit_items.extend(parts)
+            continue
+
+        if not active:
+            continue
+
+        if re.match(r"^[A-Za-z0-9_/@.-]+\s*[:=]", stripped):
+            break
+
+        cleaned = _clean_item(stripped)
+        if cleaned and cleaned != stripped:
+            explicit_items.append(cleaned)
+            continue
+
+        if stripped.startswith(("-", "*", "•")) or re.match(r"^\d+[.)]\s+", stripped):
+            if cleaned:
+                explicit_items.append(cleaned)
+            continue
+
+        if explicit_items:
+            break
+
+    if count_must_be is not None and count_must_be > 1:
+        return True
+    return len([item for item in explicit_items if item]) > 1
+
+
 def _build_runtime_constraint_violation_text(constraints: Dict[str, Any], violations: List[str]) -> str:
     lines = ["CONSTRAINT_VIOLATION"]
     if constraints.get("required_signer"):
@@ -12195,6 +12258,11 @@ def chat(
         first = full.split()[0] if full.split() else full
         if first:
             alias_to_agent.setdefault(first, a)
+        canonical_slug = _canonical_dispatch_specialist_slug(full)
+        if canonical_slug:
+            alias_to_agent.setdefault(canonical_slug, a)
+
+    raw_multi_specialist_hard_constraints = _raw_message_requests_multi_specialist_hard_constraints(inp.message)
 
     # PATCH27_12AY — Orion self-knowledge hard gate BEFORE any fan-out
     forced_orion_agent = None
@@ -12208,7 +12276,7 @@ def chat(
             mention_tokens = ["orion"]
             has_team = False
 
-    if orion_only_flags.get("requested") and not team_technical_audit:
+    if orion_only_flags.get("requested") and not team_technical_audit and not raw_multi_specialist_hard_constraints:
         forced_orion_agent = (
             forced_orion_agent
             or alias_to_agent.get("orion")
@@ -12241,7 +12309,7 @@ def chat(
             requested_names = ["orion", "auditor", "cto"]
             mention_tokens = ["orion", "team"]
             has_team = True
-    if orion_only_flags.get("requested") and forced_orion_agent is not None and not team_technical_audit:
+    if orion_only_flags.get("requested") and forced_orion_agent is not None and not team_technical_audit and not raw_multi_specialist_hard_constraints:
         target_agents = [forced_orion_agent]
         requested_names = ["orion"]
         mention_tokens = ["orion"]
@@ -12305,7 +12373,7 @@ def chat(
                 requested_names=requested_names,
             )
             _forced_orion = _pick_target_agent_by_slug(target_agents, "orion")
-            if _forced_orion is not None:
+            if _forced_orion is not None and not raw_multi_specialist_hard_constraints:
                 target_agents = [_forced_orion]
                 requested_names = ["orion"]
     except Exception:
@@ -18589,6 +18657,7 @@ def _run_realtime_multi_agent_turn(
             target_agents = [host_agent]
 
     requested_names = _detect_requested_agent_names(text_in)
+    raw_multi_specialist_hard_constraints = _raw_message_requests_multi_specialist_hard_constraints(text_in)
 
     if requested_names:
         requested_norm = [x.strip().lower() for x in requested_names]
@@ -18617,7 +18686,8 @@ def _run_realtime_multi_agent_turn(
     # - explicit single specialist -> only that specialist speaks
     # - explicit multi/team/board -> only one specialist speaks per realtime turn
     # - default multi-agent team mode -> also limit to one specialist per turn
-    if len(target_agents) > 1:
+    # - hard-constrained multi-specialist requests must preserve the internal squad
+    if len(target_agents) > 1 and not raw_multi_specialist_hard_constraints:
         target_agents = target_agents[:1]
 
     tid = rs.thread_id
