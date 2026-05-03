@@ -1954,7 +1954,7 @@ def resolve_agent_voice(agent: Optional[Agent]) -> str:
     return _normalize_voice_id(db_voice or env_voice or default_voice, default=default_voice)
 
 def ensure_core_agents(db: Session, org: str) -> None:
-    """Ensure the 3 core agents exist for the org (Summit boardroom edition)."""
+    """Ensure the core board + audit specialists exist for the org (Summit boardroom edition)."""
     rows = list(db.execute(select(Agent).where(Agent.org_slug == org).order_by(Agent.created_at.asc())).scalars().all())
     by_key = {(a.name or "").strip().lower(): a for a in rows}
 
@@ -2108,6 +2108,30 @@ Typical response length: 2–4 short paragraphs or a structured technical analys
         aliases=["Orion (CTO)"],
         description="CTO specialist. Architecture, AI systems, security, and scalability.",
         system_prompt=orion_prompt,
+        voice_id="echo",
+        is_default=False,
+    )
+    upsert(
+        canonical_name="Auditor",
+        aliases=["Technical Auditor", "Auditor (Technical Auditor)"],
+        description="Technical auditor specialist. Runtime evidence, constraints, regressions, and execution integrity.",
+        system_prompt=auditor_prompt,
+        voice_id="echo",
+        is_default=False,
+    )
+    upsert(
+        canonical_name="CTO",
+        aliases=["Systems Architect", "CTO (Systems Architect)"],
+        description="Systems architect specialist. Dispatch architecture, routing, and execution depth.",
+        system_prompt=cto_delegate_prompt,
+        voice_id="echo",
+        is_default=False,
+    )
+    upsert(
+        canonical_name="UX Frontend",
+        aliases=["UX/Frontend", "UX Frontend", "Frontend UX", "UX (Frontend)"],
+        description="UX/frontend specialist. Rendering clarity, state transitions, and visible execution quality.",
+        system_prompt=ux_frontend_prompt,
         voice_id="echo",
         is_default=False,
     )
@@ -5739,6 +5763,121 @@ def _runtime_hard_constraints_from_enrichment(runtime_enrichment: Optional[Dict[
     }
 
 
+def _register_dispatch_agent_aliases(alias_to_agent: Dict[str, Any], agent: Any) -> None:
+    if agent is None:
+        return
+    ag_name = str(getattr(agent, "name", None) or "").strip()
+    if not ag_name:
+        return
+    full = ag_name.lower()
+    full_variants = {
+        full,
+        full.replace("/", "_"),
+        full.replace("/", " "),
+        full.replace("-", "_"),
+        full.replace("-", " "),
+        full.replace("_", " "),
+    }
+    for variant in list(full_variants):
+        if variant:
+            alias_to_agent.setdefault(variant, agent)
+    first = full.split()[0] if full.split() else full
+    if first:
+        alias_to_agent.setdefault(first, agent)
+    slug = _canonical_dispatch_specialist_slug(ag_name)
+    if slug:
+        alias_to_agent.setdefault(slug, agent)
+
+    extra_aliases: List[str] = []
+    if slug == "orkio":
+        extra_aliases = ["orkio", "ceo", "host"]
+    elif slug == "orion":
+        extra_aliases = ["orion", "cto_runtime", "cto runtime", "orion_cto", "orion cto"]
+    elif slug == "auditor":
+        extra_aliases = [
+            "auditor",
+            "technical_auditor",
+            "technical auditor",
+            "runtime_auditor",
+            "runtime auditor",
+            "technical_audit",
+            "technical audit",
+        ]
+    elif slug == "cto":
+        extra_aliases = [
+            "cto",
+            "systems_architect",
+            "systems architect",
+            "cto_delegate",
+            "cto delegate",
+            "systems_architecture",
+        ]
+    elif slug == "ux_frontend":
+        extra_aliases = [
+            "ux_frontend",
+            "ux/frontend",
+            "ux frontend",
+            "frontend ux",
+            "ux",
+            "frontend",
+            "ui_ux",
+            "ui ux",
+        ]
+    elif slug == "chris":
+        extra_aliases = ["chris", "cfo", "vp_cfo", "vp/cfo", "chris cfo"]
+    for extra in extra_aliases:
+        alias_to_agent.setdefault(extra, agent)
+
+
+def _build_dispatch_alias_map(agents: List[Any]) -> Dict[str, Any]:
+    alias_to_agent: Dict[str, Any] = {}
+    for agent in list(agents or []):
+        _register_dispatch_agent_aliases(alias_to_agent, agent)
+    return alias_to_agent
+
+
+def _resolve_dispatch_agent_by_slug(
+    slug: str,
+    *,
+    alias_to_agent: Dict[str, Any],
+    db: Optional[Session] = None,
+    org: Optional[str] = None,
+) -> Any:
+    slug = _canonical_dispatch_specialist_slug(slug) or ""
+    if not slug:
+        return None
+    direct = alias_to_agent.get(slug)
+    if direct is not None:
+        return direct
+    for agent in list(alias_to_agent.values()):
+        if _canonical_dispatch_specialist_slug(getattr(agent, "name", None)) == slug:
+            return agent
+    if db is not None and org:
+        try:
+            ensure_core_agents(db, org)
+        except Exception:
+            try:
+                logger.exception("ENSURE_CORE_AGENTS_ALIAS_RESOLUTION_FAILED org=%s slug=%s", org, slug)
+            except Exception:
+                pass
+        try:
+            fresh_agents = db.execute(select(Agent).where(Agent.org_slug == org)).scalars().all()
+            for agent in list(fresh_agents or []):
+                _register_dispatch_agent_aliases(alias_to_agent, agent)
+        except Exception:
+            try:
+                logger.exception("DISPATCH_ALIAS_REFRESH_FAILED org=%s slug=%s", org, slug)
+            except Exception:
+                pass
+        direct = alias_to_agent.get(slug)
+        if direct is not None:
+            return direct
+        for agent in list(alias_to_agent.values()):
+            if _canonical_dispatch_specialist_slug(getattr(agent, "name", None)) == slug:
+                return agent
+    return None
+
+
 def _build_runtime_constraint_violation_text(constraints: Dict[str, Any], violations: List[str]) -> str:
     lines = ["CONSTRAINT_VIOLATION"]
     if constraints.get("required_signer"):
@@ -5764,6 +5903,8 @@ def _apply_runtime_hard_constraints_to_targets(
     mention_tokens: Optional[List[str]],
     has_team: bool,
     runtime_enrichment: Optional[Dict[str, Any]],
+    db: Optional[Session] = None,
+    org: Optional[str] = None,
 ) -> Dict[str, Any]:
     constraints = _runtime_hard_constraints_from_enrichment(runtime_enrichment)
     if not constraints.get("has_hard_constraints"):
@@ -5787,15 +5928,12 @@ def _apply_runtime_hard_constraints_to_targets(
         seen_ids.add(agid)
 
     def _resolve_by_slug(slug: str) -> Any:
-        if not slug:
-            return None
-        direct = alias_to_agent.get(slug)
-        if direct is not None:
-            return direct
-        for ag in alias_to_agent.values():
-            if _canonical_dispatch_specialist_slug(getattr(ag, "name", None)) == slug:
-                return ag
-        return None
+        return _resolve_dispatch_agent_by_slug(
+            slug,
+            alias_to_agent=alias_to_agent,
+            db=db,
+            org=org,
+        )
 
     required_signer = constraints.get("required_signer")
     specialists_required = list(constraints.get("specialists_required") or [])
@@ -5807,6 +5945,7 @@ def _apply_runtime_hard_constraints_to_targets(
         constrained_targets: List[Any] = []
         missing: List[str] = []
         seen_req_ids: set = set()
+        resolved_names: List[str] = []
         for slug in specialists_required:
             ag = _resolve_by_slug(slug)
             if ag is None:
@@ -5817,6 +5956,16 @@ def _apply_runtime_hard_constraints_to_targets(
                 continue
             constrained_targets.append(ag)
             seen_req_ids.add(agid)
+            resolved_names.append(str(getattr(ag, "name", None) or slug))
+        try:
+            logger.info(
+                "HARD_CONSTRAINT_AGENT_RESOLUTION requested=%s resolved=%s missing=%s",
+                list(specialists_required or []),
+                resolved_names,
+                missing,
+            )
+        except Exception:
+            pass
         if missing:
             violations.append("missing required specialists: " + ", ".join(missing))
         unique_agents = constrained_targets
@@ -12185,16 +12334,15 @@ def chat(
     has_team = any(m.strip().lower() in ("time", "team") for m in mention_tokens) or len(requested_names) > 1
 
     # Build alias map once
+    try:
+        ensure_core_agents(db, org)
+    except Exception:
+        try:
+            logger.exception("ENSURE_CORE_AGENTS_CHAT_FAILED org=%s", org)
+        except Exception:
+            pass
     all_agents = db.execute(select(Agent).where(Agent.org_slug == org)).scalars().all()
-    alias_to_agent: Dict[str, Any] = {}
-    for a in all_agents:
-        if not a or not a.name:
-            continue
-        full = a.name.strip().lower()
-        alias_to_agent[full] = a
-        first = full.split()[0] if full.split() else full
-        if first:
-            alias_to_agent.setdefault(first, a)
+    alias_to_agent = _build_dispatch_alias_map(list(all_agents or []))
 
     # PATCH27_12AY — Orion self-knowledge hard gate BEFORE any fan-out
     forced_orion_agent = None
@@ -12319,6 +12467,8 @@ def chat(
             mention_tokens=mention_tokens,
             has_team=has_team,
             runtime_enrichment=runtime_enrichment,
+            db=db,
+            org=org,
         )
         target_agents = list(_constraint_guard.get("target_agents") or target_agents)
         requested_names = list(_constraint_guard.get("requested_names") or requested_names)
@@ -15817,16 +15967,15 @@ async def chat_stream(
 
     has_team = any(m.strip().lower() in ("time", "team") for m in mention_tokens) or len(requested_names) > 1
 
+    try:
+        ensure_core_agents(db, org)
+    except Exception:
+        try:
+            logger.exception("ENSURE_CORE_AGENTS_CHAT_STREAM_FAILED org=%s", org)
+        except Exception:
+            pass
     all_agents_rows = db.execute(select(Agent).where(Agent.org_slug == org)).scalars().all()
-    alias_to_agent: Dict[str, Any] = {}
-    for a in all_agents_rows:
-        if not a or not a.name:
-            continue
-        full = a.name.strip().lower()
-        alias_to_agent[full] = a
-        first = full.split()[0] if full.split() else full
-        if first:
-            alias_to_agent.setdefault(first, a)
+    alias_to_agent = _build_dispatch_alias_map(list(all_agents_rows or []))
 
     # PATCH27_12AY — Orion self-knowledge hard gate BEFORE any fan-out
     forced_orion_row = None
@@ -15995,6 +16144,8 @@ async def chat_stream(
             mention_tokens=mention_tokens,
             has_team=has_team,
             runtime_enrichment=runtime_enrichment,
+            db=db,
+            org=org,
         )
         target_agents = list(_constraint_guard.get("target_agents") or target_agents)
         requested_names = list(_constraint_guard.get("requested_names") or requested_names)
@@ -18464,7 +18615,10 @@ def _detect_requested_agent_names(message: str) -> List[str]:
     patterns = [
         ("Orkio", [r"@orkio\b", r"\borkio\b", r"host\b", r"moderador", r"moderator"]),
         ("Chris", [r"@chris\b", r"\bchris\b", r"\bcfo\b", r"financeir", r"financial", r"financ"]),
-        ("Orion", [r"@orion\b", r"\borion\b", r"\bcto\b", r"tecnolog", r"technical", r"arquitetur", r"engineering"]),
+        ("Orion", [r"@orion\b", r"\borion\b", r"\borion only\b", r"orion only", r"signer\s*[:=]\s*orion", r"required_signer\s*[:=]\s*orion"]),
+        ("Auditor", [r"@auditor\b", r"\bauditor\b", r"technical auditor", r"auditoria t[ée]cnica", r"runtime audit"]),
+        ("CTO", [r"@cto\b", r"\bcto\b", r"systems architect", r"system architect"]),
+        ("UX Frontend", [r"ux/frontend", r"ux_frontend", r"ux frontend", r"frontend ux", r"@ux\b", r"@frontend\b"]),
     ]
     for name, pats in patterns:
         if name.strip().lower() in excluded:
@@ -18652,6 +18806,8 @@ def _apply_realtime_hard_constraints_to_targets(
     requested_names: Optional[List[str]],
     mention_tokens: Optional[List[str]],
     message_text: str,
+    db: Optional[Session] = None,
+    org: Optional[str] = None,
 ) -> Dict[str, Any]:
     constraints = _realtime_hard_constraints_from_message(message_text)
     if not constraints.get("has_hard_constraints"):
@@ -18674,15 +18830,12 @@ def _apply_realtime_hard_constraints_to_targets(
         seen_ids.add(agid)
 
     def _resolve_by_slug(slug: str) -> Any:
-        if not slug:
-            return None
-        direct = alias_to_agent.get(slug)
-        if direct is not None:
-            return direct
-        for ag in alias_to_agent.values():
-            if _canonical_dispatch_specialist_slug(getattr(ag, "name", None)) == slug:
-                return ag
-        return None
+        return _resolve_dispatch_agent_by_slug(
+            slug,
+            alias_to_agent=alias_to_agent,
+            db=db,
+            org=org,
+        )
 
     required_signer = constraints.get("required_signer")
     specialists_required = list(constraints.get("specialists_required") or [])
@@ -18788,6 +18941,11 @@ def _run_realtime_multi_agent_turn(
     if not text_in:
         return []
 
+    try:
+        ensure_core_agents(db, org)
+    except Exception:
+        logger.exception("ENSURE_CORE_AGENTS_REALTIME_FAILED org=%s", org)
+
     host_agent = None
     if getattr(rs, "agent_id", None):
         host_agent = db.execute(
@@ -18858,13 +19016,31 @@ def _run_realtime_multi_agent_turn(
         if not ag_name:
             continue
         full = ag_name.lower()
-        alias_to_agent.setdefault(full, ag)
+        full_variants = {
+            full,
+            full.replace("/", "_"),
+            full.replace("/", " "),
+            full.replace("-", "_"),
+            full.replace("-", " "),
+        }
+        for variant in list(full_variants):
+            if variant:
+                alias_to_agent.setdefault(variant, ag)
         first = full.split()[0] if full.split() else full
         if first:
             alias_to_agent.setdefault(first, ag)
         slug = _canonical_dispatch_specialist_slug(ag_name)
         if slug:
             alias_to_agent.setdefault(slug, ag)
+        if slug == "auditor":
+            for extra in ("auditor", "technical_auditor", "technical auditor", "runtime_auditor", "runtime auditor"):
+                alias_to_agent.setdefault(extra, ag)
+        elif slug == "cto":
+            for extra in ("cto", "systems_architect", "systems architect", "cto_delegate", "cto delegate"):
+                alias_to_agent.setdefault(extra, ag)
+        elif slug == "ux_frontend":
+            for extra in ("ux_frontend", "ux/frontend", "ux frontend", "frontend ux", "ux", "frontend"):
+                alias_to_agent.setdefault(extra, ag)
 
     mention_tokens: List[str] = [f"@{name}" for name in requested_names]
     _realtime_constraint_guard = _apply_realtime_hard_constraints_to_targets(
@@ -18873,6 +19049,8 @@ def _run_realtime_multi_agent_turn(
         requested_names=requested_names,
         mention_tokens=mention_tokens,
         message_text=text_in,
+        db=db,
+        org=org,
     )
     target_agents = list(_realtime_constraint_guard.get("target_agents") or target_agents)
     requested_names = list(_realtime_constraint_guard.get("requested_names") or requested_names)
