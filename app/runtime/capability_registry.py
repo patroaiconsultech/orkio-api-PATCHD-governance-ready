@@ -121,6 +121,19 @@ CAPABILITY_EXECUTION_BINDINGS = {
         "allowed_agents": ["orion"],
         "write": True,
     },
+
+    "squad_resolve_readonly": {
+        "executor": "orion_internal.resolve_squad_readonly",
+        "mode": "runtime",
+        "allowed_agents": ["orkio", "orion"],
+        "write": False,
+    },
+    "squad_resolution_trace_readonly": {
+        "executor": "orion_internal.squad_resolution_trace_readonly",
+        "mode": "runtime",
+        "allowed_agents": ["orkio", "orion"],
+        "write": False,
+    },
 }
 
 
@@ -145,6 +158,8 @@ CAPABILITY_REGISTRY = {
             "premium_audit_backlog_generate",
             "premium_audit_patch_candidate_select",
             "controlled_self_evolution_execute_proposal",
+            "squad_resolve_readonly",
+            "squad_resolution_trace_readonly",
         ],
         "triggers": [
             "default",
@@ -167,6 +182,14 @@ CAPABILITY_REGISTRY = {
             "followup",
             "incremental",
             "dispatch followup",
+            "resolva exatamente este squad",
+            "resolver squad",
+            "squad resolvido",
+            "resolve exactly this squad",
+            "requested_specialists_raw",
+            "selected_specialists_before_policy",
+            "selected_specialists_after_policy",
+            "abort_reason",
         ],
         "dependencies": [],
         "priority": 100,
@@ -199,6 +222,8 @@ CAPABILITY_REGISTRY = {
             "controlled_self_evolution_propose_only",
             "premium_audit_backlog_generate",
             "premium_audit_patch_candidate_select",
+            "squad_resolve_readonly",
+            "squad_resolution_trace_readonly",
         ],
         "triggers": [
             "github",
@@ -234,6 +259,15 @@ CAPABILITY_REGISTRY = {
             "followup",
             "incremental",
             "dispatch followup",
+            "resolva exatamente este squad",
+            "resolver squad",
+            "squad resolvido",
+            "resolve exactly this squad",
+            "requested_specialists_raw",
+            "requested_specialists_normalized",
+            "selected_specialists_before_policy",
+            "selected_specialists_after_policy",
+            "abort_reason",
         ],
         "dependencies": ["orkio"],
         "priority": 98,
