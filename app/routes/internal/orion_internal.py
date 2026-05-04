@@ -2227,9 +2227,14 @@ def _audit_specialist_views(scope: str) -> Dict[str, List[str]]:
             "Do ponto de vista de produto, readiness repetido degrada confiança do usuário mesmo quando o backend faz a coisa certa.",
             "A percepção de maturidade melhora quando a resposta final traduz corretamente o que já foi executado internamente.",
         ],
+        "ux_frontend": [
+            "Quando a interface depende de refresh completo para materializar a resposta final, a percepção do usuário é de falha operacional.",
+            "O trilho de fallback precisa concluir no mesmo turno visual, sem depender de reconciliação tardia da thread.",
+        ],
     }
     if scope != "specialist":
         views.pop("chris", None)
+        views.pop("ux_frontend", None)
     return views
 
 
@@ -2237,10 +2242,18 @@ def _audit_specialist_views(scope: str) -> Dict[str, List[str]]:
 def _audit_selected_specialists(scope: str, include_frontend: bool = False, premium_mode: bool = False) -> List[str]:
     if premium_mode:
         return ["auditor", "cto", "orion", "chris", "architect", "devops", "security", "memory_ops", "stage_manager"]
+
     selected = ["auditor", "cto", "orion"]
-    if scope == "specialist" or include_frontend:
-        selected.append("chris")
-    return selected
+
+    needs_frontend = (
+        scope == "specialist"
+        or bool(include_frontend)
+    )
+
+    if needs_frontend:
+        selected.append("ux_frontend")
+
+    return _dedupe_dispatch_actors(selected)
 
 
 def _audit_dispatch_receipts(selected_specialists: List[str], scope: str) -> List[Dict[str, Any]]:
