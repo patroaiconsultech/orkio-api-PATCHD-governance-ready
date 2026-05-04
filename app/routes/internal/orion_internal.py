@@ -154,6 +154,29 @@ def _looks_like_continuous_audit_request(message: str) -> bool:
     return any(marker in raw for marker in markers)
 
 
+def _continuous_audit_operation_kind(message: str) -> str:
+    effective = _continuous_audit_effective_input(message or "")
+    payload = dict(effective.get("payload") or {})
+    explicit = str(
+        payload.get("operation")
+        or payload.get("mode")
+        or payload.get("kind")
+        or payload.get("intent")
+        or payload.get("capability_name")
+        or payload.get("runtime_kind")
+        or ""
+    ).strip().lower()
+    if explicit in {"continuous_audit_job_status", "read_status", "status"}:
+        return "status"
+    if explicit in {"continuous_audit_job", "create_continuous_audit_job", "start_continuous_audit"}:
+        return "create"
+    if _looks_like_continuous_audit_status_request(message):
+        return "status"
+    if _looks_like_continuous_audit_request(message):
+        return "create"
+    return ""
+
+
 def _continuous_audit_title(message: str) -> str:
     headline = "Auditoria contínua read-only"
     for line in (message or "").splitlines():
@@ -369,6 +392,8 @@ def start_continuous_audit_job(
     requested_by_user_id: Optional[str] = None,
     requested_by_user_name: Optional[str] = None,
 ) -> Dict[str, Any]:
+    if _continuous_audit_operation_kind(message or "") == "status":
+        return get_continuous_audit_status_from_message(db, org, message or "")
     effective = _continuous_audit_effective_input(
         message or "",
         include_frontend=bool(include_frontend),
@@ -519,6 +544,7 @@ def start_continuous_audit_job(
     return payload
 
 
+
 def _start_continuous_audit_job_detached(inp: "OrionRuntimeIn", *, org: str = "public") -> Dict[str, Any]:
     db: Optional[Session] = None
     effective = _continuous_audit_effective_input(
@@ -526,12 +552,15 @@ def _start_continuous_audit_job_detached(inp: "OrionRuntimeIn", *, org: str = "p
         include_frontend=bool(inp.include_frontend),
         thread_id=getattr(inp, "thread_id", None),
     )
+    effective_message = str(effective.get("message") or inp.message or "")
     try:
         db = SessionLocal()
+        if _continuous_audit_operation_kind(effective_message) == "status":
+            return get_continuous_audit_status_from_message(db, org, effective_message)
         return start_continuous_audit_job(
             db,
             org,
-            message=str(effective.get("message") or inp.message or ""),
+            message=effective_message,
             thread_id=(str(effective.get("thread_id") or "").strip() or None),
             include_frontend=bool(effective.get("include_frontend")),
             requested_by_user_name="orion_runtime",
@@ -542,7 +571,6 @@ def _start_continuous_audit_job_detached(inp: "OrionRuntimeIn", *, org: str = "p
                 db.close()
             except Exception:
                 pass
-
 
 def _get_continuous_audit_status_detached(inp: "OrionRuntimeIn", *, org: str = "public") -> Dict[str, Any]:
     db: Optional[Session] = None
@@ -2963,19 +2991,27 @@ def _build_platform_self_audit_payload(inp: "OrionRuntimeIn", visible_agent: str
     }
 
 
+
 def orion_runtime_execute(inp: "OrionRuntimeIn") -> Dict[str, Any]:
     message = inp.message or ""
-    lowered = message.lower()
-    visible_agent = _resolve_visible_agent(message, default="orion")
-    if _looks_like_continuous_audit_status_request(message):
+    effective = _continuous_audit_effective_input(
+        message,
+        include_frontend=bool(getattr(inp, "include_frontend", False)),
+        thread_id=getattr(inp, "thread_id", None),
+    )
+    effective_message = str(effective.get("message") or message or "")
+    lowered = effective_message.lower()
+    visible_agent = _resolve_visible_agent(effective_message, default="orion")
+    audit_op = _continuous_audit_operation_kind(message or effective_message)
+    if audit_op == "status":
         return _get_continuous_audit_status_detached(inp)
-    if _looks_like_continuous_audit_request(message):
+    if audit_op == "create":
         return _start_continuous_audit_job_detached(inp)
-    if _is_platform_improvement_review_request(message):
+    if _is_platform_improvement_review_request(effective_message):
         return platform_improvement_review(inp)
-    if _is_controlled_self_evolution_propose_request(message):
+    if _is_controlled_self_evolution_propose_request(effective_message):
         return platform_self_evolution_plan(inp)
-    if _is_orion_direct_diagnostic_request(message, visible_agent):
+    if _is_orion_direct_diagnostic_request(effective_message, visible_agent):
         return platform_self_audit(inp)
     if any(term in lowered for term in (
         "auditoria", "audit", "autoconhecimento", "consultivo", "somente leitura",
@@ -2992,10 +3028,9 @@ def orion_runtime_execute(inp: "OrionRuntimeIn") -> Dict[str, Any]:
         return safe_patch_plan(inp)
     if any(term in lowered for term in ("listar agentes", "membros do squad", "liste os agentes")):
         return list_squad_agents_post(inp)
-    if _looks_like_attachment_analysis_request(message):
+    if _looks_like_attachment_analysis_request(effective_message):
         return _attachment_analysis_read_payload(inp)
     return github_execute(inp)
-
 
 class OrionRuntimeIn(BaseModel):
     message: str = Field(min_length=1)
