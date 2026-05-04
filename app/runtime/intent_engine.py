@@ -369,6 +369,104 @@ def _extract_requested_specialists_from_text(text: str) -> list[str]:
     return _dedupe_preserve(collected)
 
 
+def _build_squad_readonly_payload(
+    *,
+    raw_user_input: str,
+    effective_user_input: str,
+    context: Dict[str, Any],
+    trace_mode: bool,
+) -> Dict[str, Any]:
+    hard_constraints = _extract_hard_constraints(effective_user_input or raw_user_input or "")
+    required_signer = str(hard_constraints.get("required_signer") or "").strip().lower() or "orion"
+    specialists_required = list(hard_constraints.get("specialists_required") or [])
+    specialists_forbidden = list(hard_constraints.get("specialists_forbidden") or [])
+    selected_specialists_count_must_be = hard_constraints.get("selected_specialists_count_must_be")
+    requested_specialists = _extract_requested_specialists_from_text(effective_user_input or raw_user_input or "") or specialists_required
+
+    capability_name = "squad_resolution_trace_readonly" if trace_mode else "squad_resolve_readonly"
+    template_id = "squad_resolution_trace_readonly_template_v1" if trace_mode else "squad_resolve_readonly_template_v1"
+    delivery_contract = "squad_resolution_trace_readonly_v1" if trace_mode else "squad_resolve_readonly_v1"
+
+    governance_decision = evaluate_governance_action(
+        action_scope="read",
+        capability_name=capability_name,
+        target_scope="platform",
+        context=context,
+        safe_mode=bool(context.get("safe_mode", False)),
+    )
+
+    recommended_agents = _dedupe_preserve([required_signer])
+    advisor_agents = _dedupe_preserve(recommended_agents + ["metatron"])
+
+    runtime_op = {
+        "kind": capability_name,
+        "action_scope": "read",
+        "target_scope": "platform",
+        "capability_name": capability_name,
+        "template_id": template_id,
+        "admin_access_mode": "standard",
+        "requires_write_approval": False,
+        "visible_signer_expected": required_signer,
+        "visible_only_agent": required_signer,
+        "excluded_agents": _dedupe_preserve(_excluded_agents(effective_user_input or raw_user_input or "") + specialists_forbidden),
+        "team_technical_audit": False,
+        "platform_improvement_review": False,
+        "continuous_audit_request": False,
+        "continuous_audit_status_request": False,
+        "incremental_dispatch_followup": False,
+        "hard_constraints_present": bool(hard_constraints.get("has_hard_constraints")),
+        "required_signer": required_signer,
+        "specialists_required": specialists_required,
+        "specialists_forbidden": specialists_forbidden,
+        "selected_specialists_count_must_be": selected_specialists_count_must_be,
+        "requested_specialists": list(requested_specialists),
+        "execution_mode": "read_only_squad_trace" if trace_mode else "read_only_squad_resolution",
+        "followup_mode": None,
+        "followup_subtype": None,
+        "use_dispatch_context_only": False,
+        "suppress_receipt_body": False,
+        "derivation_basis": [],
+        "expected_specialist_reports": list(requested_specialists),
+        "force_dispatch": False,
+        "squad_resolution_request": not trace_mode,
+        "squad_resolution_trace_request": trace_mode,
+        "continuous_audit_supported": False,
+        "requested_job_id": None,
+        "use_latest_continuous_audit_job": False,
+    }
+
+    return {
+        "intent": capability_name,
+        "confidence": 0.995,
+        "recommended_agents": recommended_agents,
+        "advisor_agents": advisor_agents,
+        "runtime_operation": runtime_op,
+        "requires_runtime_execution": True,
+        "target_agent": required_signer,
+        "delivery_contract": delivery_contract,
+        "template_id": template_id,
+        "structured_output": True,
+        "first_win_goal": "execute_orion_runtime",
+        "action_scope": "read",
+        "target_scope": "platform",
+        "capability_name": capability_name,
+        "governance_decision": governance_decision,
+        "allowed": bool(governance_decision.get("allowed")),
+        "requires_human_authorization": False,
+        "admin_access_mode": "standard",
+        "requires_write_approval": False,
+        "team_technical_audit": False,
+        "platform_improvement_review": False,
+        "continuous_audit_request": False,
+        "continuous_audit_status_request": False,
+        "incremental_dispatch_followup": False,
+        "expected_specialist_reports": list(requested_specialists),
+        "has_completed_dispatch_context": bool(_has_completed_dispatch_context(context)),
+        "hard_constraints": hard_constraints,
+        "requested_job_id": None,
+    }
+
+
 def _extract_continuous_audit_job_id(text: str) -> str:
     payload = _extract_embedded_runtime_payload(text or "")
     if isinstance(payload, dict):
@@ -762,6 +860,22 @@ def build_intent_package(
     context["message"] = effective_user_input
     context["raw_message"] = raw_user_input
 
+    if _looks_like_squad_resolution_trace_request(effective_user_input or raw_user_input or ""):
+        return _build_squad_readonly_payload(
+            raw_user_input=raw_user_input,
+            effective_user_input=effective_user_input,
+            context=context,
+            trace_mode=True,
+        )
+
+    if _looks_like_squad_resolution_request(effective_user_input or raw_user_input or ""):
+        return _build_squad_readonly_payload(
+            raw_user_input=raw_user_input,
+            effective_user_input=effective_user_input,
+            context=context,
+            trace_mode=False,
+        )
+
     has_completed_dispatch_context = _has_completed_dispatch_context(context)
     incremental_dispatch_followup = (
         has_completed_dispatch_context
@@ -903,11 +1017,14 @@ def build_intent_package(
         safe_mode=bool(context.get("safe_mode", False)),
     )
 
+    template_id = None
+
     if squad_resolution_trace_request:
         recommended_agents = _dedupe_preserve([required_signer or "orion"])
         advisor_agents = _dedupe_preserve(recommended_agents + ["metatron"])
         target_agent = required_signer or "orion"
         delivery_contract = "squad_resolution_trace_readonly_v1"
+        template_id = "squad_resolution_trace_readonly_template_v1"
         structured_output = True
         expected_specialist_reports = list(requested_squad_specialists or specialists_required or [])
         visible_signer_expected = required_signer or "orion"
@@ -916,6 +1033,7 @@ def build_intent_package(
         advisor_agents = _dedupe_preserve(recommended_agents + ["metatron"])
         target_agent = required_signer or "orion"
         delivery_contract = "squad_resolve_readonly_v1"
+        template_id = "squad_resolve_readonly_template_v1"
         structured_output = True
         expected_specialist_reports = list(requested_squad_specialists or specialists_required or [])
         visible_signer_expected = required_signer or "orion"
@@ -1003,6 +1121,7 @@ def build_intent_package(
         "action_scope": action_scope,
         "target_scope": target_scope,
         "capability_name": capability_name,
+        "template_id": template_id,
         "admin_access_mode": admin_access_mode,
         "requires_write_approval": requires_write_approval,
         "visible_signer_expected": visible_signer_expected,
@@ -1074,6 +1193,7 @@ def build_intent_package(
         "requires_runtime_execution": bool(runtime_op.get("kind")),
         "target_agent": target_agent,
         "delivery_contract": delivery_contract,
+        "template_id": template_id,
         "structured_output": structured_output,
         "first_win_goal": "execute_orion_runtime" if runtime_op.get("kind") else "clarify_next_step",
         "action_scope": action_scope,
