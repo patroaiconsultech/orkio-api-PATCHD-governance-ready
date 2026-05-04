@@ -969,6 +969,7 @@ def _suggested_squad() -> List[Dict[str, str]]:
         {"id": "orion", "role": "cto", "scope": "execução técnica e GitHub runtime"},
         {"id": "auditor", "role": "technical_auditor", "scope": "auditoria arquitetural e riscos"},
         {"id": "cto", "role": "systems_architect", "scope": "plano técnico e desenho de patch"},
+        {"id": "ux_frontend", "role": "ux_frontend", "scope": "renderização, estado local e experiência operacional"},
         {"id": "chris", "role": "commercial_strategist", "scope": "impacto funcional e leitura de produto"},
         {"id": "saint_germain", "role": "refiner", "scope": "maturidade e refinamento incremental"},
         {"id": "miguel", "role": "guardian", "scope": "guarda de segurança e limites"},
@@ -3092,6 +3093,10 @@ def orion_runtime_execute(inp: "OrionRuntimeIn") -> Dict[str, Any]:
         return _get_continuous_audit_status_detached(inp)
     if audit_op == "create":
         return _start_continuous_audit_job_detached(inp)
+    if _looks_like_squad_resolution_trace_request(effective_message):
+        return squad_resolution_trace_readonly(inp)
+    if _looks_like_squad_resolution_request(effective_message):
+        return resolve_squad_readonly(inp)
     if _is_platform_improvement_review_request(effective_message):
         return platform_improvement_review(inp)
     if _is_controlled_self_evolution_propose_request(effective_message):
@@ -3487,6 +3492,150 @@ def list_squad_agents_post(inp: OrionRuntimeIn) -> Dict[str, Any]:
         "policy": _safe_patch_policy(),
         "generated_at": _now_ts(),
     }
+
+
+
+
+def _looks_like_squad_resolution_request(message: str) -> bool:
+    lowered = str(message or "").strip().lower()
+    if not lowered:
+        return False
+    markers = (
+        "resolva exatamente este squad",
+        "resolver este squad",
+        "resolver squad",
+        "squad resolvido",
+        "resolve exactly this squad",
+        "resolve this squad",
+    )
+    return any(marker in lowered for marker in markers)
+
+
+def _looks_like_squad_resolution_trace_request(message: str) -> bool:
+    lowered = str(message or "").strip().lower()
+    if not lowered:
+        return False
+    return (
+        "retorne apenas" in lowered
+        and (
+            "requested_specialists_raw" in lowered
+            or "selected_specialists_before_policy" in lowered
+            or "selected_specialists_after_policy" in lowered
+            or "abort_reason" in lowered
+        )
+    )
+
+
+def _extract_requested_specialists_from_message(message: str) -> List[str]:
+    constraints = _extract_hard_constraints(message or "")
+    required = _dedupe_dispatch_actors(list(constraints.get("specialists_required") or []))
+    if required:
+        return required
+
+    lines = [str(line or "").strip() for line in str(message or "").splitlines()]
+    collected: List[str] = []
+    capture = False
+    for line in lines:
+        lowered = line.lower()
+        if not capture and (
+            "resolva exatamente este squad" in lowered
+            or "resolver este squad" in lowered
+            or "resolver squad" in lowered
+            or "resolve exactly this squad" in lowered
+            or lowered.startswith("squad:")
+        ):
+            capture = True
+            if ":" in line:
+                inline = line.split(":", 1)[1].strip()
+                if inline:
+                    parts = [_strip_constraint_token(p) for p in re.split(r"[,;]", inline)]
+                    collected.extend([p for p in parts if p])
+            continue
+        if not capture:
+            continue
+        if not line:
+            if collected:
+                break
+            continue
+        if lowered.startswith(("responda apenas", "retorne apenas", "não execute dispatch", "nao execute dispatch", "modo read-only", "modo read only", "agente visível final", "agente visivel final")):
+            if collected:
+                break
+            continue
+        parts = [_strip_constraint_token(p) for p in re.split(r"[,;]", line)]
+        cleaned = [p for p in parts if p]
+        if cleaned:
+            collected.extend(cleaned)
+            continue
+        if collected:
+            break
+
+    return _dedupe_dispatch_actors(collected)
+
+
+def _dispatch_specialist_registry() -> List[str]:
+    return _dedupe_dispatch_actors([
+        "orkio",
+        "orion",
+        "auditor",
+        "cto",
+        "ux_frontend",
+        "architect",
+        "devops",
+        "security",
+        "memory_ops",
+        "stage_manager",
+        "chris",
+    ])
+
+
+def _resolve_squad_readonly_payload(inp: OrionRuntimeIn, *, trace_mode: bool = False) -> Dict[str, Any]:
+    message = inp.message or ""
+    visible_agent = _resolve_visible_agent(message, default="orion")
+    constraints = _extract_hard_constraints(message)
+    requested_raw = _extract_requested_specialists_from_message(message)
+    requested_normalized = _dedupe_dispatch_actors(requested_raw)
+    selected_before_policy = [item for item in requested_normalized if item in _dispatch_specialist_registry()]
+    selected_after_policy = _apply_specialist_constraints(selected_before_policy, constraints=constraints)
+    violations = _validate_dispatch_constraints(
+        visible_agent=visible_agent,
+        selected_specialists=list(selected_after_policy or []),
+        constraints=constraints,
+    )
+    missing = [item for item in requested_normalized if item not in selected_before_policy]
+    abort_reason = None
+    if missing:
+        abort_reason = "missing_specialists: " + ", ".join(missing)
+    elif violations:
+        abort_reason = "; ".join(violations)
+
+    payload: Dict[str, Any] = {
+        "ok": not bool(abort_reason),
+        "service": "orion_internal",
+        "mode": "squad_resolution_trace_readonly" if trace_mode else "squad_resolve_readonly",
+        "visible_agent": visible_agent,
+        "capability_name": "squad_resolution_trace_readonly" if trace_mode else "squad_resolve_readonly",
+        "template_id": "squad_resolution_trace_readonly_v1" if trace_mode else "squad_resolve_readonly_v1",
+        "requested_specialists_raw": list(requested_raw),
+        "requested_specialists_normalized": list(requested_normalized),
+        "selected_specialists_before_policy": list(selected_before_policy),
+        "selected_specialists_after_policy": list(selected_after_policy),
+        "squad_resolved": list(selected_after_policy),
+        "missing_specialists": list(missing),
+        "constraint_violations": list(violations),
+        "abort_reason": abort_reason,
+        "generated_at": _now_ts(),
+    }
+    if not trace_mode:
+        payload["message"] = ", ".join(selected_after_policy) if selected_after_policy else ""
+    return payload
+
+
+def resolve_squad_readonly(inp: OrionRuntimeIn) -> Dict[str, Any]:
+    return _resolve_squad_readonly_payload(inp, trace_mode=False)
+
+
+def squad_resolution_trace_readonly(inp: OrionRuntimeIn) -> Dict[str, Any]:
+    return _resolve_squad_readonly_payload(inp, trace_mode=True)
 
 
 @router.post("/platform/audit")
