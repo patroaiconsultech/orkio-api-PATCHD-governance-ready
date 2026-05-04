@@ -895,3 +895,72 @@ class EvolutionCycleLog(Base):
     top_queue_json = Column(Text, nullable=True)
     policy_version = Column(String, nullable=True)
     created_at = Column(BigInteger, nullable=False, default=_now_ts)
+
+class ContinuousAuditJob(Base):
+    __tablename__ = "continuous_audit_jobs"
+    __table_args__ = (
+        Index("ix_continuous_audit_jobs_org_created", "org_slug", "created_at"),
+        Index("ix_continuous_audit_jobs_status_updated", "status", "updated_at"),
+        Index("ix_continuous_audit_jobs_thread_created", "thread_id", "created_at"),
+    )
+
+    id = Column(String, primary_key=True)
+    org_slug = Column(String, index=True, nullable=False, default="public")
+    thread_id = Column(String, index=True, nullable=True)
+    requested_by_user_id = Column(String, nullable=True)
+    requested_by_user_name = Column(String, nullable=True)
+    requested_signer = Column(String, nullable=True)
+    title = Column(String, nullable=True)
+    source_message = Column(Text, nullable=False)
+    execution_mode = Column(String, nullable=False, default="read_only_continuous")
+    status = Column(String, nullable=False, default="initialized")  # initialized|queued|running|paused|blocked|completed|failed|cancelled
+    progress_percentage = Column(Integer, nullable=False, default=0)
+    selected_specialists_json = Column(Text, nullable=True)
+    required_specialists_json = Column(Text, nullable=True)
+    forbidden_specialists_json = Column(Text, nullable=True)
+    persisted_state_location = Column(String, nullable=True)
+    latest_event = Column(String, nullable=True)
+    latest_summary = Column(Text, nullable=True)
+    payload_json = Column(Text, nullable=True)
+    started_at = Column(BigInteger, nullable=True)
+    last_updated_at = Column(BigInteger, nullable=True)
+    completed_at = Column(BigInteger, nullable=True)
+    created_at = Column(BigInteger, nullable=False, default=_now_ts)
+    updated_at = Column(BigInteger, nullable=False, default=_now_ts)
+
+
+class ContinuousAuditReceipt(Base):
+    __tablename__ = "continuous_audit_receipts"
+    __table_args__ = (
+        Index("ix_continuous_audit_receipts_job_created", "job_id", "created_at"),
+        Index("ix_continuous_audit_receipts_org_created", "org_slug", "created_at"),
+    )
+
+    id = Column(String, primary_key=True)
+    org_slug = Column(String, index=True, nullable=False, default="public")
+    job_id = Column(String, index=True, nullable=False)
+    seq = Column(Integer, nullable=False, default=1)
+    event = Column(String, nullable=False)
+    phase = Column(String, nullable=True)
+    agent = Column(String, nullable=True)
+    status = Column(String, nullable=False, default="recorded")
+    detail = Column(Text, nullable=True)
+    payload_json = Column(Text, nullable=True)
+    created_at = Column(BigInteger, nullable=False, default=_now_ts)
+
+
+class ContinuousAuditArtifact(Base):
+    __tablename__ = "continuous_audit_artifacts"
+    __table_args__ = (
+        Index("ix_continuous_audit_artifacts_job_created", "job_id", "created_at"),
+        Index("ix_continuous_audit_artifacts_org_created", "org_slug", "created_at"),
+    )
+
+    id = Column(String, primary_key=True)
+    org_slug = Column(String, index=True, nullable=False, default="public")
+    job_id = Column(String, index=True, nullable=False)
+    artifact_type = Column(String, nullable=False)
+    title = Column(String, nullable=True)
+    content = Column(Text, nullable=True)
+    content_type = Column(String, nullable=False, default="application/json")
+    created_at = Column(BigInteger, nullable=False, default=_now_ts)
