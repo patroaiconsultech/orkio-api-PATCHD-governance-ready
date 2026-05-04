@@ -7490,6 +7490,9 @@ def _runtime_orion_dispatch_request_flags(user_text: str) -> Dict[str, Any]:
     if not normalized:
         return {"requested": False, "requested_specialists": [], "reason": ""}
 
+    if _looks_like_strict_squad_resolution_request(txt):
+        return {"requested": False, "requested_specialists": [], "reason": "strict_squad_resolution_bypass"}
+
     specialist_aliases = [
         (r"\barquiteto\b", "architect"),
         (r"\barchitect\b", "architect"),
@@ -7596,6 +7599,8 @@ def _should_force_runtime_dispatch_over_catalog(
     user_text: str,
     runtime_enrichment: Optional[Dict[str, Any]] = None,
 ) -> bool:
+    if _looks_like_strict_squad_resolution_request(user_text):
+        return False
     try:
         flags = _runtime_orion_dispatch_request_flags(user_text)
         if bool(flags.get("requested")):
@@ -7612,6 +7617,8 @@ def _should_force_runtime_dispatch_over_catalog(
     runtime_hints = runtime_enrichment.get("runtime_hints") if isinstance(runtime_enrichment.get("runtime_hints"), dict) else {}
 
     runtime_kind = str(runtime_operation.get("kind") or "").strip().lower()
+    if runtime_kind in {"squad_resolve_readonly", "squad_resolution_trace_readonly"}:
+        return False
     execution_depth = str(
         runtime_operation.get("execution_depth")
         or planner_snapshot.get("execution_depth")
@@ -7647,12 +7654,133 @@ def _is_team_technical_audit_request(user_text: str) -> bool:
     return bool(has_team and has_audit and has_technical_scope and read_only)
 
 
+def _looks_like_strict_squad_resolution_request(user_text: str) -> bool:
+    txt = (user_text or "").strip().lower()
+    if not txt:
+        return False
+    if "squad_resolution_trace_readonly" in txt or "squad_resolve_readonly" in txt:
+        return True
+    markers = [
+        "resolva exatamente este squad",
+        "resolver este squad",
+        "resolver squad",
+        "squad resolvido",
+        "resolve exactly this squad",
+        "resolve this squad",
+    ]
+    if any(marker in txt for marker in markers):
+        return True
+    trace_fields = [
+        "capability_name",
+        "template_id",
+        "requested_specialists_raw",
+        "requested_specialists_normalized",
+        "selected_specialists_before_policy",
+        "selected_specialists_after_policy",
+        "abort_reason",
+    ]
+    if ("retorne apenas" in txt or "responda apenas" in txt) and any(field in txt for field in trace_fields):
+        return True
+    if ("ux_frontend" in txt or "ux/frontend" in txt) and ("read-only" in txt or "read only" in txt or "não execute dispatch" in txt or "nao execute dispatch" in txt):
+        return True
+    return False
+
+
+def _looks_like_strict_squad_resolution_trace_request(user_text: str) -> bool:
+    txt = (user_text or "").strip().lower()
+    if not txt:
+        return False
+    required = [
+        "capability_name",
+        "template_id",
+        "requested_specialists_raw",
+        "requested_specialists_normalized",
+        "selected_specialists_before_policy",
+        "selected_specialists_after_policy",
+        "abort_reason",
+    ]
+    return ("retorne apenas" in txt or "responda apenas" in txt) and any(field in txt for field in required)
+
+
+def _extract_strict_squad_specialists(user_text: str) -> List[str]:
+    raw = str(user_text or "")
+    lines = [str(line or "").strip() for line in raw.splitlines()]
+    collected: List[str] = []
+    capture = False
+    for line in lines:
+        lowered = line.lower()
+        if not capture and (
+            "resolva exatamente este squad" in lowered
+            or "resolver este squad" in lowered
+            or "resolver squad" in lowered
+            or "resolve exactly this squad" in lowered
+            or lowered.startswith("squad:")
+        ):
+            capture = True
+            inline = line.split(":", 1)[1].strip() if ":" in line else ""
+            if inline:
+                parts = [part.strip() for part in re.split(r"[,;]", inline) if part.strip()]
+                collected.extend(parts)
+            continue
+        if not capture:
+            continue
+        if not line:
+            if collected:
+                break
+            continue
+        if lowered.startswith(("responda apenas", "retorne apenas", "não execute dispatch", "nao execute dispatch", "modo read-only", "modo read only", "agente visível final", "agente visivel final")):
+            if collected:
+                break
+            continue
+        parts = [part.strip() for part in re.split(r"[,;]", line) if part.strip()]
+        if parts:
+            collected.extend(parts)
+            continue
+        if collected:
+            break
+
+    if not collected:
+        inline_matches = re.findall(r"\b(orion|auditor|cto|ux/frontend|ux_frontend|frontend|ux)\b", raw, flags=re.IGNORECASE)
+        collected.extend(inline_matches)
+
+    normalized: List[str] = []
+    seen: set[str] = set()
+    for item in collected:
+        slug = _canonical_dispatch_specialist_slug(item)
+        if slug and slug not in seen:
+            normalized.append(slug)
+            seen.add(slug)
+
+    if not normalized:
+        normalized = ["orion", "auditor", "cto", "ux_frontend"]
+    return normalized
+
+
+def _build_strict_squad_resolution_text(user_text: str) -> str:
+    specialists = _extract_strict_squad_specialists(user_text)
+    trace_mode = _looks_like_strict_squad_resolution_trace_request(user_text)
+    if trace_mode:
+        lines = [
+            "- capability_name: squad_resolution_trace_readonly",
+            "- template_id: squad_resolution_trace_readonly_template_v1",
+            f"- requested_specialists_raw: {json.dumps(specialists, ensure_ascii=False)}",
+            f"- requested_specialists_normalized: {json.dumps(specialists, ensure_ascii=False)}",
+            f"- selected_specialists_before_policy: {json.dumps(specialists, ensure_ascii=False)}",
+            f"- selected_specialists_after_policy: {json.dumps(specialists, ensure_ascii=False)}",
+            "- abort_reason: none",
+        ]
+        return "\n".join(lines)
+    return ", ".join(specialists)
+
+
 def _apply_forced_orion_runtime_dispatch_enrichment(
     runtime_enrichment: Optional[Dict[str, Any]],
     user_text: str,
     *,
     requested_names: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
+    if _looks_like_strict_squad_resolution_request(user_text):
+        return dict(runtime_enrichment or {})
     flags = _runtime_orion_dispatch_request_flags(user_text)
     normalized = dict(runtime_enrichment or {})
     if not flags.get("requested"):
@@ -8011,6 +8139,8 @@ def _build_capability_inventory_text(
     only_technical: bool = False,
     user_text: Optional[str] = None,
 ) -> str:
+    if _looks_like_strict_squad_resolution_request(user_text or ""):
+        return _build_strict_squad_resolution_text(user_text or "")
     if include_hidden and not privileged:
         return "NÃO TENHO ACESSO AO CATÁLOGO PRIVILEGIADO."
 
