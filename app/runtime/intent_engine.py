@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any, Dict, Optional
+import json
 import re
 
 from app.config.runtime import RUNTIME_FLAGS
@@ -14,6 +15,35 @@ def _normalize(text: str) -> str:
 def _contains_any(text: str, terms: list[str]) -> bool:
     txt = _normalize(text)
     return any(_normalize(term) in txt for term in terms if term)
+
+
+def _extract_embedded_runtime_payload(text: str) -> Dict[str, Any]:
+    raw = str(text or "").strip()
+    if not raw:
+        return {}
+    candidates: list[str] = []
+    if raw.startswith("{") and raw.endswith("}"):
+        candidates.append(raw)
+    first = raw.find("{")
+    last = raw.rfind("}")
+    if first >= 0 and last > first:
+        candidate = raw[first:last + 1].strip()
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return {}
+
+
+def _continuous_audit_effective_text(text: str) -> str:
+    payload = _extract_embedded_runtime_payload(text or "")
+    nested = payload.get("message") if isinstance(payload, dict) else None
+    return str(nested or text or "")
 
 
 def _excluded_agents(text: str) -> list[str]:
@@ -247,8 +277,20 @@ def _looks_like_team_technical_audit_request(text: str) -> bool:
 
 
 
+
 def _extract_continuous_audit_job_id(text: str) -> str:
-    raw = str(text or "").strip()
+    payload = _extract_embedded_runtime_payload(text or "")
+    if isinstance(payload, dict):
+        for key in ("job_id", "audit_job_id", "continuous_audit_job_id", "requested_job_id"):
+            value = payload.get(key)
+            if value not in (None, "", "null"):
+                return str(value).strip().lower()
+        nested_message = payload.get("message")
+        if nested_message:
+            nested_found = _extract_continuous_audit_job_id(str(nested_message))
+            if nested_found:
+                return nested_found
+    raw = _continuous_audit_effective_text(text or "")
     if not raw:
         return ""
     patterns = [
@@ -264,10 +306,15 @@ def _extract_continuous_audit_job_id(text: str) -> str:
 
 
 def _looks_like_continuous_audit_status_request(text: str) -> bool:
-    txt = _normalize(text)
+    payload = _extract_embedded_runtime_payload(text or "")
+    effective_text = _continuous_audit_effective_text(text or "")
+    txt = _normalize(effective_text)
     if not txt:
         return False
     explicit_job_id = _extract_continuous_audit_job_id(text)
+    explicit_mode = _normalize(str((payload or {}).get("mode") or (payload or {}).get("operation") or (payload or {}).get("kind") or (payload or {}).get("intent") or ""))
+    if explicit_mode in {"continuous_audit_job_status", "read_status", "status"}:
+        return True
     status_markers = [
         "consultar status",
         "forneça o status",
@@ -300,9 +347,14 @@ def _looks_like_continuous_audit_status_request(text: str) -> bool:
 
 
 def _looks_like_continuous_audit_request(text: str) -> bool:
-    txt = _normalize(text)
+    payload = _extract_embedded_runtime_payload(text or "")
+    effective_text = _continuous_audit_effective_text(text or "")
+    txt = _normalize(effective_text)
     if not txt or _looks_like_continuous_audit_status_request(text):
         return False
+    explicit_mode = _normalize(str((payload or {}).get("mode") or (payload or {}).get("operation") or (payload or {}).get("kind") or (payload or {}).get("intent") or ""))
+    if explicit_mode in {"continuous_audit_job", "create_continuous_audit_job", "start_continuous_audit"}:
+        return True
     markers = [
         "auditoria contínua",
         "auditoria continua",
@@ -606,29 +658,32 @@ def build_intent_package(
     user_input: str,
     context: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    text = _normalize(user_input)
+    raw_user_input = user_input or ""
+    effective_user_input = _continuous_audit_effective_text(raw_user_input)
+    text = _normalize(effective_user_input)
     context = dict(context or {})
-    context["message"] = user_input or ""
+    context["message"] = effective_user_input
+    context["raw_message"] = raw_user_input
 
     has_completed_dispatch_context = _has_completed_dispatch_context(context)
     incremental_dispatch_followup = (
         has_completed_dispatch_context
-        and _looks_like_incremental_dispatch_followup_request(user_input or "")
+        and _looks_like_incremental_dispatch_followup_request(effective_user_input or raw_user_input or "")
     )
 
     platform_improvement_review = (
         False if incremental_dispatch_followup
-        else _looks_like_platform_improvement_review_request(user_input or "")
+        else _looks_like_platform_improvement_review_request(effective_user_input or raw_user_input or "")
     )
     continuous_audit_status_request = (
         False if incremental_dispatch_followup
-        else _looks_like_continuous_audit_status_request(user_input or "")
+        else _looks_like_continuous_audit_status_request(raw_user_input or effective_user_input or "")
     )
     continuous_audit_request = (
         False if (incremental_dispatch_followup or continuous_audit_status_request)
-        else _looks_like_continuous_audit_request(user_input or "")
+        else _looks_like_continuous_audit_request(raw_user_input or effective_user_input or "")
     )
-    requested_job_id = _extract_continuous_audit_job_id(user_input or "") or None
+    requested_job_id = _extract_continuous_audit_job_id(raw_user_input or effective_user_input or "") or None
 
     action_scope = _infer_action_scope(text)
     target_scope = _infer_target_scope(text)
@@ -660,19 +715,19 @@ def build_intent_package(
 
     admin_access_mode = "read_privileged" if _looks_like_privileged_admin_read(text) and action_scope in {"read", "diagnose"} else "standard"
     requires_write_approval = action_scope in {"write_branch", "open_pr", "merge", "deploy"}
-    hard_constraints = _extract_hard_constraints(user_input or "")
+    hard_constraints = _extract_hard_constraints(effective_user_input or raw_user_input or "")
     required_signer = str(hard_constraints.get("required_signer") or "").strip().lower()
     specialists_required = list(hard_constraints.get("specialists_required") or [])
     specialists_forbidden = list(hard_constraints.get("specialists_forbidden") or [])
     selected_specialists_count_must_be = hard_constraints.get("selected_specialists_count_must_be")
     multi_specialist_constraint = len(specialists_required) > 1
-    orion_only = _looks_like_orion_only_request(user_input or "")
+    orion_only = _looks_like_orion_only_request(effective_user_input or raw_user_input or "")
     if multi_specialist_constraint:
         orion_only = False
     elif required_signer == "orion":
         orion_only = True
-    team_technical_audit = _looks_like_team_technical_audit_request(user_input or "")
-    excluded_agents = _dedupe_preserve(_excluded_agents(user_input or "") + specialists_forbidden)
+    team_technical_audit = _looks_like_team_technical_audit_request(effective_user_input or raw_user_input or "")
+    excluded_agents = _dedupe_preserve(_excluded_agents(effective_user_input or raw_user_input or "") + specialists_forbidden)
 
     if incremental_dispatch_followup:
         team_technical_audit = False
