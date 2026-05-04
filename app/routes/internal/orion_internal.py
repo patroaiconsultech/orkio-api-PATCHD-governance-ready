@@ -4,13 +4,18 @@ import json
 import os
 import re
 import time
+import uuid
 import urllib.request as _urllib_request
 import urllib.parse as _urllib_parse
 import ssl as _ssl
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, HTTPException, Request
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
+from sqlalchemy import select, func
+from sqlalchemy.orm import Session
+from app.db import SessionLocal, get_db
+from app.models import ContinuousAuditArtifact, ContinuousAuditJob, ContinuousAuditReceipt
 from app.services.identity_service import load_active_identity
 from app.core.orkio_constitution import load_constitution
 from app.core.orkio_permissions import load_permissions
@@ -44,6 +49,329 @@ def _clean_env(name: str, default: str = "") -> str:
 
 def _now_ts() -> int:
     return int(time.time())
+
+
+def _new_id() -> str:
+    return uuid.uuid4().hex
+
+
+def _json_dumps(value: Any) -> str:
+    try:
+        return json.dumps(value or {}, ensure_ascii=False)
+    except Exception:
+        return "{}"
+
+
+def _json_loads(value: Any, default: Any) -> Any:
+    try:
+        if not value:
+            return default
+        parsed = json.loads(value)
+        return parsed if parsed is not None else default
+    except Exception:
+        return default
+
+
+def _looks_like_continuous_audit_request(message: str) -> bool:
+    raw = (message or "").strip().lower()
+    if not raw:
+        return False
+    markers = [
+        "auditoria contínua",
+        "auditoria continua",
+        "continuous audit",
+        "continuous_audit",
+        "job persistido",
+        "job_id",
+        "progresso rastreável",
+        "progresso rastreavel",
+        "execução contínua",
+        "execucao continua",
+        "audit job",
+        "persisted state",
+        "progresso real",
+    ]
+    return any(marker in raw for marker in markers)
+
+
+def _continuous_audit_title(message: str) -> str:
+    headline = "Auditoria contínua read-only"
+    for line in (message or "").splitlines():
+        stripped = str(line or "").strip()
+        if stripped and not stripped.startswith("@"):
+            headline = stripped[:120]
+            break
+    return headline
+
+
+def _continuous_audit_selected_specialists(message: str, include_frontend: bool = False) -> tuple[Dict[str, Any], List[str], List[str]]:
+    constraints = _extract_hard_constraints(message or "")
+    required = list(constraints.get("specialists_required") or [])
+    default_selected = ["orion", "auditor", "cto"]
+    needs_frontend = include_frontend or ("ux_frontend" in required) or ("ux/frontend" in (message or "").lower()) or ("frontend" in (message or "").lower())
+    if needs_frontend:
+        default_selected.append("ux_frontend")
+    count_must_be = constraints.get("selected_specialists_count_must_be")
+    selected = _apply_specialist_constraints(default_selected, constraints=constraints)
+    if not selected:
+        selected = _dedupe_dispatch_actors(default_selected)
+    violations = _validate_dispatch_constraints(
+        visible_agent=str(constraints.get("required_signer") or "orion"),
+        selected_specialists=list(selected or []),
+        constraints=constraints,
+    )
+    return constraints, _dedupe_dispatch_actors(selected), list(violations or [])
+
+
+def _serialize_continuous_audit_job(job: ContinuousAuditJob) -> Dict[str, Any]:
+    return {
+        "job_id": getattr(job, "id", None),
+        "org_slug": getattr(job, "org_slug", None),
+        "thread_id": getattr(job, "thread_id", None),
+        "title": getattr(job, "title", None),
+        "status": getattr(job, "status", None),
+        "progress_percentage": int(getattr(job, "progress_percentage", 0) or 0),
+        "requested_signer": getattr(job, "requested_signer", None),
+        "selected_specialists": list(_json_loads(getattr(job, "selected_specialists_json", None), [])),
+        "required_specialists": list(_json_loads(getattr(job, "required_specialists_json", None), [])),
+        "forbidden_specialists": list(_json_loads(getattr(job, "forbidden_specialists_json", None), [])),
+        "execution_mode": getattr(job, "execution_mode", None),
+        "persisted_state_location": getattr(job, "persisted_state_location", None),
+        "latest_event": getattr(job, "latest_event", None),
+        "latest_summary": getattr(job, "latest_summary", None),
+        "payload": _json_loads(getattr(job, "payload_json", None), {}),
+        "started_at": getattr(job, "started_at", None),
+        "last_updated_at": getattr(job, "last_updated_at", None),
+        "completed_at": getattr(job, "completed_at", None),
+        "created_at": getattr(job, "created_at", None),
+        "updated_at": getattr(job, "updated_at", None),
+        "requested_by_user_id": getattr(job, "requested_by_user_id", None),
+        "requested_by_user_name": getattr(job, "requested_by_user_name", None),
+    }
+
+
+def _serialize_continuous_audit_receipt(receipt: ContinuousAuditReceipt) -> Dict[str, Any]:
+    return {
+        "id": getattr(receipt, "id", None),
+        "job_id": getattr(receipt, "job_id", None),
+        "seq": int(getattr(receipt, "seq", 0) or 0),
+        "event": getattr(receipt, "event", None),
+        "phase": getattr(receipt, "phase", None),
+        "agent": getattr(receipt, "agent", None),
+        "status": getattr(receipt, "status", None),
+        "detail": getattr(receipt, "detail", None),
+        "payload": _json_loads(getattr(receipt, "payload_json", None), {}),
+        "created_at": getattr(receipt, "created_at", None),
+    }
+
+
+def _serialize_continuous_audit_artifact(artifact: ContinuousAuditArtifact) -> Dict[str, Any]:
+    content = getattr(artifact, "content", None)
+    parsed = _json_loads(content, content)
+    return {
+        "id": getattr(artifact, "id", None),
+        "job_id": getattr(artifact, "job_id", None),
+        "artifact_type": getattr(artifact, "artifact_type", None),
+        "title": getattr(artifact, "title", None),
+        "content_type": getattr(artifact, "content_type", None),
+        "content": parsed,
+        "created_at": getattr(artifact, "created_at", None),
+    }
+
+
+def get_continuous_audit_job_snapshot(db: Session, org: str, job_id: str) -> Dict[str, Any]:
+    job = db.execute(
+        select(ContinuousAuditJob).where(
+            ContinuousAuditJob.org_slug == org,
+            ContinuousAuditJob.id == str(job_id or "").strip(),
+        ).limit(1)
+    ).scalars().first()
+    if not job:
+        raise HTTPException(status_code=404, detail="Continuous audit job not found")
+    receipts = db.execute(
+        select(ContinuousAuditReceipt).where(
+            ContinuousAuditReceipt.org_slug == org,
+            ContinuousAuditReceipt.job_id == job.id,
+        ).order_by(ContinuousAuditReceipt.seq.asc(), ContinuousAuditReceipt.created_at.asc())
+    ).scalars().all()
+    artifacts = db.execute(
+        select(ContinuousAuditArtifact).where(
+            ContinuousAuditArtifact.org_slug == org,
+            ContinuousAuditArtifact.job_id == job.id,
+        ).order_by(ContinuousAuditArtifact.created_at.asc())
+    ).scalars().all()
+    payload = _serialize_continuous_audit_job(job)
+    payload["receipts"] = [_serialize_continuous_audit_receipt(item) for item in receipts]
+    payload["artifacts"] = [_serialize_continuous_audit_artifact(item) for item in artifacts]
+    payload["dispatch_receipts_count"] = len(payload["receipts"])
+    payload["artifacts_count"] = len(payload["artifacts"])
+    return payload
+
+
+def start_continuous_audit_job(
+    db: Session,
+    org: str,
+    *,
+    message: str,
+    thread_id: Optional[str] = None,
+    include_frontend: bool = False,
+    requested_by_user_id: Optional[str] = None,
+    requested_by_user_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    constraints, selected_specialists, violations = _continuous_audit_selected_specialists(
+        message or "",
+        include_frontend=bool(include_frontend),
+    )
+    now = _now_ts()
+    status = "blocked" if violations else "initialized"
+    latest_event = "CONTINUOUS_AUDIT_JOB_BLOCKED" if violations else "CONTINUOUS_AUDIT_JOB_CREATED"
+    progress_percentage = 0 if violations else 5
+    requested_signer = str(constraints.get("required_signer") or _resolve_visible_agent(message, default="orion") or "orion").strip().lower() or "orion"
+    latest_summary = (
+        "Hard constraints blocked continuous audit initialization."
+        if violations
+        else "Continuous audit job persisted and ready for explicit follow-up execution steps."
+    )
+    title = _continuous_audit_title(message or "")
+    job = ContinuousAuditJob(
+        id=_new_id(),
+        org_slug=org,
+        thread_id=(str(thread_id or "").strip() or None),
+        requested_by_user_id=(str(requested_by_user_id or "").strip() or None),
+        requested_by_user_name=(str(requested_by_user_name or "").strip() or None),
+        requested_signer=requested_signer,
+        title=title,
+        source_message=message or "",
+        execution_mode="read_only_continuous",
+        status=status,
+        progress_percentage=progress_percentage,
+        selected_specialists_json=_json_dumps(selected_specialists),
+        required_specialists_json=_json_dumps(list(constraints.get("specialists_required") or [])),
+        forbidden_specialists_json=_json_dumps(list(constraints.get("specialists_forbidden") or [])),
+        persisted_state_location=f"continuous_audit_jobs:{org}:{title[:32]}",
+        latest_event=latest_event,
+        latest_summary=latest_summary,
+        payload_json=_json_dumps({
+            "requested_message": message or "",
+            "hard_constraints": constraints,
+            "selected_specialists": selected_specialists,
+            "constraint_violations": violations,
+        }),
+        started_at=(now if not violations else None),
+        last_updated_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+    db.add(job)
+    db.flush()
+
+    receipt_rows: List[ContinuousAuditReceipt] = []
+    receipt_rows.append(
+        ContinuousAuditReceipt(
+            id=_new_id(),
+            org_slug=org,
+            job_id=job.id,
+            seq=1,
+            event=latest_event,
+            phase="init",
+            agent=requested_signer,
+            status=status,
+            detail=latest_summary,
+            payload_json=_json_dumps({
+                "selected_specialists": selected_specialists,
+                "required_signer": requested_signer,
+                "constraint_violations": violations,
+            }),
+            created_at=now,
+        )
+    )
+    if selected_specialists:
+        receipt_rows.append(
+            ContinuousAuditReceipt(
+                id=_new_id(),
+                org_slug=org,
+                job_id=job.id,
+                seq=2,
+                event="CONTINUOUS_AUDIT_SPECIALISTS_LOCKED",
+                phase="planning",
+                agent=requested_signer,
+                status="recorded",
+                detail="Selected specialists locked for persisted continuous audit job.",
+                payload_json=_json_dumps({"selected_specialists": selected_specialists}),
+                created_at=now,
+            )
+        )
+    for row in receipt_rows:
+        db.add(row)
+
+    artifact_rows = [
+        ContinuousAuditArtifact(
+            id=_new_id(),
+            org_slug=org,
+            job_id=job.id,
+            artifact_type="audit_plan",
+            title="Continuous audit plan",
+            content=_json_dumps({
+                "title": title,
+                "message": message or "",
+                "selected_specialists": selected_specialists,
+                "hard_constraints": constraints,
+                "constraint_violations": violations,
+            }),
+            content_type="application/json",
+            created_at=now,
+        )
+    ]
+    if violations:
+        artifact_rows.append(
+            ContinuousAuditArtifact(
+                id=_new_id(),
+                org_slug=org,
+                job_id=job.id,
+                artifact_type="constraint_violation",
+                title="Continuous audit blockers",
+                content=_json_dumps({"violations": violations}),
+                content_type="application/json",
+                created_at=now,
+            )
+        )
+    for row in artifact_rows:
+        db.add(row)
+
+    db.commit()
+    payload = get_continuous_audit_job_snapshot(db, org, job.id)
+    payload.update({
+        "ok": True,
+        "service": "orion_internal",
+        "provider": "platform",
+        "event": latest_event,
+        "execution_depth": "persisted_job",
+        "delivery_contract": "continuous_audit_job_v1",
+        "mode": "continuous_audit_job",
+        "execution_state": status,
+        "selected_specialists_count": len(selected_specialists),
+        "constraint_violations": violations,
+    })
+    return payload
+
+
+def _start_continuous_audit_job_detached(inp: "OrionRuntimeIn", *, org: str = "public") -> Dict[str, Any]:
+    db: Optional[Session] = None
+    try:
+        db = SessionLocal()
+        return start_continuous_audit_job(
+            db,
+            org,
+            message=inp.message or "",
+            include_frontend=bool(inp.include_frontend),
+            requested_by_user_name="orion_runtime",
+        )
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
 
 
 def _github_repo() -> str:
@@ -2452,6 +2780,8 @@ def orion_runtime_execute(inp: "OrionRuntimeIn") -> Dict[str, Any]:
     message = inp.message or ""
     lowered = message.lower()
     visible_agent = _resolve_visible_agent(message, default="orion")
+    if _looks_like_continuous_audit_request(message):
+        return _start_continuous_audit_job_detached(inp)
     if _is_platform_improvement_review_request(message):
         return platform_improvement_review(inp)
     if _is_controlled_self_evolution_propose_request(message):
@@ -2731,6 +3061,38 @@ def _blocked_governance_payload(*, message: str, mode: str, action_scope: str, c
     }
 
 
+
+@router.post("/platform/audit/continuous/start")
+def continuous_audit_start(
+    inp: OrionRuntimeIn,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    org = str(request.headers.get("x-org-slug") or "public").strip() or "public"
+    return start_continuous_audit_job(
+        db,
+        org,
+        message=inp.message or "",
+        include_frontend=bool(inp.include_frontend),
+        requested_by_user_id=str(request.headers.get("x-user-id") or "").strip() or None,
+        requested_by_user_name=str(request.headers.get("x-user-name") or request.headers.get("x-user") or "http_request").strip() or "http_request",
+    )
+
+
+@router.get("/platform/audit/continuous/{job_id}")
+def continuous_audit_status(job_id: str, request: Request, db: Session = Depends(get_db)) -> Dict[str, Any]:
+    org = str(request.headers.get("x-org-slug") or "public").strip() or "public"
+    payload = get_continuous_audit_job_snapshot(db, org, job_id)
+    payload.update({
+        "ok": True,
+        "service": "orion_internal",
+        "provider": "platform",
+        "mode": "continuous_audit_job",
+        "event": "CONTINUOUS_AUDIT_JOB_STATUS",
+    })
+    return payload
+
+
 @router.get("/health")
 def health(request: Request) -> Dict[str, Any]:
     governance = _request_governance_health(request)
@@ -2819,19 +3181,63 @@ def list_squad_agents_post(inp: OrionRuntimeIn) -> Dict[str, Any]:
 
 
 @router.post("/platform/audit")
-def platform_self_audit(inp: OrionRuntimeIn) -> Dict[str, Any]:
-    visible_agent = _resolve_visible_agent(inp.message, default="orkio")
-    payload = _build_platform_self_audit_payload(inp, visible_agent)
-    decision = evaluate_governance_action(
-        action_scope="diagnose",
-        capability_name="platform_self_audit",
-        target_scope="platform",
-        context=_governance_context_from_message(inp.message),
-        safe_mode=False,
-    )
-    payload["governance_decision"] = decision
-    payload["danielic_integrity_passed"] = bool(decision.get("danielic_integrity_passed"))
-    return payload
+def platform_self_audit(
+    inp: OrionRuntimeIn,
+    request: Optional[Request] = None,
+    db: Optional[Session] = None,
+) -> Dict[str, Any]:
+    own_db = False
+    if db is None:
+        db = SessionLocal()
+        own_db = True
+    try:
+        org = "public"
+        requested_by_user_id = None
+        requested_by_user_name = "runtime"
+        if request is not None:
+            try:
+                org = str(request.headers.get("x-org-slug") or "public").strip() or "public"
+            except Exception:
+                org = "public"
+            requested_by_user_id = str(request.headers.get("x-user-id") or "").strip() or None
+            requested_by_user_name = str(request.headers.get("x-user-name") or request.headers.get("x-user") or "http_request").strip() or "http_request"
+        if _looks_like_continuous_audit_request(inp.message or ""):
+            payload = start_continuous_audit_job(
+                db,
+                org,
+                message=inp.message or "",
+                include_frontend=bool(inp.include_frontend),
+                requested_by_user_id=requested_by_user_id,
+                requested_by_user_name=requested_by_user_name,
+            )
+            payload["governance_decision"] = evaluate_governance_action(
+                action_scope="diagnose",
+                capability_name="continuous_audit_job",
+                target_scope="platform",
+                context=_governance_context_from_message(inp.message),
+                safe_mode=False,
+            )
+            payload["danielic_integrity_passed"] = bool(payload["governance_decision"].get("danielic_integrity_passed"))
+            return payload
+
+        visible_agent = _resolve_visible_agent(inp.message, default="orkio")
+        payload = _build_platform_self_audit_payload(inp, visible_agent)
+        decision = evaluate_governance_action(
+            action_scope="diagnose",
+            capability_name="platform_self_audit",
+            target_scope="platform",
+            context=_governance_context_from_message(inp.message),
+            safe_mode=False,
+        )
+        payload["governance_decision"] = decision
+        payload["danielic_integrity_passed"] = bool(decision.get("danielic_integrity_passed"))
+        return payload
+    finally:
+        if own_db and db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
 
 
 @router.post("/platform/scan/repo")
