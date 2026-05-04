@@ -5908,11 +5908,13 @@ def _canonical_runtime_agent_slug(name: Any) -> Optional[str]:
 
 
 def _canonical_dispatch_specialist_slug(name: Any) -> Optional[str]:
-    raw = str(name or "").strip().lower().replace("@", "").replace("-", "_").replace(" ", "_")
+    raw = str(name or "").strip().lower().replace("@", "")
+    raw = re.sub(r"[\.,;:!\?\)\]\}]+$", "", raw)
+    raw = raw.replace("/", "_").replace("-", "_").replace(" ", "_")
+    raw = re.sub(r"_+", "_", raw).strip("_")
     if not raw:
         return None
     aliases = {
-        "ux/frontend": "ux_frontend",
         "ux_frontend": "ux_frontend",
         "ux_front_end": "ux_frontend",
         "frontend_ux": "ux_frontend",
