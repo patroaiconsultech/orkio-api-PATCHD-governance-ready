@@ -11597,7 +11597,22 @@ def _execute_capability_if_authorized(
     allow_runtime_execution = (
         runtime_kind.startswith("github_runtime_")
         or required_capability.startswith("github_")
-        or runtime_kind in {"platform_audit", "premium_platform_audit", "controlled_self_evolution_propose_only", "runtime_scan", "repo_scan", "security_scan", "patch_plan", "squad_list"}
+        or runtime_kind in {
+            "platform_audit",
+            "premium_platform_audit",
+            "controlled_self_evolution_propose_only",
+            "runtime_scan",
+            "repo_scan",
+            "security_scan",
+            "patch_plan",
+            "squad_list",
+            "continuous_audit_job",
+            "continuous_audit_job_status",
+        }
+        or required_capability in {
+            "continuous_audit_job",
+            "continuous_audit_job_status",
+        }
     )
     if not allow_runtime_execution:
         return None
@@ -11625,6 +11640,14 @@ def _execute_capability_if_authorized(
             requested_specialists=requested_specialists,
             direct_orion=bool(runtime_operation.get("direct_orion", True)),
         )
+    elif runtime_kind == "continuous_audit_job_status":
+        requested_job_id = str(runtime_operation.get("requested_job_id") or "").strip()
+        lower_txt = txt.lower()
+        if requested_job_id and requested_job_id not in txt:
+            txt = (txt.rstrip() + f"\n\njob_id: {requested_job_id}").strip()
+            lower_txt = txt.lower()
+        if "não criar novo job" not in lower_txt and "nao criar novo job" not in lower_txt:
+            txt = (txt.rstrip() + "\n\nNão criar novo job.").strip()
     prepare_only = bool(
         runtime_operation.get("prepare_only", planner_snapshot.get("prepare_only", False))
     )
