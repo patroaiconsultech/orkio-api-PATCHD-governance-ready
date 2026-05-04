@@ -73,7 +73,8 @@ def _json_loads(value: Any, default: Any) -> Any:
 
 
 def _looks_like_continuous_audit_request(message: str) -> bool:
-    raw = (message or "").strip().lower()
+    effective = _continuous_audit_effective_input(message or "")
+    raw = str(effective.get("message") or message or "").strip().lower()
     if not raw:
         return False
     markers = [
@@ -104,14 +105,68 @@ def _continuous_audit_title(message: str) -> str:
     return headline
 
 
+def _extract_embedded_runtime_payload(message: str) -> Dict[str, Any]:
+    raw = str(message or "").strip()
+    if not raw:
+        return {}
+    candidates: List[str] = []
+    if raw.startswith("{") and raw.endswith("}"):
+        candidates.append(raw)
+    first = raw.find("{")
+    last = raw.rfind("}")
+    if first >= 0 and last > first:
+        candidate = raw[first:last + 1].strip()
+        if candidate and candidate not in candidates:
+            candidates.append(candidate)
+    for candidate in candidates:
+        try:
+            payload = json.loads(candidate)
+        except Exception:
+            continue
+        if isinstance(payload, dict):
+            return payload
+    return {}
+
+
+def _continuous_audit_effective_input(
+    message: str,
+    *,
+    include_frontend: bool = False,
+    thread_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    payload = _extract_embedded_runtime_payload(message or "")
+    payload_message = payload.get("message") if isinstance(payload, dict) else None
+    effective_message = str(payload_message or message or "")
+    payload_thread_id = payload.get("thread_id") if isinstance(payload, dict) else None
+    effective_thread_id = thread_id
+    if effective_thread_id in (None, "", "null"):
+        effective_thread_id = payload_thread_id
+    payload_include_frontend = payload.get("include_frontend") if isinstance(payload, dict) else None
+    effective_include_frontend = bool(include_frontend or payload_include_frontend is True)
+    return {
+        "message": effective_message,
+        "include_frontend": effective_include_frontend,
+        "thread_id": (str(effective_thread_id).strip() if effective_thread_id not in (None, "", "null") else None),
+        "payload": payload if isinstance(payload, dict) else {},
+    }
+
+
 def _continuous_audit_selected_specialists(message: str, include_frontend: bool = False) -> tuple[Dict[str, Any], List[str], List[str]]:
-    constraints = _extract_hard_constraints(message or "")
+    effective = _continuous_audit_effective_input(message or "", include_frontend=bool(include_frontend))
+    effective_message = str(effective.get("message") or "")
+    effective_include_frontend = bool(effective.get("include_frontend"))
+    constraints = _extract_hard_constraints(effective_message)
     required = list(constraints.get("specialists_required") or [])
     default_selected = ["orion", "auditor", "cto"]
-    needs_frontend = include_frontend or ("ux_frontend" in required) or ("ux/frontend" in (message or "").lower()) or ("frontend" in (message or "").lower())
+    needs_frontend = (
+        effective_include_frontend
+        or ("ux_frontend" in required)
+        or ("ux/frontend" in effective_message.lower())
+        or ("ux_frontend" in effective_message.lower())
+        or ("frontend" in effective_message.lower())
+    )
     if needs_frontend:
         default_selected.append("ux_frontend")
-    count_must_be = constraints.get("selected_specialists_count_must_be")
     selected = _apply_specialist_constraints(default_selected, constraints=constraints)
     if not selected:
         selected = _dedupe_dispatch_actors(default_selected)
@@ -218,30 +273,39 @@ def start_continuous_audit_job(
     requested_by_user_id: Optional[str] = None,
     requested_by_user_name: Optional[str] = None,
 ) -> Dict[str, Any]:
-    constraints, selected_specialists, violations = _continuous_audit_selected_specialists(
+    effective = _continuous_audit_effective_input(
         message or "",
         include_frontend=bool(include_frontend),
+        thread_id=thread_id,
+    )
+    effective_message = str(effective.get("message") or "")
+    effective_thread_id = effective.get("thread_id")
+    effective_include_frontend = bool(effective.get("include_frontend"))
+    embedded_payload = dict(effective.get("payload") or {})
+    constraints, selected_specialists, violations = _continuous_audit_selected_specialists(
+        effective_message,
+        include_frontend=effective_include_frontend,
     )
     now = _now_ts()
     status = "blocked" if violations else "initialized"
     latest_event = "CONTINUOUS_AUDIT_JOB_BLOCKED" if violations else "CONTINUOUS_AUDIT_JOB_CREATED"
     progress_percentage = 0 if violations else 5
-    requested_signer = str(constraints.get("required_signer") or _resolve_visible_agent(message, default="orion") or "orion").strip().lower() or "orion"
+    requested_signer = str(constraints.get("required_signer") or _resolve_visible_agent(effective_message, default="orion") or "orion").strip().lower() or "orion"
     latest_summary = (
         "Hard constraints blocked continuous audit initialization."
         if violations
         else "Continuous audit job persisted and ready for explicit follow-up execution steps."
     )
-    title = _continuous_audit_title(message or "")
+    title = _continuous_audit_title(effective_message or "")
     job = ContinuousAuditJob(
         id=_new_id(),
         org_slug=org,
-        thread_id=(str(thread_id or "").strip() or None),
+        thread_id=(str(effective_thread_id or "").strip() or None),
         requested_by_user_id=(str(requested_by_user_id or "").strip() or None),
         requested_by_user_name=(str(requested_by_user_name or "").strip() or None),
         requested_signer=requested_signer,
         title=title,
-        source_message=message or "",
+        source_message=effective_message or "",
         execution_mode="read_only_continuous",
         status=status,
         progress_percentage=progress_percentage,
@@ -252,7 +316,9 @@ def start_continuous_audit_job(
         latest_event=latest_event,
         latest_summary=latest_summary,
         payload_json=_json_dumps({
-            "requested_message": message or "",
+            "requested_message": effective_message or "",
+            "embedded_payload": embedded_payload,
+            "include_frontend": effective_include_frontend,
             "hard_constraints": constraints,
             "selected_specialists": selected_specialists,
             "constraint_violations": violations,
@@ -313,7 +379,9 @@ def start_continuous_audit_job(
             title="Continuous audit plan",
             content=_json_dumps({
                 "title": title,
-                "message": message or "",
+                "message": effective_message or "",
+                "embedded_payload": embedded_payload,
+                "include_frontend": effective_include_frontend,
                 "selected_specialists": selected_specialists,
                 "hard_constraints": constraints,
                 "constraint_violations": violations,
@@ -357,13 +425,19 @@ def start_continuous_audit_job(
 
 def _start_continuous_audit_job_detached(inp: "OrionRuntimeIn", *, org: str = "public") -> Dict[str, Any]:
     db: Optional[Session] = None
+    effective = _continuous_audit_effective_input(
+        inp.message or "",
+        include_frontend=bool(inp.include_frontend),
+        thread_id=getattr(inp, "thread_id", None),
+    )
     try:
         db = SessionLocal()
         return start_continuous_audit_job(
             db,
             org,
-            message=inp.message or "",
-            include_frontend=bool(inp.include_frontend),
+            message=str(effective.get("message") or inp.message or ""),
+            thread_id=(str(effective.get("thread_id") or "").strip() or None),
+            include_frontend=bool(effective.get("include_frontend")),
             requested_by_user_name="orion_runtime",
         )
     finally:
@@ -455,15 +529,19 @@ def _strip_constraint_token(value: Any) -> str:
 
 def _canonical_dispatch_actor(value: Any) -> str:
     cleaned = _strip_constraint_token(value)
-    raw = str(cleaned or "").strip().lower().replace("@", "").replace("-", "_").replace(" ", "_")
+    raw = str(cleaned or "").strip().lower().replace("@", "")
+    raw = raw.replace("\\/", "/").replace("/", "_").replace("-", "_").replace(" ", "_")
+    raw = re.sub(r"_+", "_", raw).strip("_")
     if not raw:
         return ""
     aliases = {
-        "ux/frontend": "ux_frontend",
         "ux_frontend": "ux_frontend",
+        "ux_front": "ux_frontend",
         "ux": "ux_frontend",
         "frontend": "ux_frontend",
         "front_end": "ux_frontend",
+        "frontend_ux": "ux_frontend",
+        "ui_ux": "ux_frontend",
         "orion_cto": "orion",
         "cto_runtime": "orion",
     }
@@ -3027,7 +3105,7 @@ def _governance_context_from_message(message: str, *, request: Optional[Request]
         "write_governed" if authorization_present else "standard"
     )
     return {
-        "message": message or "",
+        "message": effective_message or "",
         "authorization_present": authorization_present,
         "raw_authorization_present": raw_authorization_present,
         "explicit_write_requested": explicit_write_requested,
