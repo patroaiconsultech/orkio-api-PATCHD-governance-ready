@@ -4081,6 +4081,10 @@ def rag_fallback_recent_chunks(db: Session, org: str, file_ids: List[str], top_k
 async def request_id_mw(request: Request, call_next):
     rid = request.headers.get("x-request-id") or new_id()
     start = time.time()
+    path = str(getattr(request.url, "path", "") or "")
+    method = str(getattr(request, "method", "") or "").upper()
+    request.state.request_id = rid
+    request.state.request_started_at = start
     try:
         resp = await call_next(request)
     except Exception as e:
@@ -4091,11 +4095,36 @@ async def request_id_mw(request: Request, call_next):
             )
         except Exception:
             pass
+        try:
+            logger.exception("HTTP_REQUEST_RUNTIME_ERROR rid=%s method=%s path=%s", rid, method, path)
+        except Exception:
+            pass
         raise
-    finally:
-        pass
+    duration_ms = int(max((time.time() - start) * 1000, 0))
     resp.headers["x-request-id"] = rid
     resp.headers["x-orkio-version"] = APP_VERSION
+    resp.headers["x-orkio-path"] = path or "/"
+    resp.headers["x-orkio-duration-ms"] = str(duration_ms)
+    existing_expose = str(resp.headers.get("access-control-expose-headers") or "").strip()
+    expose_tokens = [token.strip() for token in existing_expose.split(",") if token.strip()]
+    expose_lower = {token.lower() for token in expose_tokens}
+    for header_name in ("x-request-id", "x-orkio-version", "x-orkio-path", "x-orkio-duration-ms"):
+        if header_name.lower() not in expose_lower:
+            expose_tokens.append(header_name)
+            expose_lower.add(header_name.lower())
+    if expose_tokens:
+        resp.headers["access-control-expose-headers"] = ", ".join(expose_tokens)
+    if path == "/api/chat/stream":
+        try:
+            logger.info(
+                "CHAT_STREAM_HTTP rid=%s method=%s status=%s duration_ms=%s",
+                rid,
+                method,
+                getattr(resp, "status_code", None),
+                duration_ms,
+            )
+        except Exception:
+            pass
     return resp
 
 @app.on_event("startup")
