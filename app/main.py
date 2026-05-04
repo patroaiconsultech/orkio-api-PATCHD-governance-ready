@@ -23,7 +23,7 @@ from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from fastapi.responses import Response, JSONResponse
 
 from .db import get_db, ENGINE, SessionLocal
-from .models import User, Thread, Message, File, FileText, FileChunk, AuditLog, Agent, AgentKnowledge, AgentLink, CostEvent, FileRequest, PricingSnapshot, Lead, ThreadMember, RealtimeSession, RealtimeEvent, SignupCode, OtpCode, UserSession, UsageEvent, FeatureFlag, ContactRequest, MarketingConsent, TermsAcceptance, PasswordResetToken, FounderEscalation, RuntimeMemory, TrialState, TrialEvent, NumerologyProfile, ValuationConfig, BillingTransaction, BillingCheckout, BillingWebhookEvent, BillingEntitlement, BillingWallet, BillingWalletLedger, SocialProofItem, LandingContentBlock
+from .models import User, Thread, Message, File, FileText, FileChunk, AuditLog, Agent, AgentKnowledge, AgentLink, CostEvent, FileRequest, PricingSnapshot, Lead, ThreadMember, RealtimeSession, RealtimeEvent, SignupCode, OtpCode, UserSession, UsageEvent, FeatureFlag, ContactRequest, MarketingConsent, TermsAcceptance, PasswordResetToken, FounderEscalation, RuntimeMemory, TrialState, TrialEvent, NumerologyProfile, ValuationConfig, BillingTransaction, BillingCheckout, BillingWebhookEvent, BillingEntitlement, BillingWallet, BillingWalletLedger, SocialProofItem, LandingContentBlock, ContinuousAuditArtifact, ContinuousAuditJob, ContinuousAuditReceipt
 from .realtime_punctuate import punctuate_realtime_events
 from .pricing_registry import calculate_cost as calc_cost_v2, normalize_model_name, PRICING_VERSION
 from .security import require_secret, new_salt, pbkdf2_hash, verify_password, mint_token, decode_token
@@ -38,7 +38,7 @@ from .numerology.schemas import NumerologyProfileIn, NumerologyProfileOut
 from .numerology.engine import generate_numerology_profile
 from .routes.user import router as user_router
 from .routes.internal.manus_internal import router as manus_internal_router
-from .routes.internal.orion_internal import router as orion_internal_router, OrionExecuteIn, orion_github_execute, orion_runtime_execute_alias
+from .routes.internal.orion_internal import router as orion_internal_router, OrionExecuteIn, orion_github_execute, orion_runtime_execute_alias, start_continuous_audit_job, get_continuous_audit_job_snapshot
 from .routes.internal.git_internal import router as git_internal_router
 from .routes.internal.evolution_internal import router as evolution_internal_router
 from .routes.internal.evolution_trigger import router as evolution_trigger_router, maybe_trigger_schema_patch
@@ -2756,6 +2756,69 @@ def ensure_schema(db: Session):
         """))
         db.execute(text("CREATE INDEX IF NOT EXISTS ix_execution_events_org_created ON execution_events(org_slug, created_at)"))
         db.execute(text("CREATE INDEX IF NOT EXISTS ix_execution_events_trace ON execution_events(trace_id)"))
+
+        db.execute(text("""
+        CREATE TABLE IF NOT EXISTS continuous_audit_jobs (
+            id VARCHAR PRIMARY KEY,
+            org_slug VARCHAR NOT NULL,
+            thread_id VARCHAR NULL,
+            requested_by_user_id VARCHAR NULL,
+            requested_by_user_name VARCHAR NULL,
+            requested_signer VARCHAR NULL,
+            title VARCHAR NULL,
+            source_message TEXT NOT NULL,
+            execution_mode VARCHAR NOT NULL DEFAULT 'read_only_continuous',
+            status VARCHAR NOT NULL DEFAULT 'initialized',
+            progress_percentage INTEGER NOT NULL DEFAULT 0,
+            selected_specialists_json TEXT NULL,
+            required_specialists_json TEXT NULL,
+            forbidden_specialists_json TEXT NULL,
+            persisted_state_location VARCHAR NULL,
+            latest_event VARCHAR NULL,
+            latest_summary TEXT NULL,
+            payload_json TEXT NULL,
+            started_at BIGINT NULL,
+            last_updated_at BIGINT NULL,
+            completed_at BIGINT NULL,
+            created_at BIGINT NOT NULL,
+            updated_at BIGINT NOT NULL
+        )
+        """))
+        db.execute(text("CREATE INDEX IF NOT EXISTS ix_continuous_audit_jobs_org_created ON continuous_audit_jobs(org_slug, created_at)"))
+        db.execute(text("CREATE INDEX IF NOT EXISTS ix_continuous_audit_jobs_status_updated ON continuous_audit_jobs(status, updated_at)"))
+        db.execute(text("CREATE INDEX IF NOT EXISTS ix_continuous_audit_jobs_thread_created ON continuous_audit_jobs(thread_id, created_at)"))
+        db.execute(text("""
+        CREATE TABLE IF NOT EXISTS continuous_audit_receipts (
+            id VARCHAR PRIMARY KEY,
+            org_slug VARCHAR NOT NULL,
+            job_id VARCHAR NOT NULL,
+            seq INTEGER NOT NULL DEFAULT 1,
+            event VARCHAR NOT NULL,
+            phase VARCHAR NULL,
+            agent VARCHAR NULL,
+            status VARCHAR NOT NULL DEFAULT 'recorded',
+            detail TEXT NULL,
+            payload_json TEXT NULL,
+            created_at BIGINT NOT NULL
+        )
+        """))
+        db.execute(text("CREATE INDEX IF NOT EXISTS ix_continuous_audit_receipts_job_created ON continuous_audit_receipts(job_id, created_at)"))
+        db.execute(text("CREATE INDEX IF NOT EXISTS ix_continuous_audit_receipts_org_created ON continuous_audit_receipts(org_slug, created_at)"))
+        db.execute(text("""
+        CREATE TABLE IF NOT EXISTS continuous_audit_artifacts (
+            id VARCHAR PRIMARY KEY,
+            org_slug VARCHAR NOT NULL,
+            job_id VARCHAR NOT NULL,
+            artifact_type VARCHAR NOT NULL,
+            title VARCHAR NULL,
+            content TEXT NULL,
+            content_type VARCHAR NOT NULL DEFAULT 'application/json',
+            created_at BIGINT NOT NULL
+        )
+        """))
+        db.execute(text("CREATE INDEX IF NOT EXISTS ix_continuous_audit_artifacts_job_created ON continuous_audit_artifacts(job_id, created_at)"))
+        db.execute(text("CREATE INDEX IF NOT EXISTS ix_continuous_audit_artifacts_org_created ON continuous_audit_artifacts(org_slug, created_at)"))
+
         db.commit()
     except Exception as e:
         try: db.rollback()
@@ -5712,6 +5775,69 @@ def _ensure_execution_events_schema_runtime(db: Session) -> None:
         """))
         db.execute(text("CREATE INDEX IF NOT EXISTS ix_execution_events_org_created ON execution_events(org_slug, created_at)"))
         db.execute(text("CREATE INDEX IF NOT EXISTS ix_execution_events_trace ON execution_events(trace_id)"))
+
+        db.execute(text("""
+        CREATE TABLE IF NOT EXISTS continuous_audit_jobs (
+            id VARCHAR PRIMARY KEY,
+            org_slug VARCHAR NOT NULL,
+            thread_id VARCHAR NULL,
+            requested_by_user_id VARCHAR NULL,
+            requested_by_user_name VARCHAR NULL,
+            requested_signer VARCHAR NULL,
+            title VARCHAR NULL,
+            source_message TEXT NOT NULL,
+            execution_mode VARCHAR NOT NULL DEFAULT 'read_only_continuous',
+            status VARCHAR NOT NULL DEFAULT 'initialized',
+            progress_percentage INTEGER NOT NULL DEFAULT 0,
+            selected_specialists_json TEXT NULL,
+            required_specialists_json TEXT NULL,
+            forbidden_specialists_json TEXT NULL,
+            persisted_state_location VARCHAR NULL,
+            latest_event VARCHAR NULL,
+            latest_summary TEXT NULL,
+            payload_json TEXT NULL,
+            started_at BIGINT NULL,
+            last_updated_at BIGINT NULL,
+            completed_at BIGINT NULL,
+            created_at BIGINT NOT NULL,
+            updated_at BIGINT NOT NULL
+        )
+        """))
+        db.execute(text("CREATE INDEX IF NOT EXISTS ix_continuous_audit_jobs_org_created ON continuous_audit_jobs(org_slug, created_at)"))
+        db.execute(text("CREATE INDEX IF NOT EXISTS ix_continuous_audit_jobs_status_updated ON continuous_audit_jobs(status, updated_at)"))
+        db.execute(text("CREATE INDEX IF NOT EXISTS ix_continuous_audit_jobs_thread_created ON continuous_audit_jobs(thread_id, created_at)"))
+        db.execute(text("""
+        CREATE TABLE IF NOT EXISTS continuous_audit_receipts (
+            id VARCHAR PRIMARY KEY,
+            org_slug VARCHAR NOT NULL,
+            job_id VARCHAR NOT NULL,
+            seq INTEGER NOT NULL DEFAULT 1,
+            event VARCHAR NOT NULL,
+            phase VARCHAR NULL,
+            agent VARCHAR NULL,
+            status VARCHAR NOT NULL DEFAULT 'recorded',
+            detail TEXT NULL,
+            payload_json TEXT NULL,
+            created_at BIGINT NOT NULL
+        )
+        """))
+        db.execute(text("CREATE INDEX IF NOT EXISTS ix_continuous_audit_receipts_job_created ON continuous_audit_receipts(job_id, created_at)"))
+        db.execute(text("CREATE INDEX IF NOT EXISTS ix_continuous_audit_receipts_org_created ON continuous_audit_receipts(org_slug, created_at)"))
+        db.execute(text("""
+        CREATE TABLE IF NOT EXISTS continuous_audit_artifacts (
+            id VARCHAR PRIMARY KEY,
+            org_slug VARCHAR NOT NULL,
+            job_id VARCHAR NOT NULL,
+            artifact_type VARCHAR NOT NULL,
+            title VARCHAR NULL,
+            content TEXT NULL,
+            content_type VARCHAR NOT NULL DEFAULT 'application/json',
+            created_at BIGINT NOT NULL
+        )
+        """))
+        db.execute(text("CREATE INDEX IF NOT EXISTS ix_continuous_audit_artifacts_job_created ON continuous_audit_artifacts(job_id, created_at)"))
+        db.execute(text("CREATE INDEX IF NOT EXISTS ix_continuous_audit_artifacts_org_created ON continuous_audit_artifacts(org_slug, created_at)"))
+
         db.commit()
     except Exception:
         try:
@@ -15349,6 +15475,219 @@ def admin_audit(_admin=Depends(require_admin_access), x_org_slug: Optional[str] 
             }
         )
     return out
+
+
+class ContinuousAuditJobStartIn(BaseModel):
+    message: str = Field(min_length=1, max_length=20000)
+    thread_id: Optional[str] = None
+    include_frontend: bool = False
+
+
+def _json_loads_safe(raw: Any, default: Any) -> Any:
+    try:
+        if not raw:
+            return default
+        parsed = json.loads(raw)
+        return parsed if parsed is not None else default
+    except Exception:
+        return default
+
+
+def _serialize_continuous_audit_job_admin(job: ContinuousAuditJob) -> Dict[str, Any]:
+    return {
+        "id": job.id,
+        "org_slug": job.org_slug,
+        "thread_id": getattr(job, "thread_id", None),
+        "requested_by_user_id": getattr(job, "requested_by_user_id", None),
+        "requested_by_user_name": getattr(job, "requested_by_user_name", None),
+        "requested_signer": getattr(job, "requested_signer", None),
+        "title": getattr(job, "title", None),
+        "status": getattr(job, "status", None),
+        "progress_percentage": int(getattr(job, "progress_percentage", 0) or 0),
+        "selected_specialists": list(_json_loads_safe(getattr(job, "selected_specialists_json", None), [])),
+        "required_specialists": list(_json_loads_safe(getattr(job, "required_specialists_json", None), [])),
+        "forbidden_specialists": list(_json_loads_safe(getattr(job, "forbidden_specialists_json", None), [])),
+        "execution_mode": getattr(job, "execution_mode", None),
+        "persisted_state_location": getattr(job, "persisted_state_location", None),
+        "latest_event": getattr(job, "latest_event", None),
+        "latest_summary": getattr(job, "latest_summary", None),
+        "payload": _json_loads_safe(getattr(job, "payload_json", None), {}),
+        "started_at": getattr(job, "started_at", None),
+        "last_updated_at": getattr(job, "last_updated_at", None),
+        "completed_at": getattr(job, "completed_at", None),
+        "created_at": getattr(job, "created_at", None),
+        "updated_at": getattr(job, "updated_at", None),
+    }
+
+
+def _serialize_continuous_audit_receipt_admin(item: ContinuousAuditReceipt) -> Dict[str, Any]:
+    return {
+        "id": item.id,
+        "job_id": item.job_id,
+        "seq": int(getattr(item, "seq", 0) or 0),
+        "event": getattr(item, "event", None),
+        "phase": getattr(item, "phase", None),
+        "agent": getattr(item, "agent", None),
+        "status": getattr(item, "status", None),
+        "detail": getattr(item, "detail", None),
+        "payload": _json_loads_safe(getattr(item, "payload_json", None), {}),
+        "created_at": getattr(item, "created_at", None),
+    }
+
+
+def _serialize_continuous_audit_artifact_admin(item: ContinuousAuditArtifact) -> Dict[str, Any]:
+    raw_content = getattr(item, "content", None)
+    parsed_content = _json_loads_safe(raw_content, raw_content)
+    return {
+        "id": item.id,
+        "job_id": item.job_id,
+        "artifact_type": getattr(item, "artifact_type", None),
+        "title": getattr(item, "title", None),
+        "content_type": getattr(item, "content_type", None),
+        "content": parsed_content,
+        "created_at": getattr(item, "created_at", None),
+    }
+
+
+@app.post("/api/admin/audit-jobs/start")
+def admin_start_continuous_audit_job(
+    inp: ContinuousAuditJobStartIn,
+    request: Request,
+    _admin=Depends(require_admin_access),
+    x_org_slug: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    org = get_org(x_org_slug)
+    requested_by_user_id = None
+    requested_by_user_name = "admin"
+    if isinstance(_admin, dict):
+        requested_by_user_id = str(_admin.get("sub") or "").strip() or None
+        requested_by_user_name = str(_admin.get("name") or _admin.get("email") or _admin.get("via") or "admin").strip() or "admin"
+    payload = start_continuous_audit_job(
+        db,
+        org,
+        message=inp.message,
+        thread_id=(str(inp.thread_id or "").strip() or None),
+        include_frontend=bool(inp.include_frontend),
+        requested_by_user_id=requested_by_user_id,
+        requested_by_user_name=requested_by_user_name,
+    )
+    try:
+        audit(
+            db,
+            org,
+            requested_by_user_id,
+            "continuous_audit_job.started",
+            request_id=ensure_request_id(request),
+            path="/api/admin/audit-jobs/start",
+            status_code=200,
+            latency_ms=0,
+            meta={"job_id": payload.get("job_id"), "status": payload.get("execution_state")},
+        )
+    except Exception:
+        pass
+    return payload
+
+
+@app.get("/api/admin/audit-jobs")
+def admin_list_continuous_audit_jobs(
+    _admin=Depends(require_admin_access),
+    x_org_slug: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+    limit: int = 50,
+):
+    org = get_org(x_org_slug)
+    rows = db.execute(
+        select(ContinuousAuditJob)
+        .where(ContinuousAuditJob.org_slug == org)
+        .order_by(ContinuousAuditJob.created_at.desc())
+        .limit(max(1, min(int(limit or 50), 200)))
+    ).scalars().all()
+    return [_serialize_continuous_audit_job_admin(row) for row in rows]
+
+
+@app.get("/api/admin/audit-jobs/health")
+def admin_continuous_audit_jobs_health(
+    _admin=Depends(require_admin_access),
+    x_org_slug: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    org = get_org(x_org_slug)
+    since = now_ts() - 86400
+    last = db.execute(
+        select(ContinuousAuditJob)
+        .where(ContinuousAuditJob.org_slug == org)
+        .order_by(ContinuousAuditJob.created_at.desc())
+        .limit(1)
+    ).scalars().first()
+    count_24h = db.execute(
+        select(func.count()).select_from(ContinuousAuditJob).where(
+            ContinuousAuditJob.org_slug == org,
+            ContinuousAuditJob.created_at >= since,
+        )
+    ).scalar()
+    running_count = db.execute(
+        select(func.count()).select_from(ContinuousAuditJob).where(
+            ContinuousAuditJob.org_slug == org,
+            ContinuousAuditJob.status.in_(["initialized", "queued", "running", "paused"]),
+        )
+    ).scalar()
+    return {
+        "ok": True,
+        "org_slug": org,
+        "count_24h": int(count_24h or 0),
+        "running_count": int(running_count or 0),
+        "last_job_id": getattr(last, "id", None),
+        "last_status": getattr(last, "status", None),
+        "last_created_at": getattr(last, "created_at", None),
+    }
+
+
+@app.get("/api/admin/audit-jobs/{job_id}")
+def admin_get_continuous_audit_job(
+    job_id: str,
+    _admin=Depends(require_admin_access),
+    x_org_slug: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    org = get_org(x_org_slug)
+    return get_continuous_audit_job_snapshot(db, org, job_id)
+
+
+@app.get("/api/admin/audit-jobs/{job_id}/receipts")
+def admin_get_continuous_audit_receipts(
+    job_id: str,
+    _admin=Depends(require_admin_access),
+    x_org_slug: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    org = get_org(x_org_slug)
+    rows = db.execute(
+        select(ContinuousAuditReceipt).where(
+            ContinuousAuditReceipt.org_slug == org,
+            ContinuousAuditReceipt.job_id == str(job_id or "").strip(),
+        ).order_by(ContinuousAuditReceipt.seq.asc(), ContinuousAuditReceipt.created_at.asc())
+    ).scalars().all()
+    return [_serialize_continuous_audit_receipt_admin(row) for row in rows]
+
+
+@app.get("/api/admin/audit-jobs/{job_id}/artifacts")
+def admin_get_continuous_audit_artifacts(
+    job_id: str,
+    _admin=Depends(require_admin_access),
+    x_org_slug: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    org = get_org(x_org_slug)
+    rows = db.execute(
+        select(ContinuousAuditArtifact).where(
+            ContinuousAuditArtifact.org_slug == org,
+            ContinuousAuditArtifact.job_id == str(job_id or "").strip(),
+        ).order_by(ContinuousAuditArtifact.created_at.asc())
+    ).scalars().all()
+    return [_serialize_continuous_audit_artifact_admin(row) for row in rows]
+
+
 @app.get("/api/admin/audit/health")
 def admin_audit_health(_admin=Depends(require_admin_access), x_org_slug: Optional[str] = Header(default=None), db: Session = Depends(get_db)):
     org = get_org(x_org_slug)
