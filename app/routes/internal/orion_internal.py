@@ -3183,13 +3183,10 @@ def list_squad_agents_post(inp: OrionRuntimeIn) -> Dict[str, Any]:
 @router.post("/platform/audit")
 def platform_self_audit(
     inp: OrionRuntimeIn,
-    request: Optional[Request] = None,
-    db: Optional[Session] = None,
+    request: Request,
+    db: Session = Depends(get_db),
 ) -> Dict[str, Any]:
     own_db = False
-    if db is None:
-        db = SessionLocal()
-        own_db = True
     try:
         org = "public"
         requested_by_user_id = None
