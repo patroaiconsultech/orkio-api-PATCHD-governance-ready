@@ -81,16 +81,22 @@ def _strip_constraint_token(value: Any) -> str:
 
 def _canonical_dispatch_actor(value: Any) -> str:
     cleaned = _strip_constraint_token(value)
-    raw = _normalize(str(cleaned or "").replace("@", " ").replace("-", "_").replace(" ", "_"))
+    raw = _normalize(str(cleaned or "").replace("@", " "))
+    raw = raw.replace("/", "_").replace("-", "_").replace(" ", "_")
+    raw = re.sub(r"_+", "_", raw).strip("_")
     if not raw:
         return ""
     aliases = {
-        "ux/frontend": "ux_frontend",
         "ux_frontend": "ux_frontend",
         "ux_front": "ux_frontend",
         "ux": "ux_frontend",
         "frontend": "ux_frontend",
         "front_end": "ux_frontend",
+        "frontend_ux": "ux_frontend",
+        "ui_ux": "ux_frontend",
+        "uiux": "ux_frontend",
+        "uxui": "ux_frontend",
+        "ux_front_end": "ux_frontend",
         "orion_cto": "orion",
         "cto_runtime": "orion",
     }
