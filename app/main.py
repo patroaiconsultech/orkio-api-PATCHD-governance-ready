@@ -5914,6 +5914,11 @@ def _canonical_dispatch_specialist_slug(name: Any) -> Optional[str]:
     aliases = {
         "ux/frontend": "ux_frontend",
         "ux_frontend": "ux_frontend",
+        "ux_front_end": "ux_frontend",
+        "frontend_ux": "ux_frontend",
+        "ui_ux": "ux_frontend",
+        "uiux": "ux_frontend",
+        "uxui": "ux_frontend",
         "ux": "ux_frontend",
         "frontend": "ux_frontend",
         "front_end": "ux_frontend",
@@ -6026,10 +6031,15 @@ def _register_dispatch_agent_aliases(alias_to_agent: Dict[str, Any], agent: Any)
             "ux/frontend",
             "ux frontend",
             "frontend ux",
+            "frontend_ux",
+            "ux front end",
+            "ux_front_end",
             "ux",
             "frontend",
             "ui_ux",
             "ui ux",
+            "uiux",
+            "uxui",
         ]
     elif slug == "chris":
         extra_aliases = ["chris", "cfo", "vp_cfo", "vp/cfo", "chris cfo"]
@@ -6103,6 +6113,152 @@ def _build_runtime_constraint_violation_text(constraints: Dict[str, Any], violat
     return "\n".join(lines)
 
 
+def _runtime_operation_from_enrichment(runtime_enrichment: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    if not isinstance(runtime_enrichment, dict):
+        return {}
+    intent_package = runtime_enrichment.get("intent_package") if isinstance(runtime_enrichment.get("intent_package"), dict) else {}
+    runtime_operation = intent_package.get("runtime_operation") if isinstance(intent_package.get("runtime_operation"), dict) else {}
+    op = dict(runtime_operation or {})
+    if not op.get("capability_name"):
+        op["capability_name"] = intent_package.get("capability_name")
+    if not op.get("template_id"):
+        op["template_id"] = intent_package.get("template_id")
+    return op
+
+
+def _is_readonly_squad_resolution_enrichment(runtime_enrichment: Optional[Dict[str, Any]]) -> bool:
+    op = _runtime_operation_from_enrichment(runtime_enrichment)
+    kind = str(op.get("kind") or "").strip().lower()
+    capability_name = str(op.get("capability_name") or "").strip().lower()
+    execution_mode = str(op.get("execution_mode") or "").strip().lower()
+    readonly_kinds = {
+        "squad_resolve_readonly",
+        "squad_resolution_trace_readonly",
+    }
+    readonly_capabilities = {
+        "squad_resolve_readonly",
+        "squad_resolution_trace_readonly",
+    }
+    return bool(
+        kind in readonly_kinds
+        or capability_name in readonly_capabilities
+        or execution_mode in {"read_only_squad_resolution", "read_only_squad_trace"}
+    )
+
+
+def _readonly_squad_template_id(runtime_enrichment: Optional[Dict[str, Any]]) -> str:
+    op = _runtime_operation_from_enrichment(runtime_enrichment)
+    kind = str(op.get("kind") or op.get("capability_name") or "").strip().lower()
+    explicit = str(op.get("template_id") or "").strip()
+    if explicit:
+        return explicit
+    if "trace" in kind:
+        return "squad_resolution_trace_readonly_template_v1"
+    return "squad_resolve_readonly_template_v1"
+
+
+def _canonical_dispatch_specialist_list(values: Optional[List[Any]]) -> List[str]:
+    out: List[str] = []
+    seen: set = set()
+    for value in list(values or []):
+        slug = _canonical_dispatch_specialist_slug(value)
+        if not slug or slug in seen:
+            continue
+        out.append(slug)
+        seen.add(slug)
+    return out
+
+
+def _build_readonly_squad_trace_payload(
+    *,
+    constraints: Dict[str, Any],
+    runtime_enrichment: Optional[Dict[str, Any]],
+    requested_names: Optional[List[str]],
+    target_agents_before: Optional[List[Any]],
+    target_agents_after: Optional[List[Any]],
+    missing_specialists: Optional[List[str]] = None,
+    issues: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    op = _runtime_operation_from_enrichment(runtime_enrichment)
+    capability_name = str(op.get("capability_name") or op.get("kind") or "squad_resolution_trace_readonly").strip()
+    template_id = _readonly_squad_template_id(runtime_enrichment)
+    requested_raw = list(
+        op.get("requested_specialists")
+        or constraints.get("specialists_required")
+        or requested_names
+        or []
+    )
+    requested_normalized = _canonical_dispatch_specialist_list(requested_raw)
+    selected_before = _canonical_dispatch_specialist_list(
+        [getattr(ag, "name", None) for ag in list(target_agents_before or [])]
+    )
+    selected_after = _canonical_dispatch_specialist_list(
+        [getattr(ag, "name", None) for ag in list(target_agents_after or [])]
+    )
+    missing = _canonical_dispatch_specialist_list(
+        list(missing_specialists or [slug for slug in requested_normalized if slug not in set(selected_after)])
+    )
+    issue_list = [str(item or "").strip() for item in list(issues or []) if str(item or "").strip()]
+    if missing and not any("missing required specialists" in item for item in issue_list):
+        issue_list.append("missing required specialists: " + ", ".join(missing))
+    count_must_be = constraints.get("selected_specialists_count_must_be")
+    if count_must_be is not None and len(selected_after) != int(count_must_be):
+        msg = f"selected_specialists_count_must_be={int(count_must_be)} but got {len(selected_after)}"
+        if msg not in issue_list:
+            issue_list.append(msg)
+    compliance_status = "passed" if not issue_list else "failed_readonly_trace"
+    abort_reason = "; ".join(issue_list) if issue_list else ""
+    return {
+        "capability_name": capability_name,
+        "template_id": template_id,
+        "required_signer": constraints.get("required_signer"),
+        "requested_specialists_raw": requested_raw,
+        "requested_specialists_normalized": requested_normalized,
+        "selected_specialists_before_constraints": selected_before,
+        "selected_specialists_after_constraints": selected_after,
+        "selected_specialists_before_policy": selected_before,
+        "selected_specialists_after_policy": selected_after,
+        "missing_specialists": missing,
+        "selected_specialists_count_must_be": count_must_be,
+        "compliance_status": compliance_status,
+        "dispatch_executed": False,
+        "abort_before_execution": False,
+        "abort_reason": abort_reason,
+    }
+
+
+def _format_readonly_squad_trace_text(trace: Optional[Dict[str, Any]]) -> str:
+    trace = dict(trace or {})
+    ordered_fields = [
+        "capability_name",
+        "template_id",
+        "requested_specialists_raw",
+        "requested_specialists_normalized",
+        "selected_specialists_before_constraints",
+        "selected_specialists_after_constraints",
+        "selected_specialists_before_policy",
+        "selected_specialists_after_policy",
+        "missing_specialists",
+        "compliance_status",
+        "dispatch_executed",
+        "abort_before_execution",
+        "abort_reason",
+    ]
+    lines: List[str] = []
+    for field in ordered_fields:
+        if field not in trace:
+            continue
+        value = trace.get(field)
+        if isinstance(value, list):
+            rendered = json.dumps(value, ensure_ascii=False)
+        elif isinstance(value, bool):
+            rendered = "true" if value else "false"
+        else:
+            rendered = str(value if value is not None else "")
+        lines.append(f"- {field}: {rendered}")
+    return "\n".join(lines)
+
+
 def _apply_runtime_hard_constraints_to_targets(
     *,
     target_agents: List[Any],
@@ -6115,6 +6271,7 @@ def _apply_runtime_hard_constraints_to_targets(
     org: Optional[str] = None,
 ) -> Dict[str, Any]:
     constraints = _runtime_hard_constraints_from_enrichment(runtime_enrichment)
+    readonly_squad = _is_readonly_squad_resolution_enrichment(runtime_enrichment)
     if not constraints.get("has_hard_constraints"):
         return {
             "target_agents": list(target_agents or []),
@@ -6124,6 +6281,17 @@ def _apply_runtime_hard_constraints_to_targets(
             "violations": [],
             "constraints": constraints,
             "runtime_enrichment": runtime_enrichment,
+            "readonly_trace": (
+                _build_readonly_squad_trace_payload(
+                    constraints=constraints,
+                    runtime_enrichment=runtime_enrichment,
+                    requested_names=requested_names,
+                    target_agents_before=list(target_agents or []),
+                    target_agents_after=list(target_agents or []),
+                    missing_specialists=[],
+                    issues=[],
+                ) if readonly_squad else None
+            ),
         }
 
     unique_agents: List[Any] = []
@@ -6134,6 +6302,8 @@ def _apply_runtime_hard_constraints_to_targets(
             continue
         unique_agents.append(ag)
         seen_ids.add(agid)
+
+    target_agents_before_constraints = list(unique_agents or [])
 
     def _resolve_by_slug(slug: str) -> Any:
         return _resolve_dispatch_agent_by_slug(
@@ -6148,6 +6318,8 @@ def _apply_runtime_hard_constraints_to_targets(
     specialists_forbidden = set(constraints.get("specialists_forbidden") or [])
     count_must_be = constraints.get("selected_specialists_count_must_be")
     violations: List[str] = []
+    readonly_issues: List[str] = []
+    missing_specialists: List[str] = []
 
     if specialists_required:
         constrained_targets: List[Any] = []
@@ -6167,15 +6339,20 @@ def _apply_runtime_hard_constraints_to_targets(
             resolved_names.append(str(getattr(ag, "name", None) or slug))
         try:
             logger.info(
-                "HARD_CONSTRAINT_AGENT_RESOLUTION requested=%s resolved=%s missing=%s",
+                "HARD_CONSTRAINT_AGENT_RESOLUTION requested=%s resolved=%s missing=%s readonly=%s",
                 list(specialists_required or []),
                 resolved_names,
                 missing,
+                bool(readonly_squad),
             )
         except Exception:
             pass
+        missing_specialists = list(missing or [])
         if missing:
-            violations.append("missing required specialists: " + ", ".join(missing))
+            issue = "missing required specialists: " + ", ".join(missing)
+            readonly_issues.append(issue)
+            if not readonly_squad:
+                violations.append(issue)
         unique_agents = constrained_targets
     if specialists_forbidden:
         forbidden_hits = []
@@ -6188,11 +6365,17 @@ def _apply_runtime_hard_constraints_to_targets(
             filtered.append(ag)
         unique_agents = filtered
         if forbidden_hits:
-            violations.append("forbidden specialists selected: " + ", ".join(sorted(set(forbidden_hits))))
+            issue = "forbidden specialists selected: " + ", ".join(sorted(set(forbidden_hits)))
+            readonly_issues.append(issue)
+            if not readonly_squad:
+                violations.append(issue)
     if required_signer:
         signer_agent = _resolve_by_slug(required_signer)
         if signer_agent is None:
-            violations.append(f"required signer unavailable: {required_signer}")
+            issue = f"required signer unavailable: {required_signer}"
+            readonly_issues.append(issue)
+            if not readonly_squad:
+                violations.append(issue)
         else:
             signer_id = getattr(signer_agent, "id", None)
             if all(getattr(ag, "id", None) != signer_id for ag in unique_agents):
@@ -6210,7 +6393,10 @@ def _apply_runtime_hard_constraints_to_targets(
     unique_agents = deduped
 
     if count_must_be is not None and len(unique_agents) != int(count_must_be):
-        violations.append(f"selected_specialists_count_must_be={int(count_must_be)} but got {len(unique_agents)}")
+        issue = f"selected_specialists_count_must_be={int(count_must_be)} but got {len(unique_agents)}"
+        readonly_issues.append(issue)
+        if not readonly_squad:
+            violations.append(issue)
 
     requested_out = list(requested_names or [])
     if specialists_required:
@@ -6225,6 +6411,7 @@ def _apply_runtime_hard_constraints_to_targets(
         mention_out = [required_signer] + [name for name in mention_out if _canonical_dispatch_specialist_slug(name) != required_signer]
 
     has_team_out = len(unique_agents) > 1
+    readonly_trace = None
 
     if isinstance(runtime_enrichment, dict):
         intent_package = runtime_enrichment.get("intent_package") if isinstance(runtime_enrichment.get("intent_package"), dict) else {}
@@ -6241,6 +6428,22 @@ def _apply_runtime_hard_constraints_to_targets(
             runtime_operation["visible_only_agent"] = required_signer
         if violations:
             runtime_operation["constraint_violations"] = list(violations)
+        if readonly_squad:
+            readonly_trace = _build_readonly_squad_trace_payload(
+                constraints=constraints,
+                runtime_enrichment=runtime_enrichment,
+                requested_names=requested_out,
+                target_agents_before=target_agents_before_constraints,
+                target_agents_after=unique_agents,
+                missing_specialists=missing_specialists,
+                issues=readonly_issues,
+            )
+            runtime_operation["readonly_trace"] = dict(readonly_trace)
+            runtime_operation["missing_specialists"] = list(readonly_trace.get("missing_specialists") or [])
+            runtime_operation["dispatch_executed"] = False
+            runtime_operation["abort_before_execution"] = False
+            runtime_operation["compliance_status"] = readonly_trace.get("compliance_status")
+            runtime_operation["force_dispatch"] = False
         intent_package["runtime_operation"] = runtime_operation
         runtime_enrichment["intent_package"] = intent_package
 
@@ -6254,6 +6457,8 @@ def _apply_runtime_hard_constraints_to_targets(
         if required_signer:
             dag_snapshot["preferred_visible_node"] = required_signer
             dag_snapshot["visible_node"] = required_signer
+        if readonly_squad:
+            dag_snapshot["dispatch_executed"] = False
         runtime_enrichment["dag_snapshot"] = dag_snapshot
 
         runtime_hints = runtime_enrichment.get("runtime_hints") if isinstance(runtime_enrichment.get("runtime_hints"), dict) else {}
@@ -6263,6 +6468,9 @@ def _apply_runtime_hard_constraints_to_targets(
         runtime_hints["hard_constraints"] = constraints
         if violations:
             runtime_hints["constraint_violations"] = list(violations)
+        if readonly_squad and readonly_trace:
+            runtime_hints["readonly_trace"] = dict(readonly_trace)
+            runtime_hints["dispatch_executed"] = False
         runtime_enrichment["runtime_hints"] = runtime_hints
 
     return {
@@ -6270,9 +6478,10 @@ def _apply_runtime_hard_constraints_to_targets(
         "requested_names": requested_out,
         "mention_tokens": mention_out,
         "has_team": has_team_out,
-        "violations": violations,
+        "violations": ([] if readonly_squad else violations),
         "constraints": constraints,
         "runtime_enrichment": runtime_enrichment,
+        "readonly_trace": readonly_trace,
     }
 
 def _payload_has_catalog_privileged_access(payload: Optional[Dict[str, Any]]) -> bool:
@@ -7490,9 +7699,6 @@ def _runtime_orion_dispatch_request_flags(user_text: str) -> Dict[str, Any]:
     if not normalized:
         return {"requested": False, "requested_specialists": [], "reason": ""}
 
-    if _looks_like_strict_squad_resolution_request(txt):
-        return {"requested": False, "requested_specialists": [], "reason": "strict_squad_resolution_bypass"}
-
     specialist_aliases = [
         (r"\barquiteto\b", "architect"),
         (r"\barchitect\b", "architect"),
@@ -7599,8 +7805,6 @@ def _should_force_runtime_dispatch_over_catalog(
     user_text: str,
     runtime_enrichment: Optional[Dict[str, Any]] = None,
 ) -> bool:
-    if _looks_like_strict_squad_resolution_request(user_text):
-        return False
     try:
         flags = _runtime_orion_dispatch_request_flags(user_text)
         if bool(flags.get("requested")):
@@ -7617,8 +7821,6 @@ def _should_force_runtime_dispatch_over_catalog(
     runtime_hints = runtime_enrichment.get("runtime_hints") if isinstance(runtime_enrichment.get("runtime_hints"), dict) else {}
 
     runtime_kind = str(runtime_operation.get("kind") or "").strip().lower()
-    if runtime_kind in {"squad_resolve_readonly", "squad_resolution_trace_readonly"}:
-        return False
     execution_depth = str(
         runtime_operation.get("execution_depth")
         or planner_snapshot.get("execution_depth")
@@ -7654,133 +7856,12 @@ def _is_team_technical_audit_request(user_text: str) -> bool:
     return bool(has_team and has_audit and has_technical_scope and read_only)
 
 
-def _looks_like_strict_squad_resolution_request(user_text: str) -> bool:
-    txt = (user_text or "").strip().lower()
-    if not txt:
-        return False
-    if "squad_resolution_trace_readonly" in txt or "squad_resolve_readonly" in txt:
-        return True
-    markers = [
-        "resolva exatamente este squad",
-        "resolver este squad",
-        "resolver squad",
-        "squad resolvido",
-        "resolve exactly this squad",
-        "resolve this squad",
-    ]
-    if any(marker in txt for marker in markers):
-        return True
-    trace_fields = [
-        "capability_name",
-        "template_id",
-        "requested_specialists_raw",
-        "requested_specialists_normalized",
-        "selected_specialists_before_policy",
-        "selected_specialists_after_policy",
-        "abort_reason",
-    ]
-    if ("retorne apenas" in txt or "responda apenas" in txt) and any(field in txt for field in trace_fields):
-        return True
-    if ("ux_frontend" in txt or "ux/frontend" in txt) and ("read-only" in txt or "read only" in txt or "não execute dispatch" in txt or "nao execute dispatch" in txt):
-        return True
-    return False
-
-
-def _looks_like_strict_squad_resolution_trace_request(user_text: str) -> bool:
-    txt = (user_text or "").strip().lower()
-    if not txt:
-        return False
-    required = [
-        "capability_name",
-        "template_id",
-        "requested_specialists_raw",
-        "requested_specialists_normalized",
-        "selected_specialists_before_policy",
-        "selected_specialists_after_policy",
-        "abort_reason",
-    ]
-    return ("retorne apenas" in txt or "responda apenas" in txt) and any(field in txt for field in required)
-
-
-def _extract_strict_squad_specialists(user_text: str) -> List[str]:
-    raw = str(user_text or "")
-    lines = [str(line or "").strip() for line in raw.splitlines()]
-    collected: List[str] = []
-    capture = False
-    for line in lines:
-        lowered = line.lower()
-        if not capture and (
-            "resolva exatamente este squad" in lowered
-            or "resolver este squad" in lowered
-            or "resolver squad" in lowered
-            or "resolve exactly this squad" in lowered
-            or lowered.startswith("squad:")
-        ):
-            capture = True
-            inline = line.split(":", 1)[1].strip() if ":" in line else ""
-            if inline:
-                parts = [part.strip() for part in re.split(r"[,;]", inline) if part.strip()]
-                collected.extend(parts)
-            continue
-        if not capture:
-            continue
-        if not line:
-            if collected:
-                break
-            continue
-        if lowered.startswith(("responda apenas", "retorne apenas", "não execute dispatch", "nao execute dispatch", "modo read-only", "modo read only", "agente visível final", "agente visivel final")):
-            if collected:
-                break
-            continue
-        parts = [part.strip() for part in re.split(r"[,;]", line) if part.strip()]
-        if parts:
-            collected.extend(parts)
-            continue
-        if collected:
-            break
-
-    if not collected:
-        inline_matches = re.findall(r"\b(orion|auditor|cto|ux/frontend|ux_frontend|frontend|ux)\b", raw, flags=re.IGNORECASE)
-        collected.extend(inline_matches)
-
-    normalized: List[str] = []
-    seen: set[str] = set()
-    for item in collected:
-        slug = _canonical_dispatch_specialist_slug(item)
-        if slug and slug not in seen:
-            normalized.append(slug)
-            seen.add(slug)
-
-    if not normalized:
-        normalized = ["orion", "auditor", "cto", "ux_frontend"]
-    return normalized
-
-
-def _build_strict_squad_resolution_text(user_text: str) -> str:
-    specialists = _extract_strict_squad_specialists(user_text)
-    trace_mode = _looks_like_strict_squad_resolution_trace_request(user_text)
-    if trace_mode:
-        lines = [
-            "- capability_name: squad_resolution_trace_readonly",
-            "- template_id: squad_resolution_trace_readonly_template_v1",
-            f"- requested_specialists_raw: {json.dumps(specialists, ensure_ascii=False)}",
-            f"- requested_specialists_normalized: {json.dumps(specialists, ensure_ascii=False)}",
-            f"- selected_specialists_before_policy: {json.dumps(specialists, ensure_ascii=False)}",
-            f"- selected_specialists_after_policy: {json.dumps(specialists, ensure_ascii=False)}",
-            "- abort_reason: none",
-        ]
-        return "\n".join(lines)
-    return ", ".join(specialists)
-
-
 def _apply_forced_orion_runtime_dispatch_enrichment(
     runtime_enrichment: Optional[Dict[str, Any]],
     user_text: str,
     *,
     requested_names: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
-    if _looks_like_strict_squad_resolution_request(user_text):
-        return dict(runtime_enrichment or {})
     flags = _runtime_orion_dispatch_request_flags(user_text)
     normalized = dict(runtime_enrichment or {})
     if not flags.get("requested"):
@@ -8139,8 +8220,6 @@ def _build_capability_inventory_text(
     only_technical: bool = False,
     user_text: Optional[str] = None,
 ) -> str:
-    if _looks_like_strict_squad_resolution_request(user_text or ""):
-        return _build_strict_squad_resolution_text(user_text or "")
     if include_hidden and not privileged:
         return "NÃO TENHO ACESSO AO CATÁLOGO PRIVILEGIADO."
 
@@ -12841,6 +12920,45 @@ def chat(
     except Exception:
         constraint_violations = []
         runtime_constraints = {}
+        readonly_squad_trace = None
+
+    if 'readonly_squad_trace' not in locals():
+        readonly_squad_trace = _constraint_guard.get("readonly_trace") if isinstance(_constraint_guard.get("readonly_trace"), dict) else None
+
+    if readonly_squad_trace:
+        trace_text = _format_readonly_squad_trace_text(readonly_squad_trace)
+        signer_slug = str(readonly_squad_trace.get("required_signer") or runtime_constraints.get("required_signer") or "orion").strip().lower() or "orion"
+        signer_agent = alias_to_agent.get(signer_slug) or _resolve_dispatch_agent_by_slug(
+            signer_slug,
+            alias_to_agent=alias_to_agent,
+            db=db,
+            org=org,
+        )
+        signer_name = getattr(signer_agent, "name", None) if signer_agent is not None else signer_slug.title()
+        signer_id = getattr(signer_agent, "id", None) if signer_agent is not None else None
+        signer_voice_id = resolve_agent_voice(signer_agent) if signer_agent is not None else None
+        signer_avatar_url = getattr(signer_agent, "avatar_url", None) if signer_agent is not None else None
+        m = Message(
+            id=new_id(),
+            org_slug=org,
+            thread_id=tid,
+            role="assistant",
+            agent_id=signer_id,
+            content=trace_text,
+            created_at=now_ts(),
+        )
+        db.add(m)
+        db.commit()
+        return ChatOut(
+            thread_id=tid,
+            answer=trace_text,
+            citations=[],
+            agent_id=signer_id,
+            agent_name=signer_name,
+            voice_id=signer_voice_id,
+            avatar_url=signer_avatar_url,
+            runtime_hints=(runtime_enrichment or {}).get("runtime_hints") if isinstance(runtime_enrichment, dict) else None,
+        )
 
     if constraint_violations:
         violation_text = _build_runtime_constraint_violation_text(runtime_constraints, constraint_violations)
@@ -16731,6 +16849,75 @@ async def chat_stream(
     except Exception:
         constraint_violations = []
         runtime_constraints = {}
+        readonly_squad_trace = None
+
+    if 'readonly_squad_trace' not in locals():
+        readonly_squad_trace = _constraint_guard.get("readonly_trace") if isinstance(_constraint_guard.get("readonly_trace"), dict) else None
+
+    if readonly_squad_trace:
+        trace_text = _format_readonly_squad_trace_text(readonly_squad_trace)
+        signer_slug = str(readonly_squad_trace.get("required_signer") or runtime_constraints.get("required_signer") or "orion").strip().lower() or "orion"
+        signer_row = alias_to_agent.get(signer_slug) or _resolve_dispatch_agent_by_slug(
+            signer_slug,
+            alias_to_agent=alias_to_agent,
+            db=db,
+            org=org,
+        )
+        signer_name = getattr(signer_row, "name", None) if signer_row is not None else signer_slug.title()
+        signer_id = getattr(signer_row, "id", None) if signer_row is not None else None
+        signer_voice_id = resolve_agent_voice(signer_row) if signer_row is not None else None
+        signer_avatar_url = getattr(signer_row, "avatar_url", None) if signer_row is not None else None
+
+        async def _readonly_squad_trace_gen():
+            try:
+                try:
+                    m_trace = Message(
+                        id=new_id(),
+                        org_slug=org,
+                        thread_id=tid,
+                        role="assistant",
+                        content=trace_text,
+                        agent_id=signer_id,
+                        agent_name=signer_name,
+                        created_at=now_ts(),
+                    )
+                    db.add(m_trace)
+                    db.commit()
+                except Exception:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                yield sse_event("status", {"phase": "ready", "status": "READONLY_TRACE", "thread_id": tid, "trace_id": trace_id})
+                yield sse_execution(
+                    "readonly_squad_trace",
+                    "Read-only squad trace generated",
+                    kind="info",
+                    scope="system",
+                    agent_id=signer_id,
+                    agent_name=signer_name,
+                    detail=str(readonly_squad_trace.get("compliance_status") or "passed"),
+                )
+                yield sse_event(
+                    "chunk",
+                    {
+                        "agent_id": signer_id,
+                        "agent_name": signer_name,
+                        "executor_agent_id": signer_id,
+                        "executor_agent_name": signer_name,
+                        "content": trace_text,
+                        "delta": trace_text,
+                        "thread_id": tid,
+                        "trace_id": trace_id,
+                        "voice_id": signer_voice_id,
+                        "avatar_url": signer_avatar_url,
+                    },
+                )
+                yield sse_event("done", {"done": True, "thread_id": tid, "trace_id": trace_id})
+            except Exception:
+                return
+
+        return StreamingResponse(_readonly_squad_trace_gen(), media_type="text/event-stream")
 
     try:
         orion_self_knowledge_flags = _orion_self_knowledge_request_flags(message)
