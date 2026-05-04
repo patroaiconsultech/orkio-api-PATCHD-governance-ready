@@ -246,6 +246,28 @@ def _looks_like_team_technical_audit_request(text: str) -> bool:
     return bool(has_team and has_audit and has_technical_scope and read_only)
 
 
+
+def _looks_like_continuous_audit_request(text: str) -> bool:
+    txt = _normalize(text)
+    if not txt:
+        return False
+    markers = [
+        "auditoria contínua",
+        "auditoria continua",
+        "continuous audit",
+        "continuous_audit",
+        "job persistido",
+        "job_id",
+        "progresso rastreável",
+        "progresso rastreavel",
+        "execução contínua",
+        "execucao continua",
+        "audit job",
+        "auditoria rastreável",
+        "auditoria rastreavel",
+    ]
+    return _contains_any(txt, markers)
+
 def _looks_like_runtime_source_audit_request(text: str) -> bool:
     txt = _normalize(text)
     if not txt:
@@ -470,6 +492,8 @@ def _infer_action_scope(text: str) -> str:
         return "write_branch"
     if _contains_any(txt, ["patch", "proposta de patch", "plano de patch"]):
         return "propose_patch"
+    if _looks_like_continuous_audit_request(txt):
+        return "diagnose"
     if _contains_any(txt, ["audit", "auditoria", "scan", "diagnóstico", "diagnostico", "self audit", "war room"]):
         return "diagnose"
     return "read"
@@ -492,6 +516,8 @@ def _infer_capability(action_scope: str, text: str) -> Optional[str]:
     txt = _normalize(text)
     if _looks_like_platform_improvement_review_request(txt):
         return "controlled_self_evolution_propose_only"
+    if _looks_like_continuous_audit_request(txt):
+        return "continuous_audit_job"
     if _contains_any(txt, ["audit", "auditoria", "scan", "self audit", "runtime diagnostic", "war room"]):
         return "platform_self_audit"
     if action_scope == "open_pr":
@@ -538,6 +564,7 @@ def build_intent_package(
         False if incremental_dispatch_followup
         else _looks_like_platform_improvement_review_request(user_input or "")
     )
+    continuous_audit_request = False if incremental_dispatch_followup else _looks_like_continuous_audit_request(user_input or "")
 
     action_scope = _infer_action_scope(text)
     target_scope = _infer_target_scope(text)
@@ -546,6 +573,11 @@ def build_intent_package(
     if incremental_dispatch_followup:
         intent = "dispatch_incremental_followup"
         capability_name = "platform_self_audit"
+        action_scope = "diagnose"
+        target_scope = "platform"
+    elif continuous_audit_request or capability_name == "continuous_audit_job":
+        intent = "continuous_audit_job"
+        capability_name = "continuous_audit_job"
         action_scope = "diagnose"
         target_scope = "platform"
     elif platform_improvement_review:
@@ -576,7 +608,12 @@ def build_intent_package(
     if incremental_dispatch_followup:
         team_technical_audit = False
         platform_improvement_review = False
+        continuous_audit_request = False
         orion_only = True
+    elif continuous_audit_request:
+        capability_name = "continuous_audit_job"
+        intent = "continuous_audit_job"
+        platform_improvement_review = False
     elif orion_only or team_technical_audit:
         capability_name = capability_name or "platform_self_audit"
         intent = "platform_self_audit"
@@ -586,9 +623,13 @@ def build_intent_package(
         "dispatch_incremental_followup"
         if incremental_dispatch_followup
         else (
-            "controlled_self_evolution_propose_only"
-            if platform_improvement_review
-            else (intent if intent != "general_guidance" else "")
+            "continuous_audit_job"
+            if continuous_audit_request
+            else (
+                "controlled_self_evolution_propose_only"
+                if platform_improvement_review
+                else (intent if intent != "general_guidance" else "")
+            )
         )
     )
 
@@ -613,6 +654,20 @@ def build_intent_package(
         delivery_contract = "orion_incremental_dispatch_followup_v1"
         structured_output = True
         expected_specialist_reports = list(recommended_agents or ["orion", "auditor", "cto"])
+        visible_signer_expected = required_signer or "orion"
+    elif continuous_audit_request:
+        recommended_agents = _apply_dispatch_constraints(
+            ["orion", "auditor", "cto", "ux_frontend"],
+            required=specialists_required,
+            forbidden=specialists_forbidden,
+            required_signer=required_signer or "orion",
+            count_must_be=selected_specialists_count_must_be or 4,
+        )
+        advisor_agents = _dedupe_preserve((recommended_agents or ["orion", "auditor", "cto", "ux_frontend"]) + ["metatron"])
+        target_agent = required_signer or "orion"
+        delivery_contract = "continuous_audit_job_v1"
+        structured_output = True
+        expected_specialist_reports = list(recommended_agents or ["orion", "auditor", "cto", "ux_frontend"])
         visible_signer_expected = required_signer or "orion"
     elif platform_improvement_review:
         recommended_agents = _apply_dispatch_constraints(
@@ -669,6 +724,7 @@ def build_intent_package(
         "excluded_agents": excluded_agents,
         "team_technical_audit": bool(team_technical_audit),
         "platform_improvement_review": bool(platform_improvement_review),
+        "continuous_audit_request": bool(continuous_audit_request),
         "incremental_dispatch_followup": bool(incremental_dispatch_followup),
         "hard_constraints_present": bool(hard_constraints.get("has_hard_constraints")),
         "required_signer": required_signer or None,
@@ -680,9 +736,13 @@ def build_intent_package(
             "incremental_analysis"
             if incremental_dispatch_followup
             else (
-                "propose_only_dispatch"
-                if platform_improvement_review
-                else ("read_only_dispatch" if team_technical_audit else None)
+                "read_only_continuous"
+                if continuous_audit_request
+                else (
+                    "propose_only_dispatch"
+                    if platform_improvement_review
+                    else ("read_only_dispatch" if team_technical_audit else None)
+                )
             )
         ),
         "followup_mode": "incremental_analysis" if incremental_dispatch_followup else None,
@@ -695,13 +755,14 @@ def build_intent_package(
             else []
         ),
         "expected_specialist_reports": expected_specialist_reports,
-        "force_dispatch": bool(platform_improvement_review or incremental_dispatch_followup),
+        "force_dispatch": bool(continuous_audit_request or platform_improvement_review or incremental_dispatch_followup),
+        "continuous_audit_supported": bool(continuous_audit_request),
     }
 
     payload = {
         "intent": intent,
         "confidence": (
-            0.99 if platform_improvement_review
+            0.99 if (platform_improvement_review or continuous_audit_request)
             else (0.99 if incremental_dispatch_followup else (0.98 if runtime_op.get("kind") else 0.62))
         ),
         "recommended_agents": recommended_agents,
@@ -722,6 +783,7 @@ def build_intent_package(
         "requires_write_approval": requires_write_approval,
         "team_technical_audit": bool(team_technical_audit),
         "platform_improvement_review": bool(platform_improvement_review),
+        "continuous_audit_request": bool(continuous_audit_request),
         "incremental_dispatch_followup": bool(incremental_dispatch_followup),
         "expected_specialist_reports": expected_specialist_reports,
         "has_completed_dispatch_context": bool(has_completed_dispatch_context),
