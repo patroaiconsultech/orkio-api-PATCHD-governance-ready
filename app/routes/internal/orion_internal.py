@@ -338,15 +338,38 @@ def get_continuous_audit_job_snapshot(db: Session, org: str, job_id: str) -> Dic
         ).order_by(ContinuousAuditArtifact.created_at.asc())
     ).scalars().all()
     payload = _serialize_continuous_audit_job(job)
-    payload["receipts"] = [_serialize_continuous_audit_receipt(item) for item in receipts]
-    payload["artifacts"] = [_serialize_continuous_audit_artifact(item) for item in artifacts]
-    payload["dispatch_receipts_count"] = len(payload["receipts"])
-    payload["artifacts_count"] = len(payload["artifacts"])
+    serialized_receipts = [_serialize_continuous_audit_receipt(item) for item in receipts]
+    serialized_artifacts = [_serialize_continuous_audit_artifact(item) for item in artifacts]
+
+    specialist_reports: List[Dict[str, Any]] = []
+    final_consolidation = ""
+    latest_summary_artifact: Dict[str, Any] = {}
+
+    for artifact in serialized_artifacts:
+        artifact_type = str(artifact.get("artifact_type") or "").strip().lower()
+        content = artifact.get("content")
+        if artifact_type == "specialist_report" and isinstance(content, dict):
+            specialist_reports.append(content)
+        elif artifact_type == "final_consolidation":
+            if isinstance(content, dict):
+                latest_summary_artifact = content
+                final_consolidation = str(content.get("final_consolidation") or "").strip()
+            elif content is not None:
+                final_consolidation = str(content).strip()
+
+    payload["receipts"] = serialized_receipts
+    payload["dispatch_receipts"] = serialized_receipts
+    payload["artifacts"] = serialized_artifacts
+    payload["specialist_reports"] = specialist_reports
+    payload["dispatch_receipts_count"] = len(serialized_receipts)
+    payload["artifacts_count"] = len(serialized_artifacts)
     payload["selected_specialists_count"] = len(list(payload.get("selected_specialists") or []))
-    payload["specialist_reports_count"] = sum(
-        1 for artifact in list(payload.get("artifacts") or [])
-        if str(artifact.get("artifact_type") or "").strip().lower() == "specialist_report"
-    )
+    payload["specialist_reports_count"] = len(specialist_reports)
+    if latest_summary_artifact:
+        payload["technical_summary"] = str(latest_summary_artifact.get("technical_summary") or "").strip()
+        payload["executive_diagnostic"] = str(latest_summary_artifact.get("executive_diagnostic") or "").strip()
+    if final_consolidation:
+        payload["final_consolidation"] = final_consolidation
     required_specialists = _dedupe_dispatch_actors(list(payload.get("required_specialists") or []))
     selected_specialists = _dedupe_dispatch_actors(list(payload.get("selected_specialists") or []))
     payload["missing_specialists"] = [item for item in required_specialists if item not in selected_specialists]
@@ -410,12 +433,15 @@ def start_continuous_audit_job(
     now = _now_ts()
     status = "blocked" if violations else "initialized"
     latest_event = "CONTINUOUS_AUDIT_JOB_BLOCKED" if violations else "CONTINUOUS_AUDIT_JOB_CREATED"
-    progress_percentage = 0 if violations else 5
+    progress_percentage = 0 if violations else 25
     requested_signer = str(constraints.get("required_signer") or _resolve_visible_agent(effective_message, default="orion") or "orion").strip().lower() or "orion"
+    generated_dispatch_receipts = _audit_dispatch_receipts(selected_specialists, "continuous_audit") if not violations else []
+    generated_specialist_reports = _audit_specialist_reports(selected_specialists, "continuous_audit") if not violations else []
+    generated_final_consolidation = _audit_final_consolidation(selected_specialists, "continuous_audit") if not violations else ""
     latest_summary = (
         "Hard constraints blocked continuous audit initialization."
         if violations
-        else "Continuous audit job persisted and ready for explicit follow-up execution steps."
+        else "Continuous audit job persisted with initial specialist reports and tracked follow-up state."
     )
     title = _continuous_audit_title(effective_message or "")
     job = ContinuousAuditJob(
@@ -506,6 +532,8 @@ def start_continuous_audit_job(
                 "selected_specialists": selected_specialists,
                 "hard_constraints": constraints,
                 "constraint_violations": violations,
+                "dispatch_receipts_count": len(generated_dispatch_receipts),
+                "specialist_reports_count": len(generated_specialist_reports),
             }),
             content_type="application/json",
             created_at=now,
@@ -522,6 +550,37 @@ def start_continuous_audit_job(
                 content=_json_dumps({"violations": violations}),
                 content_type="application/json",
                 created_at=now,
+            )
+        )
+    else:
+        for idx, report in enumerate(generated_specialist_reports, start=1):
+            report_agent = str(report.get("agent") or f"specialist_{idx}").strip() or f"specialist_{idx}"
+            artifact_rows.append(
+                ContinuousAuditArtifact(
+                    id=_new_id(),
+                    org_slug=org,
+                    job_id=job.id,
+                    artifact_type="specialist_report",
+                    title=f"Continuous audit report • {report_agent}",
+                    content=_json_dumps(report),
+                    content_type="application/json",
+                    created_at=now + idx,
+                )
+            )
+        artifact_rows.append(
+            ContinuousAuditArtifact(
+                id=_new_id(),
+                org_slug=org,
+                job_id=job.id,
+                artifact_type="final_consolidation",
+                title="Continuous audit consolidation",
+                content=_json_dumps({
+                    "technical_summary": "Continuous audit job iniciado com especialistas bloqueados e relatórios materializados para acompanhamento incremental.",
+                    "executive_diagnostic": f"Job persistido com {len(selected_specialists)} especialista(s) selecionado(s), {len(generated_dispatch_receipts)} receipt(s) e {len(generated_specialist_reports)} relatório(s) inicial(is).",
+                    "final_consolidation": generated_final_consolidation,
+                }),
+                content_type="application/json",
+                created_at=now + max(1, len(generated_specialist_reports)) + 1,
             )
         )
     for row in artifact_rows:
@@ -2196,6 +2255,7 @@ def _audit_dispatch_receipts(selected_specialists: List[str], scope: str) -> Lis
         "security": "confiança, transparência, controles e percepção de segurança",
         "memory_ops": "continuidade, memória útil e persistência contextual",
         "stage_manager": "ritmo da experiência, estados de transição e acabamento premium",
+        "ux_frontend": "renderização, sincronização visual e percepção de resposta",
     }
     for agent in selected_specialists:
         receipts.append({
@@ -2258,6 +2318,18 @@ def _audit_specialist_reports(selected_specialists: List[str], scope: str) -> Li
             "next_actions": [
                 "Traduzir dispatch interno em linguagem operacional verificável.",
                 "Evitar duplicidade entre narrativa técnica e narrativa de produto na mesma resposta.",
+            ],
+        },
+        "ux_frontend": {
+            "role": "ux_frontend",
+            "focus": "sincronização do estado visual, render incremental e percepção de completude",
+            "findings": [
+                "Quando a resposta final depende apenas de reload completo da thread, a percepção é de falha ou atraso do sistema.",
+                "A camada visual precisa materializar a resposta final no mesmo turno, mesmo quando o fallback JSON é acionado.",
+            ],
+            "next_actions": [
+                "Aplicar retry curto de leitura após o envio para reduzir corrida entre persistência e renderização.",
+                "Garantir fallback visual da resposta final quando o backend já devolveu o conteúdo mas a lista ainda não refletiu a persistência.",
             ],
         },
     }
