@@ -284,6 +284,91 @@ def _looks_like_team_technical_audit_request(text: str) -> bool:
 
 
 
+def _looks_like_squad_resolution_request(text: str) -> bool:
+    txt = _normalize(text)
+    if not txt:
+        return False
+    markers = [
+        "resolva exatamente este squad",
+        "resolver este squad",
+        "resolver squad",
+        "squad resolvido",
+        "resolve exactly this squad",
+        "resolve this squad",
+    ]
+    if _contains_any(txt, markers):
+        return True
+    if "ux_frontend" in txt or "ux/frontend" in txt:
+        if _contains_any(txt, ["read-only", "read only", "somente leitura", "nao execute dispatch", "não execute dispatch"]):
+            return True
+    return False
+
+
+def _looks_like_squad_resolution_trace_request(text: str) -> bool:
+    txt = _normalize(text)
+    if not txt:
+        return False
+    trace_fields = [
+        "requested_specialists_raw",
+        "requested_specialists_normalized",
+        "selected_specialists_before_policy",
+        "selected_specialists_after_policy",
+        "abort_reason",
+    ]
+    if all(field in txt for field in trace_fields[-3:]):
+        return True
+    return (
+        "retorne apenas" in txt
+        and any(field in txt for field in trace_fields)
+    )
+
+
+def _extract_requested_specialists_from_text(text: str) -> list[str]:
+    hard_constraints = _extract_hard_constraints(text or "")
+    required = _dedupe_preserve(list(hard_constraints.get("specialists_required") or []))
+    if required:
+        return required
+
+    lines = [str(line or "").strip() for line in str(text or "").splitlines()]
+    collected: list[str] = []
+    capture = False
+    for line in lines:
+        lowered = _normalize(line)
+        if not capture and (
+            "resolva exatamente este squad" in lowered
+            or "resolver este squad" in lowered
+            or "resolver squad" in lowered
+            or "resolve exactly this squad" in lowered
+            or lowered.startswith("squad:")
+        ):
+            capture = True
+            if ":" in line:
+                inline = line.split(":", 1)[1].strip()
+                if inline:
+                    parts = [_strip_constraint_token(p) for p in re.split(r"[,;]", inline)]
+                    collected.extend([p for p in parts if p])
+            continue
+        if not capture:
+            continue
+        if not line:
+            if collected:
+                break
+            continue
+        if lowered.startswith(("responda apenas", "retorne apenas", "não execute dispatch", "nao execute dispatch", "modo read-only", "modo read only", "agente visível final", "agente visivel final")):
+            if collected:
+                break
+            continue
+        parts = [_strip_constraint_token(p) for p in re.split(r"[,;]", line)]
+        cleaned_parts = [p for p in parts if p]
+        if cleaned_parts:
+            collected.extend(cleaned_parts)
+            continue
+        if collected:
+            break
+
+    return _dedupe_preserve(collected)
+
+
 def _extract_continuous_audit_job_id(text: str) -> str:
     payload = _extract_embedded_runtime_payload(text or "")
     if isinstance(payload, dict):
@@ -588,6 +673,8 @@ def _looks_like_incremental_dispatch_followup_request(text: str) -> bool:
 
 def _infer_action_scope(text: str) -> str:
     txt = _normalize(text)
+    if _looks_like_squad_resolution_request(text) or _looks_like_squad_resolution_trace_request(text):
+        return "read"
     if _looks_like_continuous_audit_status_request(text):
         return "read"
     if _looks_like_privileged_admin_read(txt):
@@ -626,6 +713,10 @@ def _infer_target_scope(text: str) -> str:
 
 def _infer_capability(action_scope: str, text: str) -> Optional[str]:
     txt = _normalize(text)
+    if _looks_like_squad_resolution_trace_request(text):
+        return "squad_resolution_trace_readonly"
+    if _looks_like_squad_resolution_request(text):
+        return "squad_resolve_readonly"
     if _looks_like_continuous_audit_status_request(text):
         return "continuous_audit_job_status"
     if _looks_like_platform_improvement_review_request(txt):
@@ -690,12 +781,27 @@ def build_intent_package(
         else _looks_like_continuous_audit_request(raw_user_input or effective_user_input or "")
     )
     requested_job_id = _extract_continuous_audit_job_id(raw_user_input or effective_user_input or "") or None
+    squad_resolution_trace_request = _looks_like_squad_resolution_trace_request(effective_user_input or raw_user_input or "")
+    squad_resolution_request = (
+        False if squad_resolution_trace_request else _looks_like_squad_resolution_request(effective_user_input or raw_user_input or "")
+    )
+    requested_squad_specialists = _extract_requested_specialists_from_text(effective_user_input or raw_user_input or "")
 
     action_scope = _infer_action_scope(text)
     target_scope = _infer_target_scope(text)
     capability_name = _infer_capability(action_scope, text)
 
-    if incremental_dispatch_followup:
+    if squad_resolution_trace_request:
+        intent = "squad_resolution_trace_readonly"
+        capability_name = "squad_resolution_trace_readonly"
+        action_scope = "read"
+        target_scope = "platform"
+    elif squad_resolution_request:
+        intent = "squad_resolve_readonly"
+        capability_name = "squad_resolve_readonly"
+        action_scope = "read"
+        target_scope = "platform"
+    elif incremental_dispatch_followup:
         intent = "dispatch_incremental_followup"
         capability_name = "platform_self_audit"
         action_scope = "diagnose"
@@ -735,7 +841,14 @@ def build_intent_package(
     team_technical_audit = _looks_like_team_technical_audit_request(effective_user_input or raw_user_input or "")
     excluded_agents = _dedupe_preserve(_excluded_agents(effective_user_input or raw_user_input or "") + specialists_forbidden)
 
-    if incremental_dispatch_followup:
+    if squad_resolution_trace_request or squad_resolution_request:
+        team_technical_audit = False
+        platform_improvement_review = False
+        continuous_audit_request = False
+        continuous_audit_status_request = False
+        incremental_dispatch_followup = False
+        orion_only = True
+    elif incremental_dispatch_followup:
         team_technical_audit = False
         platform_improvement_review = False
         continuous_audit_request = False
@@ -757,18 +870,26 @@ def build_intent_package(
         platform_improvement_review = False
 
     runtime_kind = (
-        "dispatch_incremental_followup"
-        if incremental_dispatch_followup
+        "squad_resolution_trace_readonly"
+        if squad_resolution_trace_request
         else (
-            "continuous_audit_job_status"
-            if continuous_audit_status_request
+            "squad_resolve_readonly"
+            if squad_resolution_request
             else (
-                "continuous_audit_job"
-                if continuous_audit_request
+                "dispatch_incremental_followup"
+                if incremental_dispatch_followup
                 else (
-                    "controlled_self_evolution_propose_only"
-                    if platform_improvement_review
-                    else (intent if intent != "general_guidance" else "")
+                    "continuous_audit_job_status"
+                    if continuous_audit_status_request
+                    else (
+                        "continuous_audit_job"
+                        if continuous_audit_request
+                        else (
+                            "controlled_self_evolution_propose_only"
+                            if platform_improvement_review
+                            else (intent if intent != "general_guidance" else "")
+                        )
+                    )
                 )
             )
         )
@@ -782,7 +903,23 @@ def build_intent_package(
         safe_mode=bool(context.get("safe_mode", False)),
     )
 
-    if incremental_dispatch_followup:
+    if squad_resolution_trace_request:
+        recommended_agents = _dedupe_preserve([required_signer or "orion"])
+        advisor_agents = _dedupe_preserve(recommended_agents + ["metatron"])
+        target_agent = required_signer or "orion"
+        delivery_contract = "squad_resolution_trace_readonly_v1"
+        structured_output = True
+        expected_specialist_reports = list(requested_squad_specialists or specialists_required or [])
+        visible_signer_expected = required_signer or "orion"
+    elif squad_resolution_request:
+        recommended_agents = _dedupe_preserve([required_signer or "orion"])
+        advisor_agents = _dedupe_preserve(recommended_agents + ["metatron"])
+        target_agent = required_signer or "orion"
+        delivery_contract = "squad_resolve_readonly_v1"
+        structured_output = True
+        expected_specialist_reports = list(requested_squad_specialists or specialists_required or [])
+        visible_signer_expected = required_signer or "orion"
+    elif incremental_dispatch_followup:
         recommended_agents = _apply_dispatch_constraints(
             ["orion", "auditor", "cto"],
             required=specialists_required,
@@ -881,7 +1018,7 @@ def build_intent_package(
         "specialists_required": specialists_required,
         "specialists_forbidden": specialists_forbidden,
         "selected_specialists_count_must_be": selected_specialists_count_must_be,
-        "requested_specialists": list(specialists_required or recommended_agents),
+        "requested_specialists": list(requested_squad_specialists or specialists_required or recommended_agents),
         "execution_mode": (
             "incremental_analysis"
             if incremental_dispatch_followup
@@ -892,9 +1029,17 @@ def build_intent_package(
                     "read_only_continuous"
                     if continuous_audit_request
                     else (
-                        "propose_only_dispatch"
-                        if platform_improvement_review
-                        else ("read_only_dispatch" if team_technical_audit else None)
+                        "read_only_squad_trace"
+                        if squad_resolution_trace_request
+                        else (
+                            "read_only_squad_resolution"
+                            if squad_resolution_request
+                            else (
+                                "propose_only_dispatch"
+                                if platform_improvement_review
+                                else ("read_only_dispatch" if team_technical_audit else None)
+                            )
+                        )
                     )
                 )
             )
@@ -910,6 +1055,8 @@ def build_intent_package(
         ),
         "expected_specialist_reports": expected_specialist_reports,
         "force_dispatch": bool(continuous_audit_request or platform_improvement_review or incremental_dispatch_followup),
+        "squad_resolution_request": bool(squad_resolution_request),
+        "squad_resolution_trace_request": bool(squad_resolution_trace_request),
         "continuous_audit_supported": bool(continuous_audit_request or continuous_audit_status_request),
         "requested_job_id": requested_job_id,
         "use_latest_continuous_audit_job": bool(continuous_audit_status_request and not requested_job_id),
