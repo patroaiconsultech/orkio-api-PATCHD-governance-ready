@@ -72,10 +72,69 @@ def _json_loads(value: Any, default: Any) -> Any:
         return default
 
 
-def _looks_like_continuous_audit_request(message: str) -> bool:
+def _extract_continuous_audit_job_id(message: str) -> str:
+    effective = _continuous_audit_effective_input(message or "")
+    payload = dict(effective.get("payload") or {})
+    for key in ("job_id", "audit_job_id", "continuous_audit_job_id"):
+        value = payload.get(key)
+        if value not in (None, "", "null"):
+            return str(value).strip().lower()
+    raw = str(effective.get("message") or message or "").strip()
+    if not raw:
+        return ""
+    patterns = [
+        r"(?im)^\s*job_id\s*[:=]\s*([a-f0-9-]{8,})\s*$",
+        r"\bjob[_ -]?id\s*[:=]?\s*([a-f0-9-]{8,})\b",
+        r"/api/admin/audit-jobs/([a-f0-9-]{8,})\b",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, raw, flags=re.IGNORECASE)
+        if match:
+            return str(match.group(1) or "").strip().lower()
+    return ""
+
+
+def _looks_like_continuous_audit_status_request(message: str) -> bool:
     effective = _continuous_audit_effective_input(message or "")
     raw = str(effective.get("message") or message or "").strip().lower()
     if not raw:
+        return False
+    explicit_job_id = _extract_continuous_audit_job_id(message)
+    status_markers = [
+        "consultar status",
+        "forneça o status",
+        "forneca o status",
+        "status do continuous audit",
+        "status do continuous audit job",
+        "status do job",
+        "status da auditoria contínua",
+        "status da auditoria continua",
+        "job existente",
+        "job persistido mais recente",
+        "usar somente o job_id",
+        "não criar novo job",
+        "nao criar novo job",
+        "proibido criar novo job",
+        "mais recente",
+    ]
+    create_markers = [
+        "iniciar auditoria contínua",
+        "iniciar auditoria continua",
+        "iniciar continuous audit",
+        "criar novo job",
+        "iniciar job",
+        "start continuous audit",
+        "execute continuous audit",
+    ]
+    asks_status = bool(explicit_job_id) or any(marker in raw for marker in status_markers)
+    asks_create = any(marker in raw for marker in create_markers)
+    return bool(asks_status and not asks_create)
+
+
+def _looks_like_continuous_audit_request(message: str) -> bool:
+    effective = _continuous_audit_effective_input(message or "")
+    raw = str(effective.get("message") or message or "").strip().lower()
+    if not raw or _looks_like_continuous_audit_status_request(message):
         return False
     markers = [
         "auditoria contínua",
@@ -260,6 +319,43 @@ def get_continuous_audit_job_snapshot(db: Session, org: str, job_id: str) -> Dic
     payload["artifacts"] = [_serialize_continuous_audit_artifact(item) for item in artifacts]
     payload["dispatch_receipts_count"] = len(payload["receipts"])
     payload["artifacts_count"] = len(payload["artifacts"])
+    payload["selected_specialists_count"] = len(list(payload.get("selected_specialists") or []))
+    payload["specialist_reports_count"] = sum(
+        1 for artifact in list(payload.get("artifacts") or [])
+        if str(artifact.get("artifact_type") or "").strip().lower() == "specialist_report"
+    )
+    required_specialists = _dedupe_dispatch_actors(list(payload.get("required_specialists") or []))
+    selected_specialists = _dedupe_dispatch_actors(list(payload.get("selected_specialists") or []))
+    payload["missing_specialists"] = [item for item in required_specialists if item not in selected_specialists]
+    payload["compliance_status"] = "passed" if not payload["missing_specialists"] else "failed"
+    return payload
+
+
+def get_latest_continuous_audit_job_snapshot(db: Session, org: str) -> Dict[str, Any]:
+    job = db.execute(
+        select(ContinuousAuditJob).where(
+            ContinuousAuditJob.org_slug == org,
+        ).order_by(ContinuousAuditJob.created_at.desc()).limit(1)
+    ).scalars().first()
+    if not job:
+        raise HTTPException(status_code=404, detail="No continuous audit job found")
+    return get_continuous_audit_job_snapshot(db, org, job.id)
+
+
+def get_continuous_audit_status_from_message(db: Session, org: str, message: str) -> Dict[str, Any]:
+    job_id = _extract_continuous_audit_job_id(message or "")
+    if job_id:
+        payload = get_continuous_audit_job_snapshot(db, org, job_id)
+    else:
+        payload = get_latest_continuous_audit_job_snapshot(db, org)
+    payload.update({
+        "ok": True,
+        "service": "orion_internal",
+        "provider": "platform",
+        "mode": "continuous_audit_job_status",
+        "event": "CONTINUOUS_AUDIT_JOB_STATUS",
+        "execution_depth": "persisted_job",
+    })
     return payload
 
 
@@ -440,6 +536,19 @@ def _start_continuous_audit_job_detached(inp: "OrionRuntimeIn", *, org: str = "p
             include_frontend=bool(effective.get("include_frontend")),
             requested_by_user_name="orion_runtime",
         )
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
+def _get_continuous_audit_status_detached(inp: "OrionRuntimeIn", *, org: str = "public") -> Dict[str, Any]:
+    db: Optional[Session] = None
+    try:
+        db = SessionLocal()
+        return get_continuous_audit_status_from_message(db, org, inp.message or "")
     finally:
         if db is not None:
             try:
@@ -2858,6 +2967,8 @@ def orion_runtime_execute(inp: "OrionRuntimeIn") -> Dict[str, Any]:
     message = inp.message or ""
     lowered = message.lower()
     visible_agent = _resolve_visible_agent(message, default="orion")
+    if _looks_like_continuous_audit_status_request(message):
+        return _get_continuous_audit_status_detached(inp)
     if _looks_like_continuous_audit_request(message):
         return _start_continuous_audit_job_detached(inp)
     if _is_platform_improvement_review_request(message):
@@ -3276,6 +3387,17 @@ def platform_self_audit(
                 org = "public"
             requested_by_user_id = str(request.headers.get("x-user-id") or "").strip() or None
             requested_by_user_name = str(request.headers.get("x-user-name") or request.headers.get("x-user") or "http_request").strip() or "http_request"
+        if _looks_like_continuous_audit_status_request(inp.message or ""):
+            payload = get_continuous_audit_status_from_message(db, org, inp.message or "")
+            payload["governance_decision"] = evaluate_governance_action(
+                action_scope="read",
+                capability_name="continuous_audit_job_status",
+                target_scope="platform",
+                context=_governance_context_from_message(inp.message),
+                safe_mode=False,
+            )
+            payload["danielic_integrity_passed"] = bool(payload["governance_decision"].get("danielic_integrity_passed"))
+            return payload
         if _looks_like_continuous_audit_request(inp.message or ""):
             payload = start_continuous_audit_job(
                 db,
