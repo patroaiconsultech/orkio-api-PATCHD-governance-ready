@@ -7785,7 +7785,35 @@ def _default_forced_orion_specialists(
     if _looks_like_pwa_console_execution_request(user_text):
         return ["orion", "cto", "ux_frontend"]
 
-    return ["architect", "auditor", "devops", "security"]
+    return ["orion", "auditor", "cto"]
+
+
+def _looks_like_final_readonly_analysis_request_message(user_text: str) -> bool:
+    txt = (user_text or "").strip().lower()
+    if not txt:
+        return False
+
+    has_analysis = bool(re.search(
+        r"an[áa]lise detalhada|an[áa]lise arquitetural|auditoria t[ée]cnica|diagn[óo]stico t[ée]cnico|melhorias priorizadas|recomendac[aã]o consolidada|an[áa]lise final",
+        txt,
+        flags=re.IGNORECASE,
+    ))
+    has_scope = bool(re.search(
+        r"code|codebase|c[óo]digo|codigo|runtime|backend|frontend|console|chat stream|sse|intent|governan[çc]a|github bridge|ux",
+        txt,
+        flags=re.IGNORECASE,
+    ))
+    read_only = bool(re.search(
+        r"read[- ]only|somente leitura|n[ãa]o executar|nao executar|n[ãa]o abrir pr|nao abrir pr|n[ãa]o escrever|nao escrever",
+        txt,
+        flags=re.IGNORECASE,
+    ))
+    wants_final_output = bool(re.search(
+        r"entregue apenas a an[áa]lise final|entregar apenas a an[áa]lise final|n[ãa]o resolva squad|nao resolva squad|n[ãa]o retorne trace|nao retorne trace",
+        txt,
+        flags=re.IGNORECASE,
+    ))
+    return bool(has_analysis and has_scope and read_only and wants_final_output)
 
 
 def _runtime_orion_dispatch_request_flags(user_text: str) -> Dict[str, Any]:
@@ -7793,6 +7821,8 @@ def _runtime_orion_dispatch_request_flags(user_text: str) -> Dict[str, Any]:
     normalized = txt.lower()
     if not normalized:
         return {"requested": False, "requested_specialists": [], "reason": ""}
+    if _looks_like_final_readonly_analysis_request_message(txt):
+        return {"requested": False, "requested_specialists": [], "reason": "final_readonly_analysis"}
 
     specialist_aliases = [
         (r"\borion\b", "orion"),
@@ -7999,6 +8029,8 @@ def _apply_forced_orion_runtime_dispatch_enrichment(
         user_text,
         list(flags.get("requested_specialists") or []),
     )
+    if _looks_like_final_readonly_analysis_request_message(user_text):
+        return normalized
     pwa_console_repair = bool(flags.get("pwa_console_repair"))
 
     intent_package = normalized.get("intent_package") if isinstance(normalized.get("intent_package"), dict) else {}
@@ -12047,13 +12079,17 @@ def _execute_capability_if_authorized(
     if not txt:
         return None
 
-    runtime_kind = (
-        ((runtime_enrichment or {}).get("intent_package") or {})
-        .get("runtime_operation", {})
-        .get("kind", "")
-    )
+    intent_package = ((runtime_enrichment or {}).get("intent_package") or {})
+    runtime_operation = intent_package.get("runtime_operation") if isinstance(intent_package.get("runtime_operation"), dict) else {}
+    runtime_kind = str(runtime_operation.get("kind") or "").strip().lower()
     planner_snapshot = (runtime_enrichment or {}).get("planner_snapshot") or {}
-    required_capability = str(planner_snapshot.get("requires_capability") or "").strip()
+    required_capability = str(planner_snapshot.get("requires_capability") or "").strip().lower()
+    capability_name = str(
+        runtime_operation.get("capability_name")
+        or intent_package.get("capability_name")
+        or required_capability
+        or ""
+    ).strip().lower()
 
     def _runtime_error_payload(
         message: str,
@@ -12098,9 +12134,15 @@ def _execute_capability_if_authorized(
             "required_capability": required_capability,
         }
 
+    readonly_runtime_capabilities = {
+        "squad_resolve_readonly",
+        "squad_resolution_trace_readonly",
+    }
+
     allow_runtime_execution = (
         runtime_kind.startswith("github_runtime_")
         or required_capability.startswith("github_")
+        or capability_name.startswith("github_")
         or runtime_kind in {
             "platform_audit",
             "premium_platform_audit",
@@ -12122,12 +12164,11 @@ def _execute_capability_if_authorized(
             "squad_resolve_readonly",
             "squad_resolution_trace_readonly",
         }
+        or capability_name in readonly_runtime_capabilities
     )
     if not allow_runtime_execution:
         return None
 
-    intent_package = ((runtime_enrichment or {}).get("intent_package") or {})
-    runtime_operation = intent_package.get("runtime_operation") if isinstance(intent_package.get("runtime_operation"), dict) else {}
     requested_specialists = runtime_operation.get("requested_specialists") if isinstance(runtime_operation.get("requested_specialists"), list) else None
     if runtime_kind == "platform_audit" and bool(runtime_operation.get("sticky_dispatch_followup")):
         txt = _canonicalize_platform_audit_followup_message(
@@ -13400,6 +13441,26 @@ def chat(
 
     # PATCH27_12AJ — execution-first collapse for sync chat
     should_execute_runtime = _should_execute_runtime_from_enrichment(runtime_enrichment)
+    if not should_execute_runtime and isinstance(runtime_enrichment, dict):
+        try:
+            intent_package_live = runtime_enrichment.get("intent_package") if isinstance(runtime_enrichment.get("intent_package"), dict) else {}
+            runtime_operation_live = intent_package_live.get("runtime_operation") if isinstance(intent_package_live.get("runtime_operation"), dict) else {}
+            capability_name_live = str(
+                runtime_operation_live.get("capability_name")
+                or intent_package_live.get("capability_name")
+                or ""
+            ).strip().lower()
+            if capability_name_live in {
+                "squad_resolve_readonly",
+                "squad_resolution_trace_readonly",
+                "platform_self_audit",
+                "runtime_scan",
+                "github_repo_read",
+                "github_repo_write",
+            }:
+                should_execute_runtime = True
+        except Exception:
+            pass
     runtime_primary_agent = None
     if should_execute_runtime:
         try:
@@ -20241,15 +20302,25 @@ def _run_realtime_multi_agent_turn(
                 alias_to_agent.setdefault(extra, ag)
 
     mention_tokens: List[str] = [f"@{name}" for name in requested_names]
-    _realtime_constraint_guard = _apply_realtime_hard_constraints_to_targets(
-        target_agents=target_agents,
-        alias_to_agent=alias_to_agent,
-        requested_names=requested_names,
-        mention_tokens=mention_tokens,
-        message_text=text_in,
-        db=db,
-        org=org,
-    )
+    if _looks_like_final_readonly_analysis_request_message(text_in):
+        _realtime_constraint_guard = {
+            "target_agents": list(target_agents or []),
+            "requested_names": list(requested_names or []),
+            "mention_tokens": list(mention_tokens or []),
+            "violations": [],
+            "constraints": {},
+            "hard_multi": False,
+        }
+    else:
+        _realtime_constraint_guard = _apply_realtime_hard_constraints_to_targets(
+            target_agents=target_agents,
+            alias_to_agent=alias_to_agent,
+            requested_names=requested_names,
+            mention_tokens=mention_tokens,
+            message_text=text_in,
+            db=db,
+            org=org,
+        )
     target_agents = list(_realtime_constraint_guard.get("target_agents") or target_agents)
     requested_names = list(_realtime_constraint_guard.get("requested_names") or requested_names)
     mention_tokens = list(_realtime_constraint_guard.get("mention_tokens") or mention_tokens)
