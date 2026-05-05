@@ -723,6 +723,29 @@ def _strip_constraint_token(value: Any) -> str:
     return raw
 
 
+def _cut_specialist_inline_tail(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    stop_markers = [
+        r"\bnão execute dispatch\b",
+        r"\bnao execute dispatch\b",
+        r"\bresponda apenas\b",
+        r"\bretorne apenas\b",
+        r"\bmodo read-only\b",
+        r"\bmodo read only\b",
+        r"\bagente visível final\b",
+        r"\bagente visivel final\b",
+    ]
+    for marker in stop_markers:
+        match = re.search(marker, raw, flags=re.IGNORECASE)
+        if match:
+            raw = raw[:match.start()].strip()
+            break
+    raw = re.split(r"[.\n\r]", raw, maxsplit=1)[0].strip()
+    return raw
+
+
 def _canonical_dispatch_actor(value: Any) -> str:
     cleaned = _strip_constraint_token(value)
     raw = str(cleaned or "").strip().lower().replace("@", "")
@@ -730,6 +753,20 @@ def _canonical_dispatch_actor(value: Any) -> str:
     raw = re.sub(r"_+", "_", raw).strip("_")
     if not raw:
         return ""
+
+    reserved_tokens = {
+        "squad",
+        "team",
+        "equipe",
+        "especialistas",
+        "specialists",
+        "specialist",
+        "agents",
+        "agentes",
+    }
+    if raw in reserved_tokens:
+        return ""
+
     aliases = {
         "ux_frontend": "ux_frontend",
         "ux_front": "ux_frontend",
@@ -778,7 +815,7 @@ def _extract_constraint_list(message: str, keys: List[str]) -> List[str]:
                 break
         if matched is not None:
             active = True
-            inline = _strip_constraint_token(stripped.split(":", 1)[1].strip())
+            inline = _cut_specialist_inline_tail(_strip_constraint_token(stripped.split(":", 1)[1].strip()))
             if inline:
                 parts = [_strip_constraint_token(p) for p in re.split(r"[,;]", inline)]
                 out.extend([p for p in parts if p])
@@ -3586,7 +3623,7 @@ def _extract_requested_specialists_from_message(message: str) -> List[str]:
         ):
             capture = True
             if ":" in line:
-                inline = line.split(":", 1)[1].strip()
+                inline = _cut_specialist_inline_tail(line.split(":", 1)[1].strip())
                 if inline:
                     parts = [_strip_constraint_token(p) for p in re.split(r"[,;]", inline)]
                     collected.extend([p for p in parts if p])
