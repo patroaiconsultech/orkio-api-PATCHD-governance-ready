@@ -11306,6 +11306,11 @@ def _normalize_orion_runtime_execution_result(raw: Dict[str, Any]) -> Dict[str, 
         "mode",
         "event",
         "visible_agent",
+        "error",
+        "error_type",
+        "trace_id",
+        "runtime_kind",
+        "required_capability",
         "technical_summary",
         "final_consolidation",
         "execution_depth",
@@ -11408,6 +11413,8 @@ def _normalize_orion_runtime_execution_result(raw: Dict[str, Any]) -> Dict[str, 
     dict_fields = [
         "findings_by_specialty",
         "transaction_receipts",
+        "detail",
+        "governance_decision",
     ]
 
     for field in scalar_text_fields:
@@ -11461,9 +11468,16 @@ def _normalize_orion_runtime_execution_result(raw: Dict[str, Any]) -> Dict[str, 
     else:
         detail = data.get("detail")
         if isinstance(detail, dict):
-            detail_msg = str(detail.get("message") or detail.get("detail") or detail.get("github_error") or "").strip()
+            detail_msg = str(
+                detail.get("message")
+                or detail.get("detail")
+                or detail.get("github_error")
+                or detail.get("error")
+                or data.get("error")
+                or ""
+            ).strip()
         else:
-            detail_msg = str(detail or data.get("message") or "").strip()
+            detail_msg = str(detail or data.get("error") or data.get("message") or "").strip()
         normalized["message"] = detail_msg or "Não foi possível concluir a ação GitHub solicitada."
 
     return normalized
@@ -12028,24 +12042,41 @@ def _execute_capability_if_authorized(
                 detail.get("message")
                 or detail.get("detail")
                 or detail.get("github_error")
+                or detail.get("error")
                 or ""
             ).strip()
         else:
             message = str(detail or "").strip()
-        logging.exception("RUNTIME_EXECUTION_HTTP_EXCEPTION trace_id=%s", trace_id)
+        logging.exception("RUNTIME_EXECUTION_HTTP_EXCEPTION trace_id=%s runtime_kind=%s required_capability=%s", trace_id, runtime_kind, required_capability)
         return {
             "handled": True,
             "success": False,
             "provider": "runtime",
             "message": message or "Falha ao avaliar capability operacional solicitada.",
+            "detail": detail if isinstance(detail, dict) else {"detail": message or str(detail or "").strip()},
+            "error": message or "runtime_http_exception",
+            "error_type": e.__class__.__name__,
+            "trace_id": trace_id,
+            "runtime_kind": runtime_kind,
+            "required_capability": required_capability,
         }
-    except Exception:
-        logging.exception("RUNTIME_EXECUTION_UNEXPECTED_EXCEPTION trace_id=%s", trace_id)
+    except Exception as e:
+        err_message = str(e or "").strip()
+        logging.exception("RUNTIME_EXECUTION_UNEXPECTED_EXCEPTION trace_id=%s runtime_kind=%s required_capability=%s", trace_id, runtime_kind, required_capability)
         return {
             "handled": True,
             "success": False,
-            "provider": "github",
-            "message": "Falha ao avaliar capability operacional solicitada.",
+            "provider": "runtime",
+            "message": err_message or "Falha ao avaliar capability operacional solicitada.",
+            "detail": {
+                "detail": err_message or "unexpected_runtime_exception",
+                "exception_type": e.__class__.__name__,
+            },
+            "error": err_message or "unexpected_runtime_exception",
+            "error_type": e.__class__.__name__,
+            "trace_id": trace_id,
+            "runtime_kind": runtime_kind,
+            "required_capability": required_capability,
         }
 
     req_read = _github_extract_read_file_request(txt)
