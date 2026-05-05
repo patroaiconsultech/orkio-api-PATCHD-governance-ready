@@ -3317,9 +3317,40 @@ def _attachment_analysis_read_payload(inp: "OrionRuntimeIn", *, request: Optiona
         "generated_at": _now_ts(),
     }
 
+
+
+def _extract_governance_bridge_payload(message: str) -> Dict[str, Any]:
+    payload = _extract_embedded_runtime_payload(message or "")
+    bridge = payload.get("governance_bridge") if isinstance(payload, dict) else None
+    return dict(bridge) if isinstance(bridge, dict) else {}
+
+
+def _extract_embedded_github_write_approval(message: str) -> Dict[str, Any]:
+    bridge = _extract_governance_bridge_payload(message or "")
+    approval = bridge.get("github_write_approval") if isinstance(bridge, dict) else None
+    return dict(approval) if isinstance(approval, dict) else {}
+
+
+def _approval_allows_actions(approval: Optional[Dict[str, Any]], required_actions: Optional[List[str]] = None) -> bool:
+    if not isinstance(approval, dict):
+        return False
+    allowed = {str(item or "").strip().lower() for item in list(approval.get("actions_allowed") or []) if str(item or "").strip()}
+    required = [str(item or "").strip().lower() for item in (required_actions or []) if str(item or "").strip()]
+    if not allowed or not required:
+        return False
+    return all(item in allowed for item in required)
+
 def _governance_context_from_message(message: str, *, request: Optional[Request] = None) -> Dict[str, Any]:
-    txt = (message or "").strip().lower()
+    effective = _continuous_audit_effective_input(message or "")
+    effective_message = str(effective.get("message") or message or "")
+    txt = effective_message.strip().lower()
     safe_health = _request_governance_health(request)
+    embedded_approval = _extract_embedded_github_write_approval(message or "")
+    bridge_payload = _extract_governance_bridge_payload(message or "")
+    approval_actions_ok = _approval_allows_actions(
+        embedded_approval,
+        required_actions=["create_branch", "apply_patch", "prepare_commit", "open_pr"],
+    )
     raw_authorization_present = any(term in txt for term in [
         "autorizo",
         "autorização explícita",
@@ -3327,9 +3358,9 @@ def _governance_context_from_message(message: str, *, request: Optional[Request]
         "authorized",
         "approval granted",
         "approved by founder",
-    ])
-    explicit_write_requested = _message_requests_explicit_write(message)
-    read_privileged_requested = _message_requests_privileged_read(message)
+    ]) or bool(embedded_approval)
+    explicit_write_requested = _message_requests_explicit_write(effective_message) or approval_actions_ok
+    read_privileged_requested = _message_requests_privileged_read(effective_message)
     runtime_audit_requested = any(term in txt for term in [
         "auditoria",
         "audit",
@@ -3338,12 +3369,12 @@ def _governance_context_from_message(message: str, *, request: Optional[Request]
         "read only",
         "somente leitura",
     ])
-    authorization_present = bool(raw_authorization_present and explicit_write_requested)
+    authorization_present = bool((raw_authorization_present and explicit_write_requested) or approval_actions_ok)
     admin_access_mode = "read_privileged" if read_privileged_requested and not explicit_write_requested else (
         "write_governed" if authorization_present else "standard"
     )
     return {
-        "message": message or "",
+        "message": effective_message or "",
         "authorization_present": authorization_present,
         "raw_authorization_present": raw_authorization_present,
         "explicit_write_requested": explicit_write_requested,
@@ -3351,6 +3382,11 @@ def _governance_context_from_message(message: str, *, request: Optional[Request]
         "runtime_audit_requested": runtime_audit_requested,
         "admin_access_mode": admin_access_mode,
         "safe_mode": bool(safe_health.get("safe_mode", False)),
+        "approval_bridge_present": bool(embedded_approval),
+        "approval_bridge_actions_ok": approval_actions_ok,
+        "approval_bridge_id": str(embedded_approval.get("approval_id") or "").strip() or None,
+        "approval_bridge_scope": str(embedded_approval.get("scope") or "").strip() or None,
+        "approval_bridge_source": str(bridge_payload.get("source") or "").strip() or None,
     }
 
 
@@ -3832,7 +3868,13 @@ def _looks_like_pwa_console_repair_request(message: str) -> bool:
 
 
 def pwa_console_repair(inp: OrionRuntimeIn) -> Dict[str, Any]:
-    message = inp.message or ""
+    raw_message = inp.message or ""
+    effective = _continuous_audit_effective_input(
+        raw_message,
+        include_frontend=bool(getattr(inp, "include_frontend", False)),
+        thread_id=getattr(inp, "thread_id", None),
+    )
+    message = str(effective.get("message") or raw_message or "")
     visible_agent = _resolve_visible_agent(message, default="orion")
     constraints = _extract_hard_constraints(message)
     selected_specialists = _apply_specialist_constraints(
@@ -3846,22 +3888,41 @@ def pwa_console_repair(inp: OrionRuntimeIn) -> Dict[str, Any]:
         constraints=constraints,
     )
 
+    governance_context = _governance_context_from_message(raw_message)
+    embedded_approval = _extract_embedded_github_write_approval(raw_message)
+    approval_actions_ok = _approval_allows_actions(
+        embedded_approval,
+        required_actions=["create_branch", "apply_patch", "prepare_commit", "open_pr"],
+    )
     governance_decision = evaluate_governance_action(
         action_scope="write_branch",
         capability_name="github_repo_write",
         target_scope="frontend",
-        context=_governance_context_from_message(message),
+        context=governance_context,
         safe_mode=False,
     )
     if not governance_decision.get("allowed"):
-        return _blocked_governance_payload(
-            message=message,
-            mode="pwa_console_repair",
-            action_scope="write_branch",
-            capability_name="github_repo_write",
-            target_scope="frontend",
-            decision=governance_decision,
-        )
+        blocked_by = [str(item or "").strip().lower() for item in list(governance_decision.get("blocked_by") or []) if str(item or "").strip()]
+        authorization_block = (not blocked_by) or any(term in item for item in blocked_by for term in ("authorization", "approval", "human", "consent"))
+        if approval_actions_ok and authorization_block and not bool(governance_context.get("safe_mode", False)):
+            governance_decision = dict(governance_decision or {})
+            governance_decision.update({
+                "allowed": True,
+                "approval_bridge": True,
+                "approval_id": str(embedded_approval.get("approval_id") or "").strip() or None,
+                "approval_scope": str(embedded_approval.get("scope") or "").strip() or None,
+                "actions_allowed": list(embedded_approval.get("actions_allowed") or []),
+                "reason": "github_write_approval_bridge",
+            })
+        else:
+            return _blocked_governance_payload(
+                message=message,
+                mode="pwa_console_repair",
+                action_scope="write_branch",
+                capability_name="github_repo_write",
+                target_scope="frontend",
+                decision=governance_decision,
+            )
 
     payload: Dict[str, Any] = {
         "ok": True,
