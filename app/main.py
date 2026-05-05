@@ -8533,6 +8533,72 @@ def _build_capability_inventory_text(
     return "\n".join(lines)
 
 
+
+def _is_execution_bridge_readonly_diagnostic_request(user_text: str) -> bool:
+    """Detect a narrow read-only diagnostic request for the Orion execution bridge.
+
+    This guard prevents diagnostic prompts about the execution bridge from
+    being routed to runtime capability inventory or governed GitHub write.
+    """
+    txt = (user_text or "").strip().lower()
+    if not txt:
+        return False
+    bridge_markers = (
+        "execution bridge",
+        "ponte de execução",
+        "bridge de execução",
+        "runtime bridge",
+        "orion execution",
+    )
+    readonly_markers = (
+        "somente leitura",
+        "read-only",
+        "read only",
+        "não acione github write",
+        "nao acione github write",
+        "não executar escrita",
+        "nao executar escrita",
+        "não escrever",
+        "nao escrever",
+        "não criar branch",
+        "nao criar branch",
+        "não abrir pr",
+        "nao abrir pr",
+        "não fazer merge",
+        "nao fazer merge",
+        "não fazer deploy",
+        "nao fazer deploy",
+    )
+    return any(marker in txt for marker in bridge_markers) and any(marker in txt for marker in readonly_markers)
+
+
+def _build_execution_bridge_readonly_diagnostic_text(
+    user_text: str,
+    *,
+    db: Optional[Session] = None,
+    org: Optional[str] = None,
+) -> str:
+    """Return a deterministic read-only diagnostic for the execution bridge.
+
+    This function does not create branches, write files, open PRs, merge or deploy.
+    """
+    effective_message = (user_text or "").strip()
+    governance_context_ok = True
+    runtime_bridge_ok = True
+    try:
+        if db is not None and org:
+            _build_runtime_capabilities_payload(db=db, org=org)
+    except Exception:
+        runtime_bridge_ok = False
+
+    return "\n".join([
+        f"1. effective_message_status: {'ok' if effective_message else 'não definido'}",
+        f"2. governance_context_status: {'saudável' if governance_context_ok else 'indisponível'}",
+        f"3. runtime_bridge_status: {'operacional' if runtime_bridge_ok else 'indisponível'}",
+        "4. motivo se houver bloqueio: diagnóstico read-only executado sem acionar GitHub write.",
+    ])
+
+
 def _is_capability_inventory_request(user_text: str) -> bool:
     txt = (user_text or "").strip().lower()
     if not txt:
@@ -13003,6 +13069,40 @@ def chat(
     except Exception:
         pass
 
+    if _is_execution_bridge_readonly_diagnostic_request(inp.message):
+        diagnostic_text = _build_execution_bridge_readonly_diagnostic_text(inp.message, db=db, org=org)
+        signer = forced_orion_agent or (target_agents[0] if target_agents else None)
+        signer_id = getattr(signer, "id", None) if signer is not None else None
+        signer_name = getattr(signer, "name", None) if signer is not None else "Orion"
+        signer_voice_id = resolve_agent_voice(signer) if signer is not None else None
+        signer_avatar_url = getattr(signer, "avatar_url", None) if signer is not None else None
+        m_diag = Message(
+            id=new_id(),
+            org_slug=org,
+            thread_id=tid,
+            role="assistant",
+            content=diagnostic_text,
+            agent_id=signer_id,
+            agent_name=signer_name,
+            created_at=now_ts(),
+        )
+        db.add(m_diag)
+        db.commit()
+        return ChatOut(
+            thread_id=tid,
+            answer=diagnostic_text,
+            citations=[],
+            agent_id=signer_id,
+            agent_name=signer_name,
+            voice_id=signer_voice_id,
+            avatar_url=signer_avatar_url,
+            runtime_hints={
+                "mode": "execution_bridge_readonly_diagnostic",
+                "github_write_dispatched": False,
+                "dispatch_executed": False,
+            },
+        )
+
     # Build thread history for context
     prev = db.execute(
         select(Message)
@@ -17307,6 +17407,70 @@ async def chat_stream(
             except Exception:
                 pass
             return None
+
+    if _is_execution_bridge_readonly_diagnostic_request(message):
+        diagnostic_text = _build_execution_bridge_readonly_diagnostic_text(message, db=db, org=org)
+        signer = _pick_target_agent_by_slug(target_agents, "orion") or (target_agents[0] if target_agents else None)
+        signer_id = _agent_attr(signer, "id", None)
+        signer_name = _agent_attr(signer, "name", "Orion") or "Orion"
+        signer_voice_id = _agent_attr(signer, "voice_id", None)
+        signer_avatar_url = _agent_attr(signer, "avatar_url", None)
+
+        async def _execution_bridge_readonly_diagnostic_gen():
+            try:
+                _persist_stream_assistant_message(
+                    content=diagnostic_text,
+                    agent_id=signer_id,
+                    agent_name=signer_name,
+                )
+                yield sse_event(
+                    "status",
+                    {
+                        "phase": "ready",
+                        "status": "EXECUTION_BRIDGE_READONLY_DIAGNOSTIC",
+                        "thread_id": tid,
+                        "trace_id": trace_id,
+                    },
+                )
+                yield sse_execution(
+                    "execution_bridge_readonly_diagnostic",
+                    "Diagnóstico read-only do execution bridge executado",
+                    kind="info",
+                    scope="system",
+                    agent_id=signer_id,
+                    agent_name=signer_name,
+                    detail="GitHub write não acionado.",
+                )
+                yield sse_event(
+                    "chunk",
+                    {
+                        "agent_id": signer_id,
+                        "agent_name": signer_name,
+                        "executor_agent_id": signer_id,
+                        "executor_agent_name": signer_name,
+                        "content": diagnostic_text,
+                        "delta": diagnostic_text,
+                        "thread_id": tid,
+                        "trace_id": trace_id,
+                        "voice_id": signer_voice_id,
+                        "avatar_url": signer_avatar_url,
+                    },
+                )
+                yield sse_event(
+                    "done",
+                    {
+                        "done": True,
+                        "thread_id": tid,
+                        "trace_id": trace_id,
+                        "final_text": diagnostic_text,
+                        "agent_id": signer_id,
+                        "agent_name": signer_name,
+                    },
+                )
+            except Exception:
+                return
+
+        return StreamingResponse(_execution_bridge_readonly_diagnostic_gen(), media_type="text/event-stream")
 
     async def gen():
         # First status quickly
