@@ -79,29 +79,6 @@ def _strip_constraint_token(value: Any) -> str:
     return raw
 
 
-def _cut_specialist_inline_tail(value: Any) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    stop_markers = [
-        r"\bnão execute dispatch\b",
-        r"\bnao execute dispatch\b",
-        r"\bresponda apenas\b",
-        r"\bretorne apenas\b",
-        r"\bmodo read-only\b",
-        r"\bmodo read only\b",
-        r"\bagente visível final\b",
-        r"\bagente visivel final\b",
-    ]
-    for marker in stop_markers:
-        match = re.search(marker, raw, flags=re.IGNORECASE)
-        if match:
-            raw = raw[:match.start()].strip()
-            break
-    raw = re.split(r"[.\n\r]", raw, maxsplit=1)[0].strip()
-    return raw
-
-
 def _canonical_dispatch_actor(value: Any) -> str:
     cleaned = _strip_constraint_token(value)
     raw = _normalize(str(cleaned or "").replace("@", " "))
@@ -109,20 +86,6 @@ def _canonical_dispatch_actor(value: Any) -> str:
     raw = re.sub(r"_+", "_", raw).strip("_")
     if not raw:
         return ""
-
-    reserved_tokens = {
-        "squad",
-        "team",
-        "equipe",
-        "especialistas",
-        "specialists",
-        "specialist",
-        "agents",
-        "agentes",
-    }
-    if raw in reserved_tokens:
-        return ""
-
     aliases = {
         "ux_frontend": "ux_frontend",
         "ux_front": "ux_frontend",
@@ -175,7 +138,7 @@ def _extract_constraint_list(text: str, keys: list[str]) -> list[str]:
                 break
         if matched_key is not None:
             active = True
-            inline = _cut_specialist_inline_tail(_strip_constraint_token(stripped.split(":", 1)[1].strip()))
+            inline = _strip_constraint_token(stripped.split(":", 1)[1].strip())
             if inline:
                 parts = [_strip_constraint_token(p) for p in re.split(r"[,;]", inline)]
                 collected.extend([p for p in parts if p])
@@ -269,14 +232,17 @@ def _looks_like_orion_only_request(text: str) -> bool:
 
 
 def _looks_like_team_technical_audit_request(text: str) -> bool:
-    """Detecta @Team/equipe técnica pedindo auditoria read-only de code/runtime."""
+    """Detecta pedidos de auditoria/análise técnica read-only do code/runtime."""
     txt = _normalize(text)
     if not txt:
         return False
 
     has_team = bool(re.search(r"@team\b|\bteam\b|\bequipe\b|\bsquad\b|\bespecialistas\b|\bwar room\b", txt, flags=re.IGNORECASE))
-    if not has_team:
-        return False
+    has_explicit_specialists = sum(
+        1
+        for handle in ("@orion", "@auditor", "@cto", "@ux_frontend", "@ux/frontend")
+        if handle in txt
+    ) >= 2
 
     has_audit = _contains_any(txt, [
         "auditoria",
@@ -288,10 +254,18 @@ def _looks_like_team_technical_audit_request(text: str) -> bool:
         "varredura",
         "análise técnica",
         "analise tecnica",
+        "análise arquitetural",
+        "analise arquitetural",
+        "análise detalhada",
+        "analise detalhada",
+        "recomendação consolidada",
+        "recomendacao consolidada",
+        "melhorias priorizadas",
     ])
 
     has_technical_scope = _contains_any(txt, [
         "code",
+        "codebase",
         "código",
         "codigo",
         "runtime",
@@ -309,16 +283,77 @@ def _looks_like_team_technical_audit_request(text: str) -> bool:
         "agentes",
         "ux",
         "console",
+        "chat stream",
+        "sse",
+        "github bridge",
     ])
 
     read_only = (
-        _contains_any(txt, ["read-only", "read only", "somente leitura", "sem escrever", "não escrever", "nao escrever"])
+        _contains_any(txt, ["read-only", "read only", "somente leitura", "sem escrever", "não escrever", "nao escrever", "não executar", "nao executar"])
         or not _contains_any(txt, ["aplicar patch", "criar branch", "abrir pr", "merge", "deploy", "escrever arquivo"])
     )
 
-    return bool(has_team and has_audit and has_technical_scope and read_only)
+    return bool((has_team or has_explicit_specialists) and has_audit and has_technical_scope and read_only)
 
 
+def _looks_like_final_readonly_analysis_request(text: str) -> bool:
+    txt = _normalize(text)
+    if not txt:
+        return False
+
+    has_analysis = _contains_any(txt, [
+        "análise detalhada",
+        "analise detalhada",
+        "análise arquitetural",
+        "analise arquitetural",
+        "auditoria técnica",
+        "auditoria tecnica",
+        "diagnóstico técnico",
+        "diagnostico tecnico",
+        "melhorias priorizadas",
+        "recomendação consolidada",
+        "recomendacao consolidada",
+        "análise final",
+        "analise final",
+    ])
+    has_code_scope = _contains_any(txt, [
+        "code",
+        "codebase",
+        "código",
+        "codigo",
+        "runtime",
+        "backend",
+        "frontend",
+        "console",
+        "chat stream",
+        "sse",
+        "intent",
+        "governança",
+        "governanca",
+        "github bridge",
+        "ux",
+    ])
+    read_only = _contains_any(txt, [
+        "read-only",
+        "read only",
+        "somente leitura",
+        "não executar",
+        "nao executar",
+        "não abrir pr",
+        "nao abrir pr",
+        "não escrever",
+        "nao escrever",
+    ])
+    wants_final_output = _contains_any(txt, [
+        "entregue apenas a análise final",
+        "entregar apenas a análise final",
+        "entregue apenas analise final",
+        "não retorne trace",
+        "nao retorne trace",
+        "não resolva squad",
+        "nao resolva squad",
+    ])
+    return bool(has_analysis and has_code_scope and read_only and wants_final_output)
 
 
 def _looks_like_squad_resolution_request(text: str) -> bool:
@@ -333,12 +368,7 @@ def _looks_like_squad_resolution_request(text: str) -> bool:
         "resolve exactly this squad",
         "resolve this squad",
     ]
-    if _contains_any(txt, markers):
-        return True
-    if "ux_frontend" in txt or "ux/frontend" in txt:
-        if _contains_any(txt, ["read-only", "read only", "somente leitura", "nao execute dispatch", "não execute dispatch"]):
-            return True
-    return False
+    return _contains_any(txt, markers) or bool(re.search(r"(?im)^\s*squad\s*:", str(text or "")))
 
 
 def _looks_like_squad_resolution_trace_request(text: str) -> bool:
@@ -380,7 +410,7 @@ def _extract_requested_specialists_from_text(text: str) -> list[str]:
         ):
             capture = True
             if ":" in line:
-                inline = _cut_specialist_inline_tail(line.split(":", 1)[1].strip())
+                inline = line.split(":", 1)[1].strip()
                 if inline:
                     parts = [_strip_constraint_token(p) for p in re.split(r"[,;]", inline)]
                     collected.extend([p for p in parts if p])
@@ -985,9 +1015,12 @@ def build_intent_package(
         else _looks_like_continuous_audit_request(raw_user_input or effective_user_input or "")
     )
     requested_job_id = _extract_continuous_audit_job_id(raw_user_input or effective_user_input or "") or None
-    squad_resolution_trace_request = _looks_like_squad_resolution_trace_request(effective_user_input or raw_user_input or "")
+    final_readonly_analysis_request = _looks_like_final_readonly_analysis_request(effective_user_input or raw_user_input or "")
+    squad_resolution_trace_request = (
+        False if final_readonly_analysis_request else _looks_like_squad_resolution_trace_request(effective_user_input or raw_user_input or "")
+    )
     squad_resolution_request = (
-        False if squad_resolution_trace_request else _looks_like_squad_resolution_request(effective_user_input or raw_user_input or "")
+        False if (final_readonly_analysis_request or squad_resolution_trace_request) else _looks_like_squad_resolution_request(effective_user_input or raw_user_input or "")
     )
     requested_squad_specialists = _extract_requested_specialists_from_text(effective_user_input or raw_user_input or "")
 
@@ -995,7 +1028,12 @@ def build_intent_package(
     target_scope = _infer_target_scope(text)
     capability_name = _infer_capability(action_scope, text)
 
-    if squad_resolution_trace_request:
+    if final_readonly_analysis_request:
+        intent = "platform_audit"
+        capability_name = "platform_self_audit"
+        action_scope = "diagnose"
+        target_scope = "platform"
+    elif squad_resolution_trace_request:
         intent = "squad_resolution_trace_readonly"
         capability_name = "squad_resolution_trace_readonly"
         action_scope = "read"
@@ -1047,10 +1085,18 @@ def build_intent_package(
         orion_only = False
     elif required_signer == "orion":
         orion_only = True
-    team_technical_audit = _looks_like_team_technical_audit_request(effective_user_input or raw_user_input or "")
+    team_technical_audit = _looks_like_team_technical_audit_request(effective_user_input or raw_user_input or "") or final_readonly_analysis_request
     excluded_agents = _dedupe_preserve(_excluded_agents(effective_user_input or raw_user_input or "") + specialists_forbidden)
 
-    if squad_resolution_trace_request or squad_resolution_request:
+    if final_readonly_analysis_request:
+        squad_resolution_trace_request = False
+        squad_resolution_request = False
+        platform_improvement_review = False
+        continuous_audit_request = False
+        continuous_audit_status_request = False
+        incremental_dispatch_followup = False
+        orion_only = True
+    elif squad_resolution_trace_request or squad_resolution_request:
         team_technical_audit = False
         platform_improvement_review = False
         continuous_audit_request = False
