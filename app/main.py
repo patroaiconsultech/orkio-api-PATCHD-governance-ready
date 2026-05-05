@@ -6953,6 +6953,38 @@ def _github_write_get_active_approval(org: str, thread_id: Optional[str], payloa
             return promoted
         return None
 
+
+
+def _github_write_embed_runtime_approval_message(
+    message: str,
+    *,
+    org: Optional[str],
+    thread_id: Optional[str],
+    payload: Optional[Dict[str, Any]],
+    runtime_kind: str,
+) -> str:
+    txt = (message or "").strip()
+    if not txt or str(runtime_kind or "").strip().lower() != "pwa_console_repair":
+        return txt
+    approval = _github_write_get_active_approval(str(org or "default"), thread_id, payload)
+    if not isinstance(approval, dict) or not list(approval.get("actions_allowed") or []):
+        return txt
+    bridge_payload = {
+        "message": txt,
+        "thread_id": str(thread_id or "global"),
+        "governance_bridge": {
+            "source": "main_runtime_bridge",
+            "runtime_kind": "pwa_console_repair",
+            "org_slug": str(org or "default"),
+            "approval_subject": _github_write_subject(payload),
+            "github_write_approval": approval,
+        },
+    }
+    try:
+        return json.dumps(bridge_payload, ensure_ascii=False)
+    except Exception:
+        return txt
+
 def _github_write_clear_approval(org: str, thread_id: Optional[str], payload: Optional[Dict[str, Any]]) -> None:
     user_id = str((payload or {}).get("sub") or "").strip()
     thread_key = _github_write_approval_key(org, thread_id, user_id)
@@ -12007,6 +12039,9 @@ def _execute_capability_if_authorized(
     *,
     trace_id: Optional[str] = None,
     runtime_enrichment: Optional[Dict[str, Any]] = None,
+    org: Optional[str] = None,
+    thread_id: Optional[str] = None,
+    payload: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     txt = (user_text or "").strip()
     if not txt:
@@ -12088,11 +12123,18 @@ def _execute_capability_if_authorized(
         or planner_snapshot.get("audit_mode") == "specialist"
         or runtime_operation.get("audit_mode") == "specialist"
     )
+    runtime_message = _github_write_embed_runtime_approval_message(
+        txt,
+        org=org,
+        thread_id=thread_id,
+        payload=payload,
+        runtime_kind=runtime_kind,
+    )
 
     try:
         orion_result = orion_runtime_execute_alias(
             OrionExecuteIn(
-                message=txt,
+                message=runtime_message,
                 prepare_only=prepare_only,
                 include_frontend=include_frontend,
             )
@@ -13392,6 +13434,9 @@ def chat(
                         inp.message,
                         trace_id=getattr(inp, "trace_id", None),
                         runtime_enrichment=runtime_enrichment,
+                        org=org,
+                        thread_id=thread_id,
+                        payload=payload,
                     )
                 elif _is_explicit_github_create_branch_command(inp.message) or _is_github_write_request_or_authorization(inp.message):
                     governed_dispatch = _dispatch_governed_github_write(
@@ -13428,6 +13473,9 @@ def chat(
                             inp.message,
                             trace_id=getattr(inp, "trace_id", None),
                             runtime_enrichment=runtime_enrichment,
+                            org=org,
+                            thread_id=thread_id,
+                            payload=payload,
                         )
                         if not (execution_result and execution_result.get("handled")):
                             execution_result = None
@@ -13471,6 +13519,9 @@ def chat(
                         inp.message,
                         trace_id=getattr(inp, "trace_id", None),
                         runtime_enrichment=runtime_enrichment,
+                        org=org,
+                        thread_id=thread_id,
+                        payload=payload,
                     )
             except Exception:
                 execution_result = {
@@ -17732,6 +17783,9 @@ async def chat_stream(
                                 message,
                                 trace_id=trace_id,
                                 runtime_enrichment=runtime_enrichment,
+                                org=org,
+                                thread_id=thread_id,
+                                payload=payload,
                             )
                         elif force_governed_branch_dispatch or _is_github_write_request_or_authorization(message):
                             governed_dispatch = _dispatch_governed_github_write(
@@ -17764,6 +17818,9 @@ async def chat_stream(
                                     message,
                                     trace_id=trace_id,
                                     runtime_enrichment=runtime_enrichment,
+                                    org=org,
+                                    thread_id=thread_id,
+                                    payload=payload,
                                 )
                                 if not (execution_result and execution_result.get("handled")):
                                     execution_result = None
@@ -17805,6 +17862,9 @@ async def chat_stream(
                                     message,
                                     trace_id=trace_id,
                                     runtime_enrichment=runtime_enrichment,
+                                    org=org,
+                                    thread_id=thread_id,
+                                    payload=payload,
                                 )
                     except Exception:
                         execution_result = {
