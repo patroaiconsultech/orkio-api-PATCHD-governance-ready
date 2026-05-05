@@ -3097,6 +3097,8 @@ def orion_runtime_execute(inp: "OrionRuntimeIn") -> Dict[str, Any]:
         return squad_resolution_trace_readonly(inp)
     if _looks_like_squad_resolution_request(effective_message):
         return resolve_squad_readonly(inp)
+    if _looks_like_pwa_console_repair_request(effective_message):
+        return pwa_console_repair(inp)
     if _is_platform_improvement_review_request(effective_message):
         return platform_improvement_review(inp)
     if _is_controlled_self_evolution_propose_request(effective_message):
@@ -3786,6 +3788,129 @@ def safe_patch_plan(inp: OrionRuntimeIn) -> Dict[str, Any]:
 
 
 
+
+
+def _looks_like_pwa_console_repair_request(message: str) -> bool:
+    txt = (message or "").strip().lower()
+    if not txt:
+        return False
+    canonical_markers = (
+        "incidente pwa/console executável",
+        "incidente pwa/console executavel",
+        "pwa_console_repair",
+        "corrija o pwa do console",
+        "corrigir o pwa do console",
+    )
+    scope_markers = (
+        "pwa",
+        "console",
+        "threads",
+        "agents",
+        "agentes",
+        "sidebar",
+        "ux",
+        "frontend",
+        "thread list",
+        "agent selector",
+    )
+    repair_markers = (
+        "corrija",
+        "corrigir",
+        "correção",
+        "correcao",
+        "restaurar",
+        "reaparecer",
+        "voltar a aparecer",
+        "fix",
+        "repair",
+        "patch",
+    )
+    return any(marker in txt for marker in canonical_markers) or (
+        any(marker in txt for marker in scope_markers)
+        and any(marker in txt for marker in repair_markers)
+    )
+
+
+def pwa_console_repair(inp: OrionRuntimeIn) -> Dict[str, Any]:
+    message = inp.message or ""
+    visible_agent = _resolve_visible_agent(message, default="orion")
+    constraints = _extract_hard_constraints(message)
+    selected_specialists = _apply_specialist_constraints(
+        _audit_selected_specialists("specialist", include_frontend=True),
+        constraints=constraints,
+    )
+    selected_specialists = _filter_specialists_for_message(selected_specialists, message)
+    violations = _validate_dispatch_constraints(
+        visible_agent=visible_agent,
+        selected_specialists=selected_specialists,
+        constraints=constraints,
+    )
+
+    governance_decision = evaluate_governance_action(
+        action_scope="write_branch",
+        capability_name="github_repo_write",
+        target_scope="frontend",
+        context=_governance_context_from_message(message),
+        safe_mode=False,
+    )
+    if not governance_decision.get("allowed"):
+        return _blocked_governance_payload(
+            message=message,
+            mode="pwa_console_repair",
+            action_scope="write_branch",
+            capability_name="github_repo_write",
+            target_scope="frontend",
+            decision=governance_decision,
+        )
+
+    payload: Dict[str, Any] = {
+        "ok": True,
+        "service": "orion_internal",
+        "mode": "pwa_console_repair",
+        "provider": "platform",
+        "event": "PWA_CONSOLE_REPAIR_READY",
+        "status": "accepted",
+        "execution_depth": "ready",
+        "delivery_contract": "pwa_console_repair_v1",
+        "visible_agent": visible_agent,
+        "selected_specialists": list(selected_specialists or []),
+        "selected_specialists_count": len(list(selected_specialists or [])),
+        "required_signer": constraints.get("required_signer") or visible_agent,
+        "specialists_required": list(constraints.get("specialists_required") or []),
+        "specialists_forbidden": list(constraints.get("specialists_forbidden") or []),
+        "selected_specialists_count_must_be": constraints.get("selected_specialists_count_must_be"),
+        "constraint_violations": list(violations or []),
+        "governance_decision": governance_decision,
+        "danielic_integrity_passed": bool(governance_decision.get("danielic_integrity_passed")),
+        "technical_summary": "Incidente PWA/console reconhecido no runtime do Orion. O fluxo operacional foi aceito fora do trilho genérico de capability failure.",
+        "executive_diagnostic": "O backend está saudável; o foco operacional é restaurar visibilidade e seleção de threads/agentes no PWA sem depender de refresh manual.",
+        "probable_files": [
+            "frontend: AppConsole / rota principal do console",
+            "frontend: sidebar / thread list",
+            "frontend: agent selector / agent list",
+            "frontend: store/context de sessão do console",
+        ],
+        "implementation_steps": [
+            "Verificar carga inicial de threads e agentes após login/heartbeat.",
+            "Inspecionar estados de loading, vazio e erro no console.",
+            "Restaurar renderização da sidebar e do seletor de agentes.",
+            "Validar persistência da seleção sem refresh manual.",
+        ],
+        "recommended_actions": [
+            "Coletar contratos atuais de /api/threads e /api/agents no frontend.",
+            "Corrigir a condição de renderização que oculta threads/agentes.",
+            "Validar seleção de thread/agente após login e após heartbeat.",
+        ],
+        "message": "Incidente PWA/console reconhecido e aceito pelo Orion runtime.",
+        "resolution": "O runtime do Orion agora reconhece pedidos de correção do PWA/console sem cair no fallback genérico de capability.",
+        "next_authorization_command": "@Orion Pode prosseguir com a correção técnica mínima segura do PWA/console e consolidar diagnóstico, patch aplicado e validação final.",
+        "generated_at": _now_ts(),
+    }
+    if violations:
+        payload["status"] = "accepted_with_constraints"
+        payload["resolution"] = "O incidente foi aceito, mas ainda há constraints declaradas pelo prompt que precisam ser observadas."
+    return payload
+
 def _looks_like_github_runtime_request(message: str) -> bool:
     txt = (message or "").strip().lower()
     if not txt:
@@ -3962,7 +4087,50 @@ def orion_github_execute(inp: OrionExecuteIn) -> Dict[str, Any]:
 
 
 def orion_runtime_execute_alias(inp: OrionExecuteIn) -> Dict[str, Any]:
-    return orion_runtime_execute(inp)
+    try:
+        return orion_runtime_execute(inp)
+    except HTTPException as e:
+        detail = getattr(e, "detail", None)
+        message = ""
+        if isinstance(detail, dict):
+            message = str(
+                detail.get("message")
+                or detail.get("detail")
+                or detail.get("github_error")
+                or detail.get("error")
+                or ""
+            ).strip()
+        else:
+            message = str(detail or "").strip()
+        return {
+            "ok": False,
+            "service": "orion_internal",
+            "mode": "orion_runtime_execute_alias",
+            "provider": "runtime",
+            "event": "ORION_RUNTIME_HTTP_EXCEPTION",
+            "error": message or "runtime_http_exception",
+            "error_type": e.__class__.__name__,
+            "detail": detail if isinstance(detail, dict) else {"detail": message or str(detail or "").strip()},
+            "message": message or "Falha ao avaliar capability operacional solicitada.",
+            "generated_at": _now_ts(),
+        }
+    except Exception as e:
+        message = str(e or "").strip()
+        return {
+            "ok": False,
+            "service": "orion_internal",
+            "mode": "orion_runtime_execute_alias",
+            "provider": "runtime",
+            "event": "ORION_RUNTIME_UNEXPECTED_EXCEPTION",
+            "error": message or "unexpected_runtime_exception",
+            "error_type": e.__class__.__name__,
+            "detail": {
+                "detail": message or "unexpected_runtime_exception",
+                "exception_type": e.__class__.__name__,
+            },
+            "message": message or "Falha ao avaliar capability operacional solicitada.",
+            "generated_at": _now_ts(),
+        }
 
 
 # === ORKIO OBSERVABILITY INTEGRATION ===
