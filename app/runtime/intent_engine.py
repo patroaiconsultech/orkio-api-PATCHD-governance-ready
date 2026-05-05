@@ -660,6 +660,53 @@ def _looks_like_platform_improvement_review_request(text: str) -> bool:
     return bool((explicit_review or (improvement_markers and platform_scope)) and excludes_write)
 
 
+def _looks_like_pwa_console_repair_request(text: str) -> bool:
+    txt = _normalize(text)
+    if not txt:
+        return False
+
+    scope_markers = [
+        "pwa",
+        "app console",
+        "console",
+        "threads",
+        "thread",
+        "agentes",
+        "agents",
+        "sidebar",
+        "frontend",
+        "ux",
+        "seleção de threads",
+        "selecao de threads",
+        "seleção de agentes",
+        "selecao de agentes",
+    ]
+    repair_markers = [
+        "corrigir",
+        "corrija",
+        "correção",
+        "correcao",
+        "consertar",
+        "conserte",
+        "restaurar",
+        "restaure",
+        "ajustar",
+        "ajuste",
+        "executar correção",
+        "executar correcao",
+        "aplicar correção",
+        "aplicar correcao",
+        "aplicar patch",
+        "aplique o patch",
+        "fix",
+        "repair",
+        "deixar de abortar",
+        "voltar a aparecer",
+        "reaparecer",
+    ]
+    return _contains_any(txt, scope_markers) and _contains_any(txt, repair_markers)
+
+
 def _looks_like_privileged_admin_read(text: str) -> bool:
     txt = _normalize(text)
     if not txt:
@@ -777,6 +824,8 @@ def _infer_action_scope(text: str) -> str:
         return "read"
     if _looks_like_privileged_admin_read(txt):
         return "read"
+    if _looks_like_pwa_console_repair_request(text):
+        return "write_branch"
     if _looks_like_platform_improvement_review_request(txt):
         return "propose_patch"
     if _contains_any(txt, ["merge", "mergear"]):
@@ -881,9 +930,13 @@ def build_intent_package(
         has_completed_dispatch_context
         and _looks_like_incremental_dispatch_followup_request(effective_user_input or raw_user_input or "")
     )
+    pwa_console_repair_request = (
+        False if incremental_dispatch_followup
+        else _looks_like_pwa_console_repair_request(effective_user_input or raw_user_input or "")
+    )
 
     platform_improvement_review = (
-        False if incremental_dispatch_followup
+        False if (incremental_dispatch_followup or pwa_console_repair_request)
         else _looks_like_platform_improvement_review_request(effective_user_input or raw_user_input or "")
     )
     continuous_audit_status_request = (
@@ -915,6 +968,11 @@ def build_intent_package(
         capability_name = "squad_resolve_readonly"
         action_scope = "read"
         target_scope = "platform"
+    elif pwa_console_repair_request:
+        intent = "pwa_console_repair"
+        capability_name = "github_repo_write"
+        action_scope = "write_branch"
+        target_scope = "frontend"
     elif incremental_dispatch_followup:
         intent = "dispatch_incremental_followup"
         capability_name = "platform_self_audit"
@@ -978,6 +1036,14 @@ def build_intent_package(
         capability_name = "continuous_audit_job"
         intent = "continuous_audit_job"
         platform_improvement_review = False
+    elif pwa_console_repair_request:
+        capability_name = "github_repo_write"
+        intent = "pwa_console_repair"
+        platform_improvement_review = False
+        continuous_audit_request = False
+        continuous_audit_status_request = False
+        team_technical_audit = False
+        orion_only = True
     elif orion_only or team_technical_audit:
         capability_name = capability_name or "platform_self_audit"
         intent = "platform_self_audit"
@@ -1036,6 +1102,21 @@ def build_intent_package(
         template_id = "squad_resolve_readonly_template_v1"
         structured_output = True
         expected_specialist_reports = list(requested_squad_specialists or specialists_required or [])
+        visible_signer_expected = required_signer or "orion"
+    elif pwa_console_repair_request:
+        recommended_agents = _apply_dispatch_constraints(
+            ["orion", "cto", "ux_frontend"],
+            required=specialists_required,
+            forbidden=specialists_forbidden,
+            required_signer=required_signer or "orion",
+            count_must_be=None,
+        )
+        advisor_agents = _dedupe_preserve(recommended_agents + ["metatron"])
+        target_agent = required_signer or "orion"
+        delivery_contract = "pwa_console_repair_v1"
+        template_id = "pwa_console_repair_template_v1"
+        structured_output = True
+        expected_specialist_reports = list(recommended_agents or ["orion", "cto", "ux_frontend"])
         visible_signer_expected = required_signer or "orion"
     elif incremental_dispatch_followup:
         recommended_agents = _apply_dispatch_constraints(
@@ -1154,9 +1235,13 @@ def build_intent_package(
                             "read_only_squad_resolution"
                             if squad_resolution_request
                             else (
-                                "propose_only_dispatch"
-                                if platform_improvement_review
-                                else ("read_only_dispatch" if team_technical_audit else None)
+                                "execute_repair"
+                                if pwa_console_repair_request
+                                else (
+                                    "propose_only_dispatch"
+                                    if platform_improvement_review
+                                    else ("read_only_dispatch" if team_technical_audit else None)
+                                )
                             )
                         )
                     )
@@ -1174,6 +1259,7 @@ def build_intent_package(
         ),
         "expected_specialist_reports": expected_specialist_reports,
         "force_dispatch": bool(continuous_audit_request or platform_improvement_review or incremental_dispatch_followup),
+        "pwa_console_repair_request": bool(pwa_console_repair_request),
         "squad_resolution_request": bool(squad_resolution_request),
         "squad_resolution_trace_request": bool(squad_resolution_trace_request),
         "continuous_audit_supported": bool(continuous_audit_request or continuous_audit_status_request),
@@ -1184,7 +1270,7 @@ def build_intent_package(
     payload = {
         "intent": intent,
         "confidence": (
-            0.99 if (platform_improvement_review or continuous_audit_request or continuous_audit_status_request)
+            0.99 if (pwa_console_repair_request or platform_improvement_review or continuous_audit_request or continuous_audit_status_request)
             else (0.99 if incremental_dispatch_followup else (0.98 if runtime_op.get("kind") else 0.62))
         ),
         "recommended_agents": recommended_agents,
