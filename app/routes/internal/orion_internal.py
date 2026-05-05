@@ -3343,7 +3343,7 @@ def _governance_context_from_message(message: str, *, request: Optional[Request]
         "write_governed" if authorization_present else "standard"
     )
     return {
-        "message": effective_message or "",
+        "message": message or "",
         "authorization_present": authorization_present,
         "raw_authorization_present": raw_authorization_present,
         "explicit_write_requested": explicit_write_requested,
