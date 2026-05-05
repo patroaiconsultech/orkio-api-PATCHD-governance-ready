@@ -12055,6 +12055,49 @@ def _execute_capability_if_authorized(
     planner_snapshot = (runtime_enrichment or {}).get("planner_snapshot") or {}
     required_capability = str(planner_snapshot.get("requires_capability") or "").strip()
 
+    def _runtime_error_payload(
+        message: str,
+        *,
+        detail: Any = None,
+        error: str = "",
+        error_type: str = "",
+        raw_result: Any = None,
+    ) -> Dict[str, Any]:
+        detail_dict: Dict[str, Any]
+        if isinstance(detail, dict):
+            detail_dict = dict(detail or {})
+        else:
+            detail_dict = {"detail": str(detail or message or error or "").strip()}
+        if trace_id and not detail_dict.get("trace_id"):
+            detail_dict["trace_id"] = trace_id
+        if runtime_kind and not detail_dict.get("runtime_kind"):
+            detail_dict["runtime_kind"] = runtime_kind
+        if required_capability and not detail_dict.get("required_capability"):
+            detail_dict["required_capability"] = required_capability
+        if error_type and not detail_dict.get("error_type"):
+            detail_dict["error_type"] = error_type
+        if raw_result is not None and not detail_dict.get("raw_result_type"):
+            detail_dict["raw_result_type"] = type(raw_result).__name__
+        final_message = str(
+            message
+            or detail_dict.get("message")
+            or detail_dict.get("detail")
+            or error
+            or "runtime_execution_error"
+        ).strip()
+        return {
+            "handled": True,
+            "success": False,
+            "provider": "runtime",
+            "message": final_message,
+            "detail": detail_dict,
+            "error": str(error or final_message or "runtime_execution_error").strip(),
+            "error_type": str(error_type or detail_dict.get("error_type") or "RuntimeExecutionError").strip(),
+            "trace_id": trace_id,
+            "runtime_kind": runtime_kind,
+            "required_capability": required_capability,
+        }
+
     allow_runtime_execution = (
         runtime_kind.startswith("github_runtime_")
         or required_capability.startswith("github_")
@@ -12141,7 +12184,30 @@ def _execute_capability_if_authorized(
         )
         if isinstance(orion_result, dict):
             normalized = _normalize_orion_runtime_execution_result(orion_result)
+            if trace_id and not normalized.get("trace_id"):
+                normalized["trace_id"] = trace_id
+            if runtime_kind and not normalized.get("runtime_kind"):
+                normalized["runtime_kind"] = runtime_kind
+            if required_capability and not normalized.get("required_capability"):
+                normalized["required_capability"] = required_capability
             return _coerce_platform_audit_dispatch_result(normalized, runtime_enrichment)
+        logging.error(
+            "RUNTIME_EXECUTION_INVALID_RESULT trace_id=%s runtime_kind=%s required_capability=%s raw_result_type=%s",
+            trace_id,
+            runtime_kind,
+            required_capability,
+            type(orion_result).__name__,
+        )
+        return _runtime_error_payload(
+            "Retorno inválido do runtime operacional.",
+            detail={
+                "detail": "orion_runtime_execute_alias returned non-dict result",
+                "raw_result_type": type(orion_result).__name__,
+            },
+            error="invalid_runtime_result",
+            error_type=type(orion_result).__name__,
+            raw_result=orion_result,
+        )
     except HTTPException as e:
         detail = getattr(e, "detail", None)
         message = ""
@@ -12155,37 +12221,35 @@ def _execute_capability_if_authorized(
             ).strip()
         else:
             message = str(detail or "").strip()
-        logging.exception("RUNTIME_EXECUTION_HTTP_EXCEPTION trace_id=%s runtime_kind=%s required_capability=%s", trace_id, runtime_kind, required_capability)
-        return {
-            "handled": True,
-            "success": False,
-            "provider": "runtime",
-            "message": message or "Falha ao avaliar capability operacional solicitada.",
-            "detail": detail if isinstance(detail, dict) else {"detail": message or str(detail or "").strip()},
-            "error": message or "runtime_http_exception",
-            "error_type": e.__class__.__name__,
-            "trace_id": trace_id,
-            "runtime_kind": runtime_kind,
-            "required_capability": required_capability,
-        }
+        logging.exception(
+            "RUNTIME_EXECUTION_HTTP_EXCEPTION trace_id=%s runtime_kind=%s required_capability=%s",
+            trace_id,
+            runtime_kind,
+            required_capability,
+        )
+        return _runtime_error_payload(
+            message or "runtime_http_exception",
+            detail=detail,
+            error=message or "runtime_http_exception",
+            error_type=e.__class__.__name__,
+        )
     except Exception as e:
         err_message = str(e or "").strip()
-        logging.exception("RUNTIME_EXECUTION_UNEXPECTED_EXCEPTION trace_id=%s runtime_kind=%s required_capability=%s", trace_id, runtime_kind, required_capability)
-        return {
-            "handled": True,
-            "success": False,
-            "provider": "runtime",
-            "message": err_message or "Falha ao avaliar capability operacional solicitada.",
-            "detail": {
+        logging.exception(
+            "RUNTIME_EXECUTION_UNEXPECTED_EXCEPTION trace_id=%s runtime_kind=%s required_capability=%s",
+            trace_id,
+            runtime_kind,
+            required_capability,
+        )
+        return _runtime_error_payload(
+            err_message or "unexpected_runtime_exception",
+            detail={
                 "detail": err_message or "unexpected_runtime_exception",
                 "exception_type": e.__class__.__name__,
             },
-            "error": err_message or "unexpected_runtime_exception",
-            "error_type": e.__class__.__name__,
-            "trace_id": trace_id,
-            "runtime_kind": runtime_kind,
-            "required_capability": required_capability,
-        }
+            error=err_message or "unexpected_runtime_exception",
+            error_type=e.__class__.__name__,
+        )
 
     req_read = _github_extract_read_file_request(txt)
     if req_read:
