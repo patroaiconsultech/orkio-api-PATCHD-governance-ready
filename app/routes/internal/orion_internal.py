@@ -3122,7 +3122,9 @@ def orion_runtime_execute(inp: "OrionRuntimeIn") -> Dict[str, Any]:
         return list_squad_agents_post(inp)
     if _looks_like_attachment_analysis_request(effective_message):
         return _attachment_analysis_read_payload(inp)
-    return github_execute(inp)
+    if _looks_like_github_runtime_request(effective_message):
+        return github_execute(inp)
+    return platform_self_audit(inp)
 
 class OrionRuntimeIn(BaseModel):
     message: str = Field(min_length=1)
