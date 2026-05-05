@@ -526,7 +526,7 @@ def start_continuous_audit_job(
             title="Continuous audit plan",
             content=_json_dumps({
                 "title": title,
-                "message": effective_message or "",
+                "message": message or "",
                 "embedded_payload": embedded_payload,
                 "include_frontend": effective_include_frontend,
                 "selected_specialists": selected_specialists,
