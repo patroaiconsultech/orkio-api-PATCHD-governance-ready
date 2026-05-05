@@ -723,29 +723,6 @@ def _strip_constraint_token(value: Any) -> str:
     return raw
 
 
-def _cut_specialist_inline_tail(value: Any) -> str:
-    raw = str(value or "").strip()
-    if not raw:
-        return ""
-    stop_markers = [
-        r"\bnão execute dispatch\b",
-        r"\bnao execute dispatch\b",
-        r"\bresponda apenas\b",
-        r"\bretorne apenas\b",
-        r"\bmodo read-only\b",
-        r"\bmodo read only\b",
-        r"\bagente visível final\b",
-        r"\bagente visivel final\b",
-    ]
-    for marker in stop_markers:
-        match = re.search(marker, raw, flags=re.IGNORECASE)
-        if match:
-            raw = raw[:match.start()].strip()
-            break
-    raw = re.split(r"[.\n\r]", raw, maxsplit=1)[0].strip()
-    return raw
-
-
 def _canonical_dispatch_actor(value: Any) -> str:
     cleaned = _strip_constraint_token(value)
     raw = str(cleaned or "").strip().lower().replace("@", "")
@@ -753,20 +730,6 @@ def _canonical_dispatch_actor(value: Any) -> str:
     raw = re.sub(r"_+", "_", raw).strip("_")
     if not raw:
         return ""
-
-    reserved_tokens = {
-        "squad",
-        "team",
-        "equipe",
-        "especialistas",
-        "specialists",
-        "specialist",
-        "agents",
-        "agentes",
-    }
-    if raw in reserved_tokens:
-        return ""
-
     aliases = {
         "ux_frontend": "ux_frontend",
         "ux_front": "ux_frontend",
@@ -815,7 +778,7 @@ def _extract_constraint_list(message: str, keys: List[str]) -> List[str]:
                 break
         if matched is not None:
             active = True
-            inline = _cut_specialist_inline_tail(_strip_constraint_token(stripped.split(":", 1)[1].strip()))
+            inline = _strip_constraint_token(stripped.split(":", 1)[1].strip())
             if inline:
                 parts = [_strip_constraint_token(p) for p in re.split(r"[,;]", inline)]
                 out.extend([p for p in parts if p])
@@ -964,15 +927,27 @@ def _is_team_technical_audit_request(message: str) -> bool:
     if not raw:
         return False
     has_team = bool(re.search(r"@team\b|\bteam\b|\bequipe\b|\bsquad\b|\bespecialistas\b|\bwar room\b", raw, flags=re.IGNORECASE))
-    if not has_team:
-        return False
-    has_audit = bool(re.search(r"auditoria|auditar|audit|diagn[óo]stico|diagnostico|scan|varredura|an[áa]lise t[ée]cnica|analise tecnica", raw, flags=re.IGNORECASE))
-    has_technical_scope = bool(re.search(r"code|c[óo]digo|codigo|runtime|backend|frontend|repo|reposit[óo]rio|repositorio|main\.py|intent_engine\.py|orion_internal\.py|governan[çc]a|roteamento|agentes|ux|console", raw, flags=re.IGNORECASE))
+    has_explicit_specialists = sum(
+        1 for handle in ("@orion", "@auditor", "@cto", "@ux_frontend", "@ux/frontend")
+        if handle in raw
+    ) >= 2
+    has_audit = bool(re.search(r"auditoria|auditar|audit|diagn[óo]stico|diagnostico|scan|varredura|an[áa]lise t[ée]cnica|analise tecnica|an[áa]lise arquitetural|analise arquitetural|an[áa]lise detalhada|analise detalhada|melhorias priorizadas|recomendac[aã]o consolidada", raw, flags=re.IGNORECASE))
+    has_technical_scope = bool(re.search(r"code|codebase|c[óo]digo|codigo|runtime|backend|frontend|repo|reposit[óo]rio|repositorio|main\.py|intent_engine\.py|orion_internal\.py|governan[çc]a|roteamento|agentes|ux|console|chat stream|sse|github bridge", raw, flags=re.IGNORECASE))
     read_only = (
-        bool(re.search(r"read[- ]only|somente leitura|sem escrever|n[ãa]o escrever", raw, flags=re.IGNORECASE))
+        bool(re.search(r"read[- ]only|somente leitura|sem escrever|n[ãa]o escrever|n[ãa]o executar|nao executar", raw, flags=re.IGNORECASE))
         or not bool(re.search(r"aplicar patch|criar branch|abrir pr|merge|deploy|escrever arquivo", raw, flags=re.IGNORECASE))
     )
-    return bool(has_team and has_audit and has_technical_scope and read_only)
+    return bool((has_team or has_explicit_specialists) and has_audit and has_technical_scope and read_only)
+
+def _looks_like_final_readonly_analysis_request(message: str) -> bool:
+    raw = (message or "").strip().lower()
+    if not raw:
+        return False
+    has_analysis = bool(re.search(r"an[áa]lise detalhada|an[áa]lise arquitetural|auditoria t[ée]cnica|diagn[óo]stico t[ée]cnico|melhorias priorizadas|recomendac[aã]o consolidada|an[áa]lise final", raw, flags=re.IGNORECASE))
+    has_scope = bool(re.search(r"code|codebase|c[óo]digo|codigo|runtime|backend|frontend|console|chat stream|sse|intent|governan[çc]a|github bridge|ux", raw, flags=re.IGNORECASE))
+    read_only = bool(re.search(r"read[- ]only|somente leitura|n[ãa]o executar|nao executar|n[ãa]o abrir pr|nao abrir pr|n[ãa]o escrever|nao escrever", raw, flags=re.IGNORECASE))
+    wants_final_output = bool(re.search(r"entregue apenas a an[áa]lise final|entregar apenas a an[áa]lise final|n[ãa]o resolva squad|nao resolva squad|n[ãa]o retorne trace|nao retorne trace", raw, flags=re.IGNORECASE))
+    return bool(has_analysis and has_scope and read_only and wants_final_output)
 
 def _filter_specialists_for_message(selected: List[str], message: str) -> List[str]:
     excluded = set(_dedupe_dispatch_actors(_excluded_agents_from_message(message)))
@@ -3130,6 +3105,8 @@ def orion_runtime_execute(inp: "OrionRuntimeIn") -> Dict[str, Any]:
         return _get_continuous_audit_status_detached(inp)
     if audit_op == "create":
         return _start_continuous_audit_job_detached(inp)
+    if _looks_like_final_readonly_analysis_request(effective_message):
+        return platform_self_audit(inp)
     if _looks_like_squad_resolution_trace_request(effective_message):
         return squad_resolution_trace_readonly(inp)
     if _looks_like_squad_resolution_request(effective_message):
@@ -3623,7 +3600,7 @@ def _extract_requested_specialists_from_message(message: str) -> List[str]:
         ):
             capture = True
             if ":" in line:
-                inline = _cut_specialist_inline_tail(line.split(":", 1)[1].strip())
+                inline = line.split(":", 1)[1].strip()
                 if inline:
                     parts = [_strip_constraint_token(p) for p in re.split(r"[,;]", inline)]
                     collected.extend([p for p in parts if p])
