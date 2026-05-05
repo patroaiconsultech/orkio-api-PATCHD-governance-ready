@@ -7695,6 +7695,67 @@ def _is_runtime_source_audit_request(user_text: str) -> bool:
     ]
     return any(re.search(p, txt, flags=re.IGNORECASE) for p in patterns)
 
+def _looks_like_pwa_console_execution_request(user_text: str) -> bool:
+    txt = (user_text or "").strip().lower()
+    if not txt:
+        return False
+    scope_patterns = [
+        r"\bpwa\b",
+        r"app\s+console",
+        r"\bconsole\b",
+        r"\bthreads?\b",
+        r"\bagentes?\b",
+        r"\bagents?\b",
+        r"sidebar",
+        r"ux",
+        r"frontend",
+        r"sele[cç][aã]o\s+de\s+threads",
+        r"sele[cç][aã]o\s+de\s+agentes",
+    ]
+    repair_patterns = [
+        r"corrig",
+        r"consert",
+        r"restaur",
+        r"ajust",
+        r"executar\s+corre[cç][aã]o",
+        r"aplicar\s+corre[cç][aã]o",
+        r"aplique\s+o\s+patch",
+        r"aplicar\s+patch",
+        r"fix",
+        r"repair",
+        r"deixe\s+de\s+abortar",
+        r"fazer\s+com\s+que\s+orion\s+consiga\s+executar",
+    ]
+    has_scope = any(re.search(p, txt, flags=re.IGNORECASE) for p in scope_patterns)
+    has_repair = any(re.search(p, txt, flags=re.IGNORECASE) for p in repair_patterns)
+    return bool(has_scope and has_repair)
+
+
+def _default_forced_orion_specialists(
+    user_text: str,
+    requested_specialists: Optional[List[str]] = None,
+) -> List[str]:
+    specialists = [
+        _canonical_dispatch_specialist_slug(item)
+        for item in list(requested_specialists or [])
+    ]
+    specialists = [item for item in specialists if item]
+    if specialists:
+        seen: set[str] = set()
+        ordered: List[str] = []
+        for item in specialists:
+            if item in seen:
+                continue
+            ordered.append(item)
+            seen.add(item)
+        return ordered
+
+    if _looks_like_pwa_console_execution_request(user_text):
+        return ["orion", "cto", "ux_frontend"]
+
+    return ["architect", "auditor", "devops", "security"]
+
+
 def _runtime_orion_dispatch_request_flags(user_text: str) -> Dict[str, Any]:
     txt = (user_text or "").strip()
     normalized = txt.lower()
@@ -7702,6 +7763,7 @@ def _runtime_orion_dispatch_request_flags(user_text: str) -> Dict[str, Any]:
         return {"requested": False, "requested_specialists": [], "reason": ""}
 
     specialist_aliases = [
+        (r"\borion\b", "orion"),
         (r"\barquiteto\b", "architect"),
         (r"\barchitect\b", "architect"),
         (r"\bauditor\b", "auditor"),
@@ -7710,6 +7772,12 @@ def _runtime_orion_dispatch_request_flags(user_text: str) -> Dict[str, Any]:
         (r"\bsre\b", "devops"),
         (r"\bseguran[çc]a\b", "security"),
         (r"\bsecurity\b", "security"),
+        (r"\bux[_/\s-]*frontend\b", "ux_frontend"),
+        (r"\bux\s+frontend\b", "ux_frontend"),
+        (r"\bfrontend\s+ux\b", "ux_frontend"),
+        (r"\bfrontend\b", "ux_frontend"),
+        (r"\bui[_/\s-]*ux\b", "ux_frontend"),
+        (r"\bux\b", "ux_frontend"),
     ]
     requested_specialists: List[str] = []
     seen_specialists: set[str] = set()
@@ -7718,6 +7786,14 @@ def _runtime_orion_dispatch_request_flags(user_text: str) -> Dict[str, Any]:
             if slug not in seen_specialists:
                 requested_specialists.append(slug)
                 seen_specialists.add(slug)
+
+    if _looks_like_pwa_console_execution_request(txt):
+        return {
+            "requested": True,
+            "requested_specialists": _default_forced_orion_specialists(txt, requested_specialists),
+            "reason": "forced_orion_pwa_console_repair",
+            "pwa_console_repair": True,
+        }
 
     wants_dispatch_patterns = [
         r"acione\s+sua\s+equipe\s+t[ée]cnica",
@@ -7743,13 +7819,13 @@ def _runtime_orion_dispatch_request_flags(user_text: str) -> Dict[str, Any]:
     if not wants_dispatch:
         return {"requested": False, "requested_specialists": [], "reason": ""}
 
-    if not requested_specialists:
-        requested_specialists = ["architect", "auditor", "devops", "security"]
+    requested_specialists = _default_forced_orion_specialists(txt, requested_specialists)
 
     return {
         "requested": True,
         "requested_specialists": requested_specialists,
         "reason": "forced_orion_runtime_dispatch",
+        "pwa_console_repair": False,
     }
 
 
@@ -7759,9 +7835,7 @@ def _canonicalize_platform_audit_runtime_message(
     requested_specialists: Optional[List[str]] = None,
     direct_orion: bool = True,
 ) -> str:
-    specialists = [str(x).strip().lower() for x in (requested_specialists or []) if str(x).strip()]
-    if not specialists:
-        specialists = ["architect", "auditor", "devops", "security"]
+    specialists = _default_forced_orion_specialists(user_text, requested_specialists)
 
     visible_agent = "orion" if direct_orion else "orkio"
     specialist_csv = ", ".join(specialists)
@@ -7774,6 +7848,26 @@ def _canonicalize_platform_audit_runtime_message(
         "Execute diagnóstico real de runtime/chat, produza selected_specialists, dispatch_receipts, "
         "specialist_reports, technical_summary, final_consolidation e execution_depth=dispatch. "
         "Não responda em modo consultivo genérico. Preserve Orion como signer visível final. "
+        f"Pedido original do usuário: {original}"
+    )
+
+
+def _canonicalize_pwa_console_repair_runtime_message(
+    user_text: str,
+    *,
+    requested_specialists: Optional[List[str]] = None,
+) -> str:
+    specialists = _default_forced_orion_specialists(user_text, requested_specialists)
+    specialist_csv = ", ".join(specialists)
+    original = (user_text or "").strip()
+
+    return (
+        "INCIDENTE PWA/CONSOLE EXECUTÁVEL. "
+        "Agente visível final: orion. "
+        f"Acione especialistas: {specialist_csv}. "
+        "Corrija a interface do PWA/console para restaurar a visibilidade e a seleção de threads e agentes. "
+        "Pode aplicar correção técnica mínima segura no frontend, escrever arquivo, preparar branch governada e abrir PR se necessário. "
+        "Não responda em modo consultivo nem em read-only. "
         f"Pedido original do usuário: {original}"
     )
 
@@ -7869,41 +7963,52 @@ def _apply_forced_orion_runtime_dispatch_enrichment(
     if not flags.get("requested"):
         return normalized
 
-    requested_specialists = list(flags.get("requested_specialists") or ["architect", "auditor", "devops", "security"])
+    requested_specialists = _default_forced_orion_specialists(
+        user_text,
+        list(flags.get("requested_specialists") or []),
+    )
+    pwa_console_repair = bool(flags.get("pwa_console_repair"))
 
     intent_package = normalized.get("intent_package") if isinstance(normalized.get("intent_package"), dict) else {}
     runtime_operation = intent_package.get("runtime_operation") if isinstance(intent_package.get("runtime_operation"), dict) else {}
     runtime_operation.update({
-        "kind": "platform_audit",
-        "execution_depth": "dispatch",
+        "kind": "pwa_console_repair" if pwa_console_repair else "platform_audit",
+        "execution_depth": "execute" if pwa_console_repair else "dispatch",
         "prepare_only": False,
         "visible_only_agent": "orion",
-        "response_profile": "orion_objective_diagnostic",
+        "response_profile": "orion_pwa_execution" if pwa_console_repair else "orion_objective_diagnostic",
         "include_frontend": True,
         "audit_mode": "specialist",
-        "force_dispatch": True,
+        "force_dispatch": False if pwa_console_repair else True,
         "direct_orion": True,
         "requested_specialists": requested_specialists,
+        "delivery_contract": "pwa_console_repair_v1" if pwa_console_repair else runtime_operation.get("delivery_contract"),
     })
     intent_package["runtime_operation"] = runtime_operation
     intent_package["requires_runtime_execution"] = True
+    if pwa_console_repair:
+        intent_package["capability_name"] = "github_repo_write"
+        intent_package["intent"] = "pwa_console_repair"
+        intent_package["delivery_contract"] = "pwa_console_repair_v1"
     normalized["intent_package"] = intent_package
 
     planner_snapshot = normalized.get("planner_snapshot") if isinstance(normalized.get("planner_snapshot"), dict) else {}
     planner_snapshot.update({
-        "execution_depth": "dispatch",
+        "execution_depth": "execute" if pwa_console_repair else "dispatch",
         "visible_only_agent": "orion",
         "preferred_visible_node": "orion",
-        "response_profile": "orion_objective_diagnostic",
+        "response_profile": "orion_pwa_execution" if pwa_console_repair else "orion_objective_diagnostic",
         "audit_mode": "specialist",
-        "requires_capability": "platform_audit",
+        "requires_capability": "github_repo_write" if pwa_console_repair else "platform_audit",
         "prepare_only": False,
+        "target_scope": "frontend" if pwa_console_repair else planner_snapshot.get("target_scope"),
+        "delivery_contract": "pwa_console_repair_v1" if pwa_console_repair else planner_snapshot.get("delivery_contract"),
     })
     normalized["planner_snapshot"] = planner_snapshot
 
     dag_snapshot = normalized.get("dag_snapshot") if isinstance(normalized.get("dag_snapshot"), dict) else {}
     dag_snapshot.update({
-        "execution_depth": "dispatch",
+        "execution_depth": "execute" if pwa_console_repair else "dispatch",
         "preferred_visible_node": "orion",
         "visible_node": "orion",
         "route_applied": True,
@@ -7913,12 +8018,13 @@ def _apply_forced_orion_runtime_dispatch_enrichment(
     runtime_hints = normalized.get("runtime_hints") if isinstance(normalized.get("runtime_hints"), dict) else {}
     runtime_hints.update({
         "force_runtime_execution": True,
-        "force_runtime_dispatch": True,
+        "force_runtime_dispatch": False if pwa_console_repair else True,
         "force_single_visible_agent": "orion",
         "dispatch_requested_specialists": requested_specialists,
         "dispatch_request_reason": str(flags.get("reason") or "forced_orion_runtime_dispatch"),
         "explicit_requested_agents": list(requested_names or ["orion"]),
         "multi_agent_requested": True,
+        "pwa_console_repair": pwa_console_repair,
     })
     normalized["runtime_hints"] = runtime_hints
 
@@ -11848,6 +11954,7 @@ def _execute_capability_if_authorized(
             "squad_list",
             "continuous_audit_job",
             "continuous_audit_job_status",
+            "pwa_console_repair",
         }
         or required_capability in {
             "continuous_audit_job",
@@ -11874,6 +11981,11 @@ def _execute_capability_if_authorized(
         )
     elif runtime_kind == "controlled_self_evolution_propose_only":
         txt = txt or "Execute um ciclo de autoevolução controlada em modo propose_only usando a última auditoria premium."
+    elif runtime_kind == "pwa_console_repair":
+        txt = _canonicalize_pwa_console_repair_runtime_message(
+            txt,
+            requested_specialists=requested_specialists,
+        )
     elif runtime_kind == "platform_audit" and bool(runtime_operation.get("force_dispatch")):
         txt = _canonicalize_platform_audit_runtime_message(
             txt,
