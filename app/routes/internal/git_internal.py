@@ -128,6 +128,8 @@ def get_runtime_config(_admin=Depends(_require_master_admin_access)) -> Dict[str
         "backend_repo": _env("GITHUB_REPO", "") or None,
         "frontend_repo": _repo_web() or None,
         "branch": _env("GITHUB_BRANCH", "main") or "main",
+        "runtime_branch": _env("GITHUB_RUNTIME_BRANCH", "selfheal/runtime-bridge") or "selfheal/runtime-bridge",
+        "branch_allowlist": branch_allowlist(),
         "default_base_branch": _env("GITHUB_DEFAULT_BASE_BRANCH", _env("GITHUB_BRANCH", "main")) or "main",
         "token_present": bool(ctx.get("token_present")),
         "write_enabled": _write_enabled(),
