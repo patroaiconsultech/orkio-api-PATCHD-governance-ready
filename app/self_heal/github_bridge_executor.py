@@ -21,7 +21,13 @@ class GitHubBridgeExecutor:
         runtime = github_runtime_context()
         self.backend_repo = runtime.get("github_repo")
         self.frontend_repo = runtime.get("github_repo_web")
-        self.branch = "selfheal/runtime-bridge"
+        self.branch = (
+            os.getenv("GITHUB_RUNTIME_BRANCH", "selfheal/runtime-bridge")
+            .strip()
+            .strip('"')
+            .strip("\'")
+            or "selfheal/runtime-bridge"
+        )
         self.enabled = bool(os.getenv("ENABLE_GOVERNED_RUNTIME_BRIDGE", "").strip().lower() in {"1", "true", "yes", "on"})
 
     def execute(self, capability_name: str):
