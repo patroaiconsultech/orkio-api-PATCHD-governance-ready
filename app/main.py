@@ -12047,17 +12047,13 @@ def _execute_capability_if_authorized(
     if not txt:
         return None
 
-    intent_package = ((runtime_enrichment or {}).get("intent_package") or {})
-    runtime_operation = intent_package.get("runtime_operation") if isinstance(intent_package.get("runtime_operation"), dict) else {}
-    runtime_kind = str(runtime_operation.get("kind") or "").strip().lower()
+    runtime_kind = (
+        ((runtime_enrichment or {}).get("intent_package") or {})
+        .get("runtime_operation", {})
+        .get("kind", "")
+    )
     planner_snapshot = (runtime_enrichment or {}).get("planner_snapshot") or {}
-    required_capability = str(planner_snapshot.get("requires_capability") or "").strip().lower()
-    capability_name = str(
-        runtime_operation.get("capability_name")
-        or intent_package.get("capability_name")
-        or required_capability
-        or ""
-    ).strip().lower()
+    required_capability = str(planner_snapshot.get("requires_capability") or "").strip()
 
     def _runtime_error_payload(
         message: str,
@@ -12102,15 +12098,9 @@ def _execute_capability_if_authorized(
             "required_capability": required_capability,
         }
 
-    readonly_runtime_capabilities = {
-        "squad_resolve_readonly",
-        "squad_resolution_trace_readonly",
-    }
-
     allow_runtime_execution = (
         runtime_kind.startswith("github_runtime_")
         or required_capability.startswith("github_")
-        or capability_name.startswith("github_")
         or runtime_kind in {
             "platform_audit",
             "premium_platform_audit",
@@ -12132,11 +12122,12 @@ def _execute_capability_if_authorized(
             "squad_resolve_readonly",
             "squad_resolution_trace_readonly",
         }
-        or capability_name in readonly_runtime_capabilities
     )
     if not allow_runtime_execution:
         return None
 
+    intent_package = ((runtime_enrichment or {}).get("intent_package") or {})
+    runtime_operation = intent_package.get("runtime_operation") if isinstance(intent_package.get("runtime_operation"), dict) else {}
     requested_specialists = runtime_operation.get("requested_specialists") if isinstance(runtime_operation.get("requested_specialists"), list) else None
     if runtime_kind == "platform_audit" and bool(runtime_operation.get("sticky_dispatch_followup")):
         txt = _canonicalize_platform_audit_followup_message(
@@ -13409,26 +13400,6 @@ def chat(
 
     # PATCH27_12AJ — execution-first collapse for sync chat
     should_execute_runtime = _should_execute_runtime_from_enrichment(runtime_enrichment)
-    if not should_execute_runtime and isinstance(runtime_enrichment, dict):
-        try:
-            intent_package_live = runtime_enrichment.get("intent_package") if isinstance(runtime_enrichment.get("intent_package"), dict) else {}
-            runtime_operation_live = intent_package_live.get("runtime_operation") if isinstance(intent_package_live.get("runtime_operation"), dict) else {}
-            capability_name_live = str(
-                runtime_operation_live.get("capability_name")
-                or intent_package_live.get("capability_name")
-                or ""
-            ).strip().lower()
-            if capability_name_live in {
-                "squad_resolve_readonly",
-                "squad_resolution_trace_readonly",
-                "platform_self_audit",
-                "runtime_scan",
-                "github_repo_read",
-                "github_repo_write",
-            }:
-                should_execute_runtime = True
-        except Exception:
-            pass
     runtime_primary_agent = None
     if should_execute_runtime:
         try:
