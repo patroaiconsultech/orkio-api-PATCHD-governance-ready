@@ -8783,6 +8783,90 @@ def _is_governance_capability_question_request(user_text: str) -> bool:
     return bool(asks_question and asks_write_domain and asks_governance)
 
 
+_TEAM_ROSTER_SPECIALISTS = ["orion", "auditor", "cto", "ux_frontend"]
+
+
+def _is_team_roster_question_request(user_text: str) -> bool:
+    """
+    EFATA 777 — resposta determinística para perguntas de roster/time.
+    Evita que perguntas simples sobre especialistas caiam em platform_self_audit
+    ou runtime dispatch.
+    """
+    raw = str(user_text or "")
+    txt = raw.strip().lower()
+    if not txt:
+        return False
+
+    has_question_shape = ("?" in raw) or any(term in txt for term in [
+        "quantos",
+        "quantas",
+        "quem",
+        "quais",
+        "liste",
+        "lista",
+        "mostre",
+        "me diga",
+        "informe",
+    ])
+    has_roster_subject = any(term in txt for term in [
+        "especialistas",
+        "especialista",
+        "agentes",
+        "agente",
+        "time",
+        "equipe",
+        "squad padrão",
+        "squad padrao",
+        "squad operacional",
+        "squad",
+    ])
+    has_roster_intent = any(term in txt for term in [
+        "quantos especialistas",
+        "quantas especialistas",
+        "quantos agentes",
+        "quem está no time",
+        "quem esta no time",
+        "quem temos no time",
+        "quais especialistas",
+        "quais agentes",
+        "lista de especialistas",
+        "liste os especialistas",
+        "liste agentes",
+        "qual é o time",
+        "qual e o time",
+        "qual squad",
+        "squad padrão",
+        "squad padrao",
+    ])
+    execution_terms = [
+        "resolva",
+        "resolver",
+        "dispatch",
+        "execute",
+        "executar",
+        "auditoria",
+        "auditar",
+        "war room",
+        "trace",
+        "patch",
+        "pr",
+        "pull request",
+        "branch",
+        "commit",
+    ]
+    if any(term in txt for term in execution_terms):
+        return False
+
+    return bool(has_roster_subject and (has_roster_intent or has_question_shape or "@orion" in txt or "orion" in txt))
+
+
+def _build_team_roster_answer_text(user_text: str = "") -> str:
+    specialists = list(_TEAM_ROSTER_SPECIALISTS)
+    return "\n".join([
+        f"Temos {len(specialists)} especialistas no squad operacional padrão:",
+        *[f"- {name}" for name in specialists],
+    ])
+
 def _build_governance_capability_answer_text(
     user_text: str,
     *,
@@ -12237,7 +12321,7 @@ def _execute_capability_if_authorized(
     runtime_operation = intent_package.get("runtime_operation") if isinstance(intent_package.get("runtime_operation"), dict) else {}
     runtime_kind = str(runtime_operation.get("kind") or "").strip().lower()
     intent_name = str(intent_package.get("intent") or "").strip().lower()
-    if intent_name in {"analytical_final_readonly", "governance_capability_answer"}:
+    if intent_name in {"analytical_final_readonly", "governance_capability_answer", "team_roster_answer"}:
         return None
     planner_snapshot = (runtime_enrichment or {}).get("planner_snapshot") or {}
     required_capability = str(planner_snapshot.get("requires_capability") or "").strip().lower()
@@ -13835,7 +13919,9 @@ def chat(
         if blocked_reply is None:
             try:
                 intent_name_live_sync = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
-                if intent_name_live_sync == "governance_capability_answer" or _is_governance_capability_question_request(inp.message):
+                if intent_name_live_sync == "team_roster_answer" or _is_team_roster_question_request(inp.message):
+                    capability_inventory_answer = _build_team_roster_answer_text(inp.message)
+                elif intent_name_live_sync == "governance_capability_answer" or _is_governance_capability_question_request(inp.message):
                     capability_inventory_answer = _build_governance_capability_answer_text(
                         inp.message,
                         db=db,
@@ -18216,7 +18302,9 @@ async def chat_stream(
                 if blocked_reply is None:
                     try:
                         intent_name_live_stream = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
-                        if intent_name_live_stream == "governance_capability_answer" or _is_governance_capability_question_request(message):
+                        if intent_name_live_stream == "team_roster_answer" or _is_team_roster_question_request(message):
+                            capability_inventory_answer = _build_team_roster_answer_text(message)
+                        elif intent_name_live_stream == "governance_capability_answer" or _is_governance_capability_question_request(message):
                             capability_inventory_answer = _build_governance_capability_answer_text(
                                 message,
                                 db=db,
