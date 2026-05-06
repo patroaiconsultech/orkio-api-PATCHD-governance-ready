@@ -6,13 +6,8 @@ from __future__ import annotations
 from typing import Any, Dict, List, Optional
 
 
-CAPABILITY_EXECUTION_BINDINGS = {
-    # Governed / informational runtime
+CAPABILITY_METADATA = {
     "governance_capability_answer": {
-        "executor": "orion_internal.governance_capability_answer",
-        "mode": "runtime",
-        "allowed_agents": ["orkio", "orion"],
-        "write": False,
         "purpose": "responder pergunta de governança/capacidade sem executar ações",
         "risk_level": "low",
         "requires_authorization": False,
@@ -20,10 +15,6 @@ CAPABILITY_EXECUTION_BINDINGS = {
         "governed": True,
     },
     "safe_evolution_control": {
-        "executor": "orion_internal.governance_capability_answer",
-        "mode": "runtime",
-        "allowed_agents": ["orkio", "orion"],
-        "write": False,
         "purpose": "explicar limites e regras de evolução governada",
         "risk_level": "low",
         "requires_authorization": False,
@@ -31,10 +22,6 @@ CAPABILITY_EXECUTION_BINDINGS = {
         "governed": True,
     },
     "db_schema_read": {
-        "executor": "orion_internal.platform_self_audit",
-        "mode": "runtime",
-        "allowed_agents": ["orkio", "orion", "auditor"],
-        "write": False,
         "purpose": "inspecionar schema e derivações de banco em modo leitura",
         "risk_level": "low",
         "requires_authorization": False,
@@ -42,10 +29,6 @@ CAPABILITY_EXECUTION_BINDINGS = {
         "governed": True,
     },
     "governed_patch_execution": {
-        "executor": "orion_internal.github_execute",
-        "mode": "runtime",
-        "allowed_agents": ["orion"],
-        "write": True,
         "purpose": "executar patch governado após autorização explícita",
         "risk_level": "medium",
         "requires_authorization": True,
@@ -53,17 +36,15 @@ CAPABILITY_EXECUTION_BINDINGS = {
         "governed": True,
     },
     "db_schema_fix_governed": {
-        "executor": "orion_internal.github_execute",
-        "mode": "runtime",
-        "allowed_agents": ["orion"],
-        "write": True,
         "purpose": "corrigir schema em fluxo governado",
         "risk_level": "medium",
         "requires_authorization": True,
         "allowed_targets": ["backend", "platform"],
         "governed": True,
     },
+}
 
+CAPABILITY_EXECUTION_BINDINGS = {
     # GitHub runtime
     "github_repo_read": {
         "executor": "orion_internal.github_execute",
@@ -102,6 +83,38 @@ CAPABILITY_EXECUTION_BINDINGS = {
         "write": False,
     },
     "github_pr_prepare": {
+        "executor": "orion_internal.github_execute",
+        "mode": "runtime",
+        "allowed_agents": ["orion"],
+        "write": True,
+    },
+
+
+    "governance_capability_answer": {
+        "executor": "orion_internal.governance_capability_answer",
+        "mode": "runtime",
+        "allowed_agents": ["orkio", "orion"],
+        "write": False,
+    },
+    "governed_patch_execution": {
+        "executor": "orion_internal.github_execute",
+        "mode": "runtime",
+        "allowed_agents": ["orion"],
+        "write": True,
+    },
+    "safe_evolution_control": {
+        "executor": "orion_internal.governance_capability_answer",
+        "mode": "runtime",
+        "allowed_agents": ["orkio", "orion"],
+        "write": False,
+    },
+    "db_schema_read": {
+        "executor": "orion_internal.platform_self_audit",
+        "mode": "runtime",
+        "allowed_agents": ["orkio", "orion", "auditor"],
+        "write": False,
+    },
+    "db_schema_fix_governed": {
         "executor": "orion_internal.github_execute",
         "mode": "runtime",
         "allowed_agents": ["orion"],
@@ -281,6 +294,7 @@ CAPABILITY_REGISTRY = {
             "safe_evolution_control",
             "db_schema_read",
             "db_schema_fix_governed",
+            "safe_evolution_control",
             "squad_agents_list",
             "platform_self_audit",
             "platform_improvement_review",
@@ -530,8 +544,20 @@ def get_capability_registry() -> Dict[str, Any]:
     return CAPABILITY_REGISTRY.copy()
 
 
+def get_capability_metadata(capability: str) -> Dict[str, Any]:
+    return dict(CAPABILITY_METADATA.get(capability) or {})
+
+
 def get_capability_executor(capability: str) -> Optional[Dict[str, Any]]:
-    return CAPABILITY_EXECUTION_BINDINGS.get(capability)
+    binding = CAPABILITY_EXECUTION_BINDINGS.get(capability)
+    metadata = CAPABILITY_METADATA.get(capability) or {}
+    if not binding and not metadata:
+        return None
+    merged: Dict[str, Any] = {}
+    merged.update(metadata)
+    if binding:
+        merged.update(binding)
+    return merged
 
 
 def get_capability_allowed_agents(capability: str) -> List[str]:
