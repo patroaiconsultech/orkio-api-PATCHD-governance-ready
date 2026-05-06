@@ -38,7 +38,7 @@ from .summit_config import get_summit_runtime_config, normalize_language_profile
 from .summit_prompt import build_summit_instructions
 from .summit_metrics import assess_realtime_session, merge_human_review
 from .runtime import get_capability_registry, build_intent_package, build_first_win_plan, build_continuity_hints, build_arcangelic_chain, build_system_overlay, build_runtime_hints, build_trial_hints, build_planner_snapshot, score_memory_candidate, build_memory_snapshot, build_trial_analytics, build_dag_execution_snapshot
-from .runtime.capability_registry import get_team_roster, get_full_agent_roster, get_agent_roster, format_team_roster_answer, is_team_roster_question_text, is_presence_status_question_text
+from .runtime.capability_registry import get_team_roster, get_full_agent_roster, get_agent_roster, format_team_roster_answer, is_team_roster_question_text, is_presence_status_question_text, is_war_room_readonly_architecture_plan_text, is_readonly_implementation_plan_text
 from .numerology.schemas import NumerologyProfileIn, NumerologyProfileOut
 from .numerology.engine import generate_numerology_profile
 from .routes.user import router as user_router
@@ -8847,6 +8847,619 @@ def _build_presence_status_answer_text(user_text: str = "") -> str:
     ])
 
 
+
+
+
+
+
+# EFATA777_RUNTIME_RECEIPTS_READONLY_SEMANTIC_HARDENING_PATCH
+# Evolui os helpers passivos de receipts/read-only com campos semânticos de policy/constraints.
+# Base: EFATA777_RUNTIME_RECEIPTS_READONLY_HELPERS_PATCH.
+# Helpers passivos para receipts/read-only. Não persistem em banco, não alteram resposta visível
+# e não acionam runtime/capability/dispatch. O objetivo é emitir uma trilha estruturada mínima
+# em log para auditoria transacional do request.
+_READONLY_RECEIPT_INTENTS = {
+    "presence_status_answer",
+    "team_roster_answer",
+    "governance_capability_answer",
+    "analytical_final_readonly",
+    "war_room_readonly_architecture_plan",
+    "readonly_implementation_plan",
+    "squad_resolve_readonly",
+    "squad_resolution_trace_readonly",
+}
+
+
+def _runtime_receipt_clean(value: Any, default: str = "") -> str:
+    try:
+        text = str(value or "").strip()
+    except Exception:
+        text = ""
+    return text or default
+
+
+def _runtime_readonly_receipt_intent(
+    user_text: str,
+    *,
+    runtime_enrichment: Optional[Dict[str, Any]] = None,
+    execution_result: Optional[Dict[str, Any]] = None,
+    fallback_intent: str = "",
+) -> str:
+    """Resolve o intent read-only elegível a receipts sem executar nada."""
+    intent_package = runtime_enrichment.get("intent_package") if isinstance(runtime_enrichment, dict) else {}
+    if not isinstance(intent_package, dict):
+        intent_package = {}
+    runtime_operation = intent_package.get("runtime_operation") if isinstance(intent_package.get("runtime_operation"), dict) else {}
+    if not isinstance(runtime_operation, dict):
+        runtime_operation = {}
+
+    candidates = [
+        fallback_intent,
+        intent_package.get("intent"),
+        runtime_operation.get("capability_name"),
+        intent_package.get("capability_name"),
+    ]
+    if isinstance(execution_result, dict):
+        candidates.extend([
+            execution_result.get("intent"),
+            execution_result.get("capability_name"),
+            execution_result.get("capability"),
+            execution_result.get("event"),
+        ])
+
+    for candidate in candidates:
+        key = _runtime_receipt_clean(candidate).lower()
+        if key in _READONLY_RECEIPT_INTENTS:
+            return key
+
+    text = user_text or ""
+    try:
+        if is_presence_status_question_text(text):
+            return "presence_status_answer"
+        if is_team_roster_question_text(text):
+            return "team_roster_answer"
+        if is_war_room_readonly_architecture_plan_text(text):
+            return "war_room_readonly_architecture_plan"
+        if is_readonly_implementation_plan_text(text):
+            return "readonly_implementation_plan"
+    except Exception:
+        pass
+    return ""
+
+
+
+def _runtime_receipt_extract_field(payload: Optional[Dict[str, Any]], *keys: str) -> Any:
+    """Busca rasa/semirrecursiva em dicts conhecidos sem levantar exceção."""
+    if not isinstance(payload, dict):
+        return None
+    for key in keys:
+        if key in payload:
+            return payload.get(key)
+    for nested_key in ("result", "data", "payload", "trace", "details", "resolution"):
+        nested = payload.get(nested_key)
+        if isinstance(nested, dict):
+            for key in keys:
+                if key in nested:
+                    return nested.get(key)
+    return None
+
+
+def _runtime_receipt_list(value: Any) -> List[str]:
+    try:
+        if value is None:
+            return []
+        if isinstance(value, (list, tuple, set)):
+            return [_runtime_receipt_clean(item) for item in value if _runtime_receipt_clean(item)]
+        text = _runtime_receipt_clean(value)
+        if not text:
+            return []
+        if "," in text:
+            return [_runtime_receipt_clean(part) for part in text.split(",") if _runtime_receipt_clean(part)]
+        return [text]
+    except Exception:
+        return []
+
+
+def _runtime_readonly_policy_fields(
+    intent: str,
+    *,
+    execution_result: Optional[Dict[str, Any]] = None,
+    dispatch_executed: bool = False,
+) -> Dict[str, Any]:
+    """
+    Enriquecimento semântico dos receipts read-only.
+    Mantém governance_decision=read_only_allowed como decisão de autorização consultiva,
+    mas separa o resultado semântico/político da resolução em campos próprios.
+    """
+    compliance_status = ""
+    abort_reason = ""
+    missing_specialists: List[str] = []
+    if isinstance(execution_result, dict):
+        compliance_status = _runtime_receipt_clean(
+            _runtime_receipt_extract_field(execution_result, "compliance_status", "status")
+        )
+        abort_reason = _runtime_receipt_clean(
+            _runtime_receipt_extract_field(execution_result, "abort_reason", "reason", "error")
+        )
+        missing_specialists = _runtime_receipt_list(
+            _runtime_receipt_extract_field(execution_result, "missing_specialists", "missing")
+        )
+
+    status_norm = compliance_status.lower()
+    abort_norm = abort_reason.lower()
+    squad_intent = intent in {"squad_resolve_readonly", "squad_resolution_trace_readonly"}
+
+    explicit_success_false = False
+    explicit_blocked_true = False
+    explicit_error_present = False
+    if isinstance(execution_result, dict):
+        for bool_key in ("success", "ok", "passed"):
+            if bool_key in execution_result and execution_result.get(bool_key) is False:
+                explicit_success_false = True
+        for bool_fail_key in ("blocked", "constraint_violation"):
+            if bool_fail_key in execution_result and execution_result.get(bool_fail_key) is True:
+                explicit_blocked_true = True
+        for nested_key in ("result", "data", "payload", "trace", "details", "resolution"):
+            nested = execution_result.get(nested_key)
+            if isinstance(nested, dict):
+                for bool_key in ("success", "ok", "passed"):
+                    if bool_key in nested and nested.get(bool_key) is False:
+                        explicit_success_false = True
+                for bool_fail_key in ("blocked", "constraint_violation"):
+                    if bool_fail_key in nested and nested.get(bool_fail_key) is True:
+                        explicit_blocked_true = True
+        explicit_error_present = bool(
+            _runtime_receipt_extract_field(execution_result, "error", "exception", "error_code")
+        )
+
+    failed_status = (
+        status_norm.startswith("failed")
+        or status_norm in {"fail", "failure", "error", "erro", "blocked", "constraint_violation"}
+    )
+    constraint_failed = (
+        bool(missing_specialists)
+        or failed_status
+        or explicit_success_false
+        or explicit_blocked_true
+        or explicit_error_present
+        or "missing required" in abort_norm
+        or "constraint" in abort_norm and "failed" in abort_norm
+    )
+    if squad_intent:
+        if constraint_failed:
+            constraint_status = "failed"
+        elif status_norm in {"passed", "ok", "success"}:
+            constraint_status = "passed"
+        elif isinstance(execution_result, dict) and not (explicit_success_false or explicit_blocked_true or explicit_error_present or abort_reason):
+            # Compatibilidade com payloads legados de squad que retornam apenas o objeto resolvido.
+            constraint_status = "passed"
+        else:
+            constraint_status = "unknown"
+    else:
+        constraint_status = "not_applicable"
+
+    if dispatch_executed:
+        policy_outcome = "read_only_dispatch_observed"
+    elif constraint_failed:
+        policy_outcome = "read_only_constraints_failed"
+    else:
+        policy_outcome = "read_only_allowed"
+
+    if not compliance_status:
+        compliance_status = "not_applicable" if not squad_intent else "unknown"
+
+    return {
+        "policy_outcome": policy_outcome,
+        "constraint_status": constraint_status,
+        "compliance_status": compliance_status,
+        "missing_specialists": missing_specialists,
+        "missing_specialists_count": len(missing_specialists),
+        "abort_reason": abort_reason or None,
+        "abort_reason_present": bool(abort_reason),
+    }
+
+
+def _build_runtime_readonly_receipts(
+    *,
+    trace_id: Optional[str],
+    message_id: Optional[str],
+    thread_id: Optional[str],
+    org: Optional[str],
+    user_id: Optional[str],
+    visible_agent: Optional[str],
+    signer: Optional[str],
+    user_text: str,
+    runtime_enrichment: Optional[Dict[str, Any]] = None,
+    execution_result: Optional[Dict[str, Any]] = None,
+    fallback_intent: str = "",
+    source: str = "chat",
+    receipt_phase: str = "final_after_persistence",
+) -> Dict[str, Any]:
+    intent = _runtime_readonly_receipt_intent(
+        user_text,
+        runtime_enrichment=runtime_enrichment,
+        execution_result=execution_result,
+        fallback_intent=fallback_intent,
+    )
+    if not intent:
+        return {}
+
+    intent_package = runtime_enrichment.get("intent_package") if isinstance(runtime_enrichment, dict) else {}
+    if not isinstance(intent_package, dict):
+        intent_package = {}
+
+    capability_name = _runtime_receipt_clean(intent_package.get("capability_name"))
+    if isinstance(execution_result, dict):
+        capability_name = _runtime_receipt_clean(
+            execution_result.get("capability_name")
+            or execution_result.get("capability")
+            or capability_name
+        )
+
+    dispatch_executed = False
+    if isinstance(execution_result, dict):
+        try:
+            dispatch_executed = bool(execution_result.get("dispatch_executed"))
+        except Exception:
+            dispatch_executed = False
+
+    execution_mode = "read_only"
+    if intent in {"presence_status_answer", "team_roster_answer"}:
+        execution_mode = "deterministic_readonly"
+    elif intent in {"analytical_final_readonly", "war_room_readonly_architecture_plan", "readonly_implementation_plan"}:
+        execution_mode = "consultive_readonly"
+    elif intent in {"squad_resolve_readonly", "squad_resolution_trace_readonly"}:
+        execution_mode = "squad_resolution_readonly"
+
+    policy_fields = _runtime_readonly_policy_fields(
+        intent,
+        execution_result=execution_result,
+        dispatch_executed=dispatch_executed,
+    )
+    readonly_capability_resolved = intent in {"squad_resolve_readonly", "squad_resolution_trace_readonly"}
+
+    ts = int(time.time())
+    schema_version = "efata777.runtime_receipts.v1.1"
+    base = {
+        "schema_version": schema_version,
+        "trace_id": _runtime_receipt_clean(trace_id),
+        "message_id": _runtime_receipt_clean(message_id),
+        "thread_id": _runtime_receipt_clean(thread_id),
+        "org": _runtime_receipt_clean(org),
+        "user_id": _runtime_receipt_clean(user_id),
+        "created_at": ts,
+        "source": _runtime_receipt_clean(source, "chat"),
+        "receipt_phase": _runtime_receipt_clean(receipt_phase, "final_after_persistence"),
+    }
+
+    return {
+        "orchestration_receipt": {
+            **base,
+            "orchestrator": "orkio",
+            "visible_agent": _runtime_receipt_clean(visible_agent, "Orion"),
+            "request_class": "read_only_deterministic_or_consultive",
+        },
+        "intent_receipt": {
+            **base,
+            "intent": intent,
+            "capability_name": capability_name or None,
+            "requires_runtime_execution": False,
+            "execution_mode": execution_mode,
+        },
+        "governance_receipt": {
+            **base,
+            "governance_decision": "read_only_allowed",
+            "policy_outcome": policy_fields.get("policy_outcome"),
+            "constraint_status": policy_fields.get("constraint_status"),
+            "compliance_status": policy_fields.get("compliance_status"),
+            "missing_specialists_count": policy_fields.get("missing_specialists_count"),
+            "missing_specialists": policy_fields.get("missing_specialists"),
+            "abort_reason": policy_fields.get("abort_reason"),
+            "abort_reason_present": policy_fields.get("abort_reason_present"),
+            "requires_human_authorization": False,
+            "requires_write_approval": False,
+            "dispatch_executed": dispatch_executed,
+            "write_dispatched": False,
+        },
+        "execution_receipt": {
+            **base,
+            "executor": "none" if not dispatch_executed else _runtime_receipt_clean(visible_agent, "Orion"),
+            "runtime_executed": False,
+            "capability_executed": False,
+            "readonly_capability_resolved": readonly_capability_resolved,
+            "operational_capability_executed": False,
+            "dispatch_executed": dispatch_executed,
+        },
+        "audit_receipt": {
+            **base,
+            "auditor": "runtime_readonly_guard",
+            "audit_mode": "passive_receipt_log",
+            "baseline": "EFATA777_ORION_TEAM_READY",
+        },
+        "consolidation_receipt": {
+            **base,
+            "consolidator": _runtime_receipt_clean(visible_agent, "Orion"),
+            "response_profile": "final_readonly_or_deterministic",
+        },
+        "signer_receipt": {
+            **base,
+            "signer": _runtime_receipt_clean(signer or visible_agent, "Orion"),
+            "visible_signature": _runtime_receipt_clean(visible_agent, "Orion"),
+        },
+    }
+
+
+def _emit_runtime_readonly_receipts(
+    *,
+    trace_id: Optional[str],
+    message_id: Optional[str],
+    thread_id: Optional[str],
+    org: Optional[str],
+    user_id: Optional[str],
+    visible_agent: Optional[str],
+    signer: Optional[str],
+    user_text: str,
+    runtime_enrichment: Optional[Dict[str, Any]] = None,
+    execution_result: Optional[Dict[str, Any]] = None,
+    fallback_intent: str = "",
+    source: str = "chat",
+    receipt_phase: str = "final_after_persistence",
+) -> Dict[str, Any]:
+    """Emite um evento de log estruturado compacto e retorna receipts em memória."""
+    receipts = _build_runtime_readonly_receipts(
+        trace_id=trace_id,
+        message_id=message_id,
+        thread_id=thread_id,
+        org=org,
+        user_id=user_id,
+        visible_agent=visible_agent,
+        signer=signer,
+        user_text=user_text,
+        runtime_enrichment=runtime_enrichment,
+        execution_result=execution_result,
+        fallback_intent=fallback_intent,
+        source=source,
+        receipt_phase=receipt_phase,
+    )
+    if not receipts:
+        return {}
+
+    try:
+        intent_receipt = receipts.get("intent_receipt") or {}
+        governance_receipt = receipts.get("governance_receipt") or {}
+        execution_receipt = receipts.get("execution_receipt") or {}
+        summary = {
+            "schema_version": intent_receipt.get("schema_version"),
+            "trace_id": intent_receipt.get("trace_id"),
+            "thread_id": intent_receipt.get("thread_id"),
+            "message_id": intent_receipt.get("message_id"),
+            "intent": intent_receipt.get("intent"),
+            "capability_name": intent_receipt.get("capability_name"),
+            "execution_mode": intent_receipt.get("execution_mode"),
+            "dispatch_executed": governance_receipt.get("dispatch_executed"),
+            "governance_decision": governance_receipt.get("governance_decision"),
+            "policy_outcome": governance_receipt.get("policy_outcome"),
+            "constraint_status": governance_receipt.get("constraint_status"),
+            "compliance_status": governance_receipt.get("compliance_status"),
+            "missing_specialists_count": governance_receipt.get("missing_specialists_count"),
+            "readonly_capability_resolved": execution_receipt.get("readonly_capability_resolved"),
+            "operational_capability_executed": execution_receipt.get("operational_capability_executed"),
+            "receipt_phase": intent_receipt.get("receipt_phase"),
+            "visible_agent": (receipts.get("orchestration_receipt") or {}).get("visible_agent"),
+            "signer": (receipts.get("signer_receipt") or {}).get("signer"),
+            "receipt_types": list(receipts.keys()),
+        }
+        logger.info("RUNTIME_READONLY_RECEIPTS %s", json.dumps(summary, ensure_ascii=False, sort_keys=True))
+    except Exception:
+        try:
+            logger.exception("RUNTIME_READONLY_RECEIPTS_LOG_FAILED")
+        except Exception:
+            pass
+    return receipts
+
+
+
+def _is_readonly_implementation_plan_request(user_text: str) -> bool:
+    """
+    EFATA777_READONLY_IMPLEMENTATION_PLAN_INTENT_PATCH:
+    Plano técnico de implementação/patch em modo read-only.
+    Não deve acionar self-audit, runtime, capability ou governança de escrita.
+    """
+    return bool(is_readonly_implementation_plan_text(user_text))
+
+
+def _build_readonly_implementation_plan_text(user_text: str = "") -> str:
+    return "\n".join([
+        "1. ARQUIVOS A AJUSTAR",
+        "- app/runtime/capability_registry.py: adicionar helpers/detectores declarativos e constantes internas de receipts read-only, se necessário.",
+        "- app/runtime/intent_engine.py: garantir intent read-only para requests determinísticos e anexar metadados de decisão sem executar runtime.",
+        "- app/main.py: integrar helpers de receipts nos pontos determinísticos, sem alterar contratos de /api/chat e /api/chat/stream.",
+        "- app/routes/internal/orion_internal.py: manter proteção read-only para rotas internas que possam receber o mesmo intent.",
+        "- Nenhuma migration, nenhuma alteração de banco, nenhuma alteração em AppConsole, auth/session, approval/write governance ou realtime.",
+        "",
+        "2. FUNÇÕES NOVAS",
+        "- build_runtime_receipt_base(trace_id, message_id, thread_id, visible_agent): cria envelope comum em memória.",
+        "- build_orchestration_receipt(...): registra quem orquestrou e qual rota lógica foi escolhida.",
+        "- build_intent_receipt(...): registra intent, confidence, detector_source, action_scope e target_scope.",
+        "- build_governance_receipt(...): registra decisão consultiva, write_required=false e dispatch=false.",
+        "- build_execution_receipt(...): registra capability_name, execution_mode e dispatch_executed=false para respostas determinísticas.",
+        "- build_consolidation_receipt(...): registra modo de consolidação e signer visível.",
+        "- build_signer_receipt(...): registra agente visível que assina a resposta final.",
+        "- emit_runtime_decision_log(...): gera log estruturado sem alterar resposta visível.",
+        "",
+        "3. PONTOS DE INTEGRAÇÃO",
+        "- Presença/status: anexar receipts internos com execution_mode=presence_status_answer.",
+        "- Roster/time: anexar receipts internos com execution_mode=team_roster_answer.",
+        "- Analytical final read-only: anexar receipts internos com execution_mode=analytical_final_readonly.",
+        "- War room architecture plan: anexar receipts internos com execution_mode=war_room_readonly_architecture_plan.",
+        "- Squad resolve read-only: anexar receipts internos com dispatch_executed=false.",
+        "- Todos os pontos devem ser passivos: registrar decisão sem mudar roteamento, sem executar capability e sem persistir no banco.",
+        "",
+        "4. RISCOS",
+        "- P0: alterar fluxo de /api/chat/stream ou auth/session por engano. Mitigação: não tocar nesses contratos.",
+        "- P1: receipts mudarem resposta visível do usuário. Mitigação: receipts ficam em memória/log, não no texto final.",
+        "- P1: regressão em squad_resolve_readonly. Mitigação: testes com backend_engineer e dispatch_executed=false.",
+        "- P2: excesso de logs. Mitigação: logar um evento compacto por request determinística.",
+        "- P2: confundir consulta com execução. Mitigação: governance_receipt deve marcar consultation/read_only/dispatch=false.",
+        "",
+        "5. CRITÉRIOS DE ACEITE",
+        "- Nenhum endpoint muda contrato público.",
+        "- /api/chat/stream segue retornando 200 em smoke test.",
+        "- presence_status_answer continua sem runtime/capability.",
+        "- team_roster_answer continua listando o time do Orion.",
+        "- analytical_final_readonly continua em linguagem natural, sem self-audit.",
+        "- squad_resolve_readonly com backend_engineer continua passed e dispatch_executed=false.",
+        "- logs estruturados exibem trace_id, intent, execution_mode, dispatch_executed=false e governance_decision.",
+        "- Não aparece authorization_required, PLATFORM_SELF_AUDIT_READY, capability_name/template_id visível indevido, GitHub, branch, PR ou patch aplicado.",
+        "",
+        "6. TESTES PÓS-DEPLOY",
+        "- @Orion você está online?",
+        "- @Orion quem está no time do Orion?",
+        "- @Orion resolva exatamente este squad: orion, auditor, cto, backend_engineer. Modo read-only. Não execute dispatch.",
+        "- @Orion Modo read-only absoluto. Faça uma análise técnica final. Não resolva squad. Entregue apenas a análise final.",
+        "- @Orion Produza apenas o plano técnico final do patch EFATA777_RUNTIME_RECEIPTS_READONLY_HELPERS_PATCH, sem executar, sem GitHub e sem aplicar patch.",
+        "- Verificar logs por: trace_id, intent, execution_mode, dispatch_executed=false, governance_decision.",
+        "",
+        "7. RECOMENDAÇÃO FINAL",
+        "- Implementar primeiro helpers em memória e logs estruturados.",
+        "- Não persistir receipts ainda.",
+        "- Não criar migration.",
+        "- Só avançar para persistência por mensagem depois que os receipts passivos forem validados em produção controlada.",
+    ])
+
+
+def _is_war_room_readonly_architecture_plan_request(user_text: str) -> bool:
+    """
+    EFATA777_WAR_ROOM_READONLY_PLAN_INTENT_PATCH:
+    Plano técnico read-only para receipts/lineage/accountability.
+    Não deve acionar self-audit, runtime, capability ou governança de escrita.
+    """
+    return bool(is_war_room_readonly_architecture_plan_text(user_text))
+
+
+def _build_war_room_readonly_architecture_plan_text(user_text: str = "") -> str:
+    return "\n".join([
+        "1. SUMÁRIO EXECUTIVO",
+        "- objetivo da camada: criar rastreabilidade transacional por request/mensagem para provar quem orquestrou, quem decidiu o intent, quem executou, quem auditou, quem consolidou e quem assinou a resposta final.",
+        "- valor para governança: separar consulta read-only de execução operacional, reduzir ambiguidade entre persona visível e executor real, e permitir auditoria sem depender de logs brutos.",
+        "- risco geral: médio se persistência for introduzida cedo demais; baixo se o rollout começar por helpers e receipts em memória.",
+        "- prioridade: P1, sem tocar no baseline EFATÀ 777 — Orion Team Ready.",
+        "",
+        "2. MODELO DE RECEIPTS",
+        "",
+        "orchestration_receipt",
+        "- campos: trace_id, message_id, thread_id, visible_agent, orchestrator, selected_route, created_at.",
+        "- quando criar: no início do processamento de /api/chat e /api/chat/stream.",
+        "- persistência: primeiro em memória/log estruturado; depois em metadados da mensagem.",
+        "- risco: baixo, desde que não altere roteamento.",
+        "",
+        "intent_receipt",
+        "- campos: trace_id, intent, confidence, detector_source, action_scope, target_scope, final_readonly_analysis_request.",
+        "- quando criar: logo após build_intent_package().",
+        "- persistência: log estruturado e, em fase posterior, message.metadata.",
+        "- risco: baixo/médio; não deve mudar a decisão de intent, apenas registrar.",
+        "",
+        "execution_receipt",
+        "- campos: trace_id, capability_name, execution_mode, dispatch_executed, executor, runtime_kind, result_status.",
+        "- quando criar: apenas quando houver runtime/capability real ou quando for explicitamente marcado como não executado.",
+        "- persistência: log estruturado; persistência por mensagem só após estabilização.",
+        "- risco: médio se acoplado ao executor; baixo se for wrapper passivo.",
+        "",
+        "audit_receipt",
+        "- campos: trace_id, auditor, audit_mode, findings_count, go_no_go, evidence_refs.",
+        "- quando criar: em auditorias read-only, squads consultivos e validações pós-patch.",
+        "- persistência: log estruturado e artefato de auditoria quando existir.",
+        "- risco: baixo.",
+        "",
+        "governance_receipt",
+        "- campos: trace_id, governance_decision, allowed, authorization_required, write_approval_required, reason.",
+        "- quando criar: após evaluate_governance_action().",
+        "- persistência: log estruturado e futuro campo de auditoria por mensagem.",
+        "- risco: médio; não deve alterar a decisão, só registrar.",
+        "",
+        "consolidation_receipt",
+        "- campos: trace_id, consolidator, source_agents, response_profile, structured_output, final_contract.",
+        "- quando criar: antes de persistir/enviar a resposta final.",
+        "- persistência: message.metadata em fase posterior.",
+        "- risco: baixo.",
+        "",
+        "signer_receipt",
+        "- campos: trace_id, visible_signer, signer_agent_id, signer_voice_id, signer_avatar_url, signer_policy.",
+        "- quando criar: no fechamento da resposta final.",
+        "- persistência: message.metadata.",
+        "- risco: baixo.",
+        "",
+        "3. MODELO DE LINEAGE POR MENSAGEM",
+        "Metadados mínimos sugeridos:",
+        "- trace_id",
+        "- message_id",
+        "- thread_id",
+        "- visible_agent",
+        "- orchestrator",
+        "- executor",
+        "- auditor",
+        "- signer",
+        "- intent",
+        "- capability_name",
+        "- execution_mode",
+        "- dispatch_executed",
+        "- governance_decision",
+        "- created_at",
+        "",
+        "4. ARQUITETURA SUGERIDA",
+        "- app/main.py: criar receipts passivos nos pontos de entrada e saída, sem alterar o fluxo funcional.",
+        "- app/runtime/intent_engine.py: expor intent_receipt derivado do pacote de intent, sem reordenar trilhos estabilizados.",
+        "- app/runtime/capability_registry.py: manter helpers canônicos de detecção e metadados de agentes/capabilities.",
+        "- app/routes/internal/orion_internal.py: registrar receipts de squad/read-only e runtime interno sem liberar dispatch indevido.",
+        "- camada de persistência/mensagens: iniciar com campo metadata JSON se já existir; se não existir, planejar migration separada.",
+        "- logging/observability: emitir eventos JSON com trace_id e severity correta.",
+        "",
+        "5. O QUE NÃO PODE SER MEXIDO",
+        "- auth/session",
+        "- /api/chat/stream",
+        "- analytical_final_readonly",
+        "- squad_resolve_readonly",
+        "- roster",
+        "- AppConsole",
+        "- approval/write governance",
+        "- fallback de 401",
+        "- realtime/STT/TTS/WebRTC",
+        "",
+        "6. ORDEM DOS PATCHES",
+        "Patch 1: modelo e helpers read-only.",
+        "- criar builders de receipts em memória, sem persistência obrigatória.",
+        "",
+        "Patch 2: receipts em runtime consultivo.",
+        "- registrar orchestration_receipt, intent_receipt e governance_receipt em /api/chat e /api/chat/stream.",
+        "",
+        "Patch 3: receipts em squad/read-only.",
+        "- registrar requested_specialists, selected_specialists, missing_specialists, dispatch_executed e signer.",
+        "",
+        "Patch 4: observabilidade/logs.",
+        "- corrigir severity de eventos normais e registrar runtime_capability_inventory/runtime_capability_execution no pricing registry.",
+        "",
+        "Patch 5: persistência por mensagem.",
+        "- persistir lineage no metadata da mensagem ou em tabela própria, com migration isolada e rollback claro.",
+        "",
+        "7. CRITÉRIOS DE ACEITE",
+        "- presença/status continua sem runtime.",
+        "- roster continua determinístico.",
+        "- squad com backend_engineer continua passed e dispatch_executed=false.",
+        "- analytical_final_readonly continua sem PLATFORM_SELF_AUDIT_READY.",
+        "- pedido de plano read-only retorna plano, sem authorization_required.",
+        "- pedido de PR/patch continua exigindo aprovação.",
+        "- logs incluem trace_id, intent, governance_decision e dispatch_executed.",
+        "",
+        "8. RISCOS DE REGRESSÃO",
+        "- crítico: alterar decisão de intent, auth/session ou SSE.",
+        "- alto: persistir metadata com migration sem rollback.",
+        "- médio: acoplar receipts ao executor e gerar falha antes da resposta.",
+        "- baixo: logs adicionais com campos ausentes tratados como nulos.",
+        "",
+        "9. RECOMENDAÇÃO FINAL",
+        "Começar por helpers read-only e logs estruturados em memória. Depois corrigir severity e PRICING_FALLBACK. Só depois persistir receipts por mensagem. O baseline funcional deve permanecer congelado enquanto a camada de accountability amadurece.",
+    ])
+
 def _is_team_roster_question_request(user_text: str) -> bool:
     """
     EFATA777_FINAL_AUDITOR_ADJUSTMENT:
@@ -11856,7 +12469,14 @@ def _should_execute_runtime_from_enrichment(runtime_enrichment: Optional[Dict[st
     if not isinstance(intent_package, dict):
         return False
     intent_name = str(intent_package.get("intent") or "").strip().lower()
-    if intent_name == "analytical_final_readonly":
+    if intent_name in {
+        "analytical_final_readonly",
+        "governance_capability_answer",
+        "team_roster_answer",
+        "presence_status_answer",
+        "war_room_readonly_architecture_plan",
+        "readonly_implementation_plan",
+    }:
         return False
     return bool(intent_package.get("requires_runtime_execution"))
 
@@ -12321,7 +12941,14 @@ def _execute_capability_if_authorized(
     runtime_operation = intent_package.get("runtime_operation") if isinstance(intent_package.get("runtime_operation"), dict) else {}
     runtime_kind = str(runtime_operation.get("kind") or "").strip().lower()
     intent_name = str(intent_package.get("intent") or "").strip().lower()
-    if intent_name in {"analytical_final_readonly", "governance_capability_answer", "team_roster_answer", "presence_status_answer"}:
+    if intent_name in {
+        "analytical_final_readonly",
+        "governance_capability_answer",
+        "team_roster_answer",
+        "presence_status_answer",
+        "war_room_readonly_architecture_plan",
+        "readonly_implementation_plan",
+    }:
         return None
     planner_snapshot = (runtime_enrichment or {}).get("planner_snapshot") or {}
     required_capability = str(planner_snapshot.get("requires_capability") or "").strip().lower()
@@ -13931,6 +14558,10 @@ def chat(
                         thread_id=getattr(inp, "thread_id", None),
                         payload=user,
                     )
+                elif intent_name_live_sync == "readonly_implementation_plan" or _is_readonly_implementation_plan_request(inp.message):
+                    capability_inventory_answer = _build_readonly_implementation_plan_text(inp.message)
+                elif intent_name_live_sync == "war_room_readonly_architecture_plan" or _is_war_room_readonly_architecture_plan_request(inp.message):
+                    capability_inventory_answer = _build_war_room_readonly_architecture_plan_text(inp.message)
                 elif _is_controlled_self_evolution_propose_request_message(inp.message, runtime_enrichment=runtime_enrichment):
                     execution_result = _execute_capability_if_authorized(
                         inp.message,
@@ -14104,6 +14735,23 @@ def chat(
         )
         db.add(m_ass)
         db.commit()
+        try:
+            _emit_runtime_readonly_receipts(
+                trace_id=getattr(inp, "trace_id", None),
+                message_id=getattr(m_ass, "id", None),
+                thread_id=tid,
+                org=org,
+                user_id=uid,
+                visible_agent=final_signer_agent_name,
+                signer=final_signer_agent_name,
+                user_text=inp.message,
+                runtime_enrichment=runtime_enrichment,
+                execution_result=execution_result,
+                source="api_chat",
+                receipt_phase="final_after_persistence",
+            )
+        except Exception:
+            pass
         try:
             audit(db, org, user.get('sub'), 'chat.message.generated', request_id='chat', path='/api/chat', status_code=200, latency_ms=0, meta={'thread_id': tid, 'agent_id': final_signer_agent_id, 'agent_name': final_signer_agent_name})
         except Exception:
@@ -18316,6 +18964,10 @@ async def chat_stream(
                                 thread_id=tid,
                                 payload=user,
                             )
+                        elif intent_name_live_stream == "readonly_implementation_plan" or _is_readonly_implementation_plan_request(message):
+                            capability_inventory_answer = _build_readonly_implementation_plan_text(message)
+                        elif intent_name_live_stream == "war_room_readonly_architecture_plan" or _is_war_room_readonly_architecture_plan_request(message):
+                            capability_inventory_answer = _build_war_room_readonly_architecture_plan_text(message)
                         elif _is_controlled_self_evolution_propose_request_message(message, runtime_enrichment=runtime_enrichment):
                             execution_result = _execute_capability_if_authorized(
                                 message,
@@ -18821,6 +19473,23 @@ async def chat_stream(
                         agent_name=final_signer_agent_name,
                     )
                     m_ass_id = getattr(m_ass, "id", None)
+                    try:
+                        _emit_runtime_readonly_receipts(
+                            trace_id=trace_id,
+                            message_id=m_ass_id,
+                            thread_id=tid,
+                            org=org,
+                            user_id=uid,
+                            visible_agent=final_signer_agent_name,
+                            signer=final_signer_agent_name,
+                            user_text=message,
+                            runtime_enrichment=runtime_enrichment,
+                            execution_result=execution_result,
+                            source="api_chat_stream",
+                            receipt_phase="final_after_persistence",
+                        )
+                    except Exception:
+                        pass
                     if not m_ass_id:
                         try:
                             yield sse_execution(
