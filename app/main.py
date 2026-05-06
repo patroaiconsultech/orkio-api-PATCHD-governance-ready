@@ -3276,6 +3276,56 @@ def db_ok() -> bool:
 
 logger = logging.getLogger("orkio")
 
+
+def _capability_execution_result_from_exception(exc: Exception, *, context: str = "") -> Dict[str, Any]:
+    status_code = getattr(exc, "status_code", None)
+    detail = getattr(exc, "detail", None)
+
+    message = ""
+    error_code = ""
+
+    if isinstance(detail, dict):
+        message = str(
+            detail.get("message")
+            or detail.get("detail")
+            or detail.get("error")
+            or ""
+        ).strip()
+        error_code = str(detail.get("error_code") or detail.get("code") or "").strip()
+    else:
+        message = str(detail or exc or "").strip()
+
+    base: Dict[str, Any] = {
+        "handled": True,
+        "success": False,
+        "provider": "runtime",
+        "context": context or "capability_runtime",
+    }
+
+    if status_code == 401:
+        base.update({
+            "status_code": 401,
+            "error_code": error_code or "AUTH_SESSION_EXPIRED",
+            "message": message or "Sessão inválida ou expirada.",
+        })
+        return base
+
+    if status_code == 403:
+        base.update({
+            "status_code": 403,
+            "error_code": error_code or "AUTH_FORBIDDEN",
+            "message": message or "Acesso não autorizado para esta operação.",
+        })
+        return base
+
+    base.update({
+        "status_code": int(status_code or 500),
+        "error_code": error_code or exc.__class__.__name__,
+        "message": message or "Falha interna ao avaliar capability operacional.",
+    })
+    return base
+
+
 TEAM_AGENT_ALIASES = {
     "orkio", "orkio (ceo)",
     "chris", "chris (vp/cfo)",
@@ -13799,8 +13849,8 @@ def chat(
                         trace_id=getattr(inp, "trace_id", None),
                         runtime_enrichment=runtime_enrichment,
                         org=org,
-                        thread_id=thread_id,
-                        payload=payload,
+                        thread_id=tid,
+                        payload=user,
                     )
                 elif _is_explicit_github_create_branch_command(inp.message) or _is_github_write_request_or_authorization(inp.message):
                     governed_dispatch = _dispatch_governed_github_write(
@@ -13838,8 +13888,8 @@ def chat(
                             trace_id=getattr(inp, "trace_id", None),
                             runtime_enrichment=runtime_enrichment,
                             org=org,
-                            thread_id=thread_id,
-                            payload=payload,
+                            thread_id=tid,
+                            payload=user,
                         )
                         if not (execution_result and execution_result.get("handled")):
                             execution_result = None
@@ -13884,16 +13934,28 @@ def chat(
                         trace_id=getattr(inp, "trace_id", None),
                         runtime_enrichment=runtime_enrichment,
                         org=org,
-                        thread_id=thread_id,
-                        payload=payload,
+                        thread_id=tid,
+                        payload=user,
                     )
-            except Exception:
-                execution_result = {
-                    "handled": True,
-                    "success": False,
-                    "provider": "github",
-                    "message": "Falha ao avaliar capability operacional solicitada.",
-                }
+            except HTTPException as e:
+                execution_result = _capability_execution_result_from_exception(
+                    e,
+                    context="chat_capability_runtime",
+                )
+            except Exception as e:
+                logger.exception(
+                    "CAPABILITY_RUNTIME_UNEXPECTED_EXCEPTION",
+                    extra={
+                        "context": "chat_capability_runtime",
+                        "org": org,
+                        "thread_id": tid,
+                        "trace_id": getattr(inp, "trace_id", None),
+                    },
+                )
+                execution_result = _capability_execution_result_from_exception(
+                    e,
+                    context="chat_capability_runtime",
+                )
 
         if capability_inventory_answer is not None:
             ans_obj = {
@@ -18168,8 +18230,8 @@ async def chat_stream(
                                 trace_id=trace_id,
                                 runtime_enrichment=runtime_enrichment,
                                 org=org,
-                                thread_id=thread_id,
-                                payload=payload,
+                                thread_id=tid,
+                                payload=user,
                             )
                         elif force_governed_branch_dispatch or _is_github_write_request_or_authorization(message):
                             governed_dispatch = _dispatch_governed_github_write(
@@ -18203,8 +18265,8 @@ async def chat_stream(
                                     trace_id=trace_id,
                                     runtime_enrichment=runtime_enrichment,
                                     org=org,
-                                    thread_id=thread_id,
-                                    payload=payload,
+                                    thread_id=tid,
+                                    payload=user,
                                 )
                                 if not (execution_result and execution_result.get("handled")):
                                     execution_result = None
@@ -18247,16 +18309,28 @@ async def chat_stream(
                                     trace_id=trace_id,
                                     runtime_enrichment=runtime_enrichment,
                                     org=org,
-                                    thread_id=thread_id,
-                                    payload=payload,
+                                    thread_id=tid,
+                                    payload=user,
                                 )
-                    except Exception:
-                        execution_result = {
-                            "handled": True,
-                            "success": False,
-                            "provider": "github",
-                            "message": "Falha ao avaliar capability operacional solicitada.",
-                        }
+                    except HTTPException as e:
+                        execution_result = _capability_execution_result_from_exception(
+                            e,
+                            context="chat_stream_capability_runtime",
+                        )
+                    except Exception as e:
+                        logger.exception(
+                            "CAPABILITY_RUNTIME_UNEXPECTED_EXCEPTION",
+                            extra={
+                                "context": "chat_stream_capability_runtime",
+                                "org": org,
+                                "thread_id": tid,
+                                "trace_id": trace_id,
+                            },
+                        )
+                        execution_result = _capability_execution_result_from_exception(
+                            e,
+                            context="chat_stream_capability_runtime",
+                        )
 
                 llm_task = None
                 if capability_inventory_answer is not None:
