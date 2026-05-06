@@ -8676,6 +8676,105 @@ def _is_capability_inventory_request(user_text: str) -> bool:
     ]
     return any(re.search(p, txt, flags=re.IGNORECASE) for p in patterns)
 
+
+def _is_governance_capability_question_request(user_text: str) -> bool:
+    txt = (user_text or "").strip().lower()
+    if not txt:
+        return False
+    asks_question = ("?" in str(user_text or "")) or any(term in txt for term in [
+        "temos a capacidade",
+        "tem capacidade",
+        "podemos",
+        "é possível",
+        "e possivel",
+        "eh possivel",
+    ])
+    asks_write_domain = any(term in txt for term in [
+        "aplicar melhorias no code",
+        "aplicar melhorias no código",
+        "aplicar melhorias no codigo",
+        "aplicar melhorias no codebase",
+        "melhorias no code",
+        "melhorias no código",
+        "melhorias no codigo",
+        "alterar o código",
+        "alterar o codigo",
+        "patch no code",
+        "abrir pr",
+        "pull request",
+        "criar branch",
+        "commit",
+        "merge",
+        "deploy",
+    ])
+    asks_governance = any(term in txt for term in [
+        "aprovação",
+        "aprovacao",
+        "autorização",
+        "autorizacao",
+        "approval",
+        "authorized",
+        "sob minha aprovação",
+        "sob minha aprovacao",
+        "sob minha autorização",
+        "sob minha autorizacao",
+        "com minha aprovação",
+        "com minha aprovacao",
+        "mediante minha aprovação",
+        "mediante minha aprovacao",
+        "após evidenciar as necessidades",
+        "apos evidenciar as necessidades",
+        "depois de evidenciar as necessidades",
+        "evidenciar as necessidades",
+    ])
+    return bool(asks_question and asks_write_domain and asks_governance)
+
+
+def _build_governance_capability_answer_text(
+    user_text: str,
+    *,
+    db: Optional[Session] = None,
+    org: Optional[str] = None,
+    thread_id: Optional[str] = None,
+    payload: Optional[Dict[str, Any]] = None,
+) -> str:
+    snapshot = {
+        "github_available": False,
+        "read_enabled": False,
+        "write_enabled": False,
+        "approval_required": True,
+        "allowed_write_actions": ["create_branch", "apply_patch", "prepare_commit", "open_pr"],
+        "branch": "main",
+        "active_approval": {},
+    }
+    try:
+        if db is not None and org:
+            snapshot = _github_write_policy_snapshot(org=org, thread_id=thread_id, payload=payload, db=db)
+    except Exception:
+        snapshot = snapshot
+
+    approval = snapshot.get("active_approval") if isinstance(snapshot.get("active_approval"), dict) else {}
+    actions = list(snapshot.get("allowed_write_actions") or ["create_branch", "apply_patch", "prepare_commit", "open_pr"])
+    lines = [
+        "Sim. Temos capacidade operacional para evidenciar necessidades, propor melhorias e preparar execução governada no codebase.",
+        "",
+        "Estado atual da governança:",
+        f"- github_available: {bool(snapshot.get('github_available'))}",
+        f"- read_enabled: {bool(snapshot.get('read_enabled'))}",
+        f"- write_enabled: {bool(snapshot.get('write_enabled'))}",
+        f"- approval_required: {bool(snapshot.get('approval_required', True))}",
+        f"- active_approval_present: {bool(approval)}",
+        f"- allowed_write_actions: {', '.join(actions)}",
+        f"- branch_base: {str(snapshot.get('branch') or 'main').strip() or 'main'}",
+        "",
+        "Regras de operação:",
+        "- sem aprovação explícita: apenas auditoria, evidência técnica, diagnóstico, plano e proposta em modo read-only.",
+        "- com aprovação explícita válida: podemos criar branch, aplicar patch, preparar commit e abrir PR governado.",
+        "- merge e deploy continuam sujeitos à política operacional e validação humana.",
+        "- escrita silenciosa na main não é permitida por padrão.",
+    ]
+    return "\n".join(lines)
+
 def _github_headers() -> Dict[str, str]:
     token = _github_token_value()
     return {
@@ -12085,7 +12184,7 @@ def _execute_capability_if_authorized(
     runtime_operation = intent_package.get("runtime_operation") if isinstance(intent_package.get("runtime_operation"), dict) else {}
     runtime_kind = str(runtime_operation.get("kind") or "").strip().lower()
     intent_name = str(intent_package.get("intent") or "").strip().lower()
-    if intent_name == "analytical_final_readonly":
+    if intent_name in {"analytical_final_readonly", "governance_capability_answer"}:
         return None
     planner_snapshot = (runtime_enrichment or {}).get("planner_snapshot") or {}
     required_capability = str(planner_snapshot.get("requires_capability") or "").strip().lower()
@@ -13682,7 +13781,16 @@ def chat(
         # PATCH27_12AJ — should_execute_runtime decidido antes do loop
         if blocked_reply is None:
             try:
-                if _is_controlled_self_evolution_propose_request_message(inp.message, runtime_enrichment=runtime_enrichment):
+                intent_name_live_sync = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
+                if intent_name_live_sync == "governance_capability_answer" or _is_governance_capability_question_request(inp.message):
+                    capability_inventory_answer = _build_governance_capability_answer_text(
+                        inp.message,
+                        db=db,
+                        org=org,
+                        thread_id=getattr(inp, "thread_id", None),
+                        payload=user,
+                    )
+                elif _is_controlled_self_evolution_propose_request_message(inp.message, runtime_enrichment=runtime_enrichment):
                     execution_result = _execute_capability_if_authorized(
                         inp.message,
                         trace_id=getattr(inp, "trace_id", None),
@@ -18042,7 +18150,16 @@ async def chat_stream(
                     force_governed_branch_dispatch = False
                 if blocked_reply is None:
                     try:
-                        if _is_controlled_self_evolution_propose_request_message(message, runtime_enrichment=runtime_enrichment):
+                        intent_name_live_stream = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
+                        if intent_name_live_stream == "governance_capability_answer" or _is_governance_capability_question_request(message):
+                            capability_inventory_answer = _build_governance_capability_answer_text(
+                                message,
+                                db=db,
+                                org=org,
+                                thread_id=tid,
+                                payload=user,
+                            )
+                        elif _is_controlled_self_evolution_propose_request_message(message, runtime_enrichment=runtime_enrichment):
                             execution_result = _execute_capability_if_authorized(
                                 message,
                                 trace_id=trace_id,
