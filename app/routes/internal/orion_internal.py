@@ -4319,6 +4319,7 @@ def orion_runtime_execute_alias(inp: OrionExecuteIn) -> Dict[str, Any]:
         return orion_runtime_execute(inp)
     except HTTPException as e:
         detail = getattr(e, "detail", None)
+        status_code = int(getattr(e, "status_code", 0) or 0)
         message = ""
         if isinstance(detail, dict):
             message = str(
@@ -4330,16 +4331,35 @@ def orion_runtime_execute_alias(inp: OrionExecuteIn) -> Dict[str, Any]:
             ).strip()
         else:
             message = str(detail or "").strip()
+
+        auth_error = status_code in {401, 403}
+        if status_code == 401:
+            error_code = "AUTH_SESSION_EXPIRED"
+            default_message = "Sessão inválida ou expirada."
+        elif status_code == 403:
+            error_code = "AUTH_FORBIDDEN"
+            default_message = "Acesso não autorizado para esta operação."
+        else:
+            error_code = "RUNTIME_HTTP_EXCEPTION"
+            default_message = "Falha ao avaliar capability operacional solicitada."
+
+        normalized_detail = detail if isinstance(detail, dict) else {"detail": message or str(detail or "").strip()}
+        if auth_error and isinstance(normalized_detail, dict) and not normalized_detail.get("code"):
+            normalized_detail = {**normalized_detail, "code": error_code, "status_code": status_code}
+
         return {
             "ok": False,
             "service": "orion_internal",
             "mode": "orion_runtime_execute_alias",
             "provider": "runtime",
             "event": "ORION_RUNTIME_HTTP_EXCEPTION",
-            "error": message or "runtime_http_exception",
+            "error": message or error_code.lower(),
+            "error_code": error_code,
             "error_type": e.__class__.__name__,
-            "detail": detail if isinstance(detail, dict) else {"detail": message or str(detail or "").strip()},
-            "message": message or "Falha ao avaliar capability operacional solicitada.",
+            "status_code": status_code,
+            "auth_error": auth_error,
+            "detail": normalized_detail,
+            "message": message or default_message,
             "generated_at": _now_ts(),
         }
     except Exception as e:
@@ -4351,7 +4371,10 @@ def orion_runtime_execute_alias(inp: OrionExecuteIn) -> Dict[str, Any]:
             "provider": "runtime",
             "event": "ORION_RUNTIME_UNEXPECTED_EXCEPTION",
             "error": message or "unexpected_runtime_exception",
+            "error_code": "RUNTIME_UNEXPECTED_EXCEPTION",
             "error_type": e.__class__.__name__,
+            "status_code": 500,
+            "auth_error": False,
             "detail": {
                 "detail": message or "unexpected_runtime_exception",
                 "exception_type": e.__class__.__name__,
