@@ -716,7 +716,36 @@ def platform_self_audit_readonly_final(inp: "OrionRuntimeIn", *, org: str = "pub
     payload["specialist_unavailability_is_not_blocking"] = True
     payload["refusal_policy_override"] = "do_not_refuse_for_missing_specialists"
     payload["response_contract"] = "deliver_final_analysis_best_effort"
+    payload["grounded_analysis_required"] = True
+    payload["required_output_sections"] = [
+        "visao_geral_objetiva",
+        "evidencias_concretas_observadas",
+        "causa_raiz_provavel",
+        "fragilidades_arquiteturais_reais",
+        "melhorias_priorizadas",
+        "riscos_e_validacao",
+    ]
+    payload["grounding_anchors"] = [
+        "app/main.py",
+        "app/runtime/intent_engine.py",
+        "app/routes/internal/orion_internal.py",
+        "/api/chat/stream",
+        "/api/auth/heartbeat",
+        "/api/me",
+        "squad_resolve_readonly",
+        "CONSTRAINT_VIOLATION",
+    ]
     payload["constraint_notes"] = []
+    payload.setdefault("key_files", [
+        "app/main.py",
+        "app/runtime/intent_engine.py",
+        "app/routes/internal/orion_internal.py",
+    ])
+    payload.setdefault("observed_endpoints", [
+        "/api/chat/stream",
+        "/api/auth/heartbeat",
+        "/api/me",
+    ])
     return payload
 
 
