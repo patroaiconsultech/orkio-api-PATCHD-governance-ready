@@ -1809,6 +1809,79 @@ def is_team_roster_question_text(text: str) -> bool:
 
     return bool(has_roster_intent or (has_roster_subject and explicit_roster_subject and has_question_shape))
 
+
+def is_presence_status_question_text(text: str) -> bool:
+    """
+    EFATA777_ORION_PRESENCE_AND_SQUAD_PARSE_HOTFIX:
+    Detecta perguntas simples de presença/status operacional do agente visível.
+    Deve responder de forma determinística e NÃO acionar self-audit, runtime,
+    capability inventory, GitHub ou dispatch.
+
+    True:
+      - "@Orion você está online?"
+      - "Orion está ativo?"
+      - "você está aí?"
+      - "status do Orion?"
+
+    False:
+      - perguntas de roster/time/squad
+      - pedidos de auditoria/war room/runtime
+      - pedidos de patch, PR, branch ou execução
+    """
+    raw = str(text or "")
+    txt = _roster_normalize_text(raw)
+    if not txt:
+        return False
+
+    # Perguntas de roster, squad, auditoria ou execução pertencem a outros trilhos.
+    blocked_terms = [
+        "time", "equipe", "squad", "especialista", "especialistas",
+        "agente", "agentes", "ecossistema", "roster",
+        "auditoria", "auditar", "audit", "war room", "diagnóstico", "diagnostico",
+        "runtime", "capability", "github", "patch", "pr", "pull request",
+        "branch", "commit", "deploy", "execute", "executar", "dispatch",
+        "resolver squad", "resolva exatamente este squad",
+    ]
+    if _roster_contains_any(txt, blocked_terms):
+        return False
+
+    has_question_shape = ("?" in raw) or _roster_contains_any(txt, [
+        "voce", "você", "esta", "está", "status", "online", "ativo", "ativa",
+        "disponivel", "disponível", "ai", "aí",
+    ])
+
+    has_presence_terms = _roster_contains_any(txt, [
+        "voce esta online",
+        "você está online",
+        "esta online",
+        "está online",
+        "orion esta online",
+        "orion está online",
+        "voce esta ativo",
+        "você está ativo",
+        "esta ativo",
+        "está ativo",
+        "orion esta ativo",
+        "orion está ativo",
+        "voce esta ai",
+        "você está aí",
+        "esta ai",
+        "está aí",
+        "esta disponivel",
+        "está disponível",
+        "status do orion",
+        "orion online",
+        "orion ativo",
+    ])
+
+    # Exige menção ao agente ou pronome direto em formato de pergunta curta.
+    has_agent_or_direct_pronoun = _roster_contains_any(txt, [
+        "orion", "@orion", "voce", "você", "vc",
+    ])
+
+    return bool(has_question_shape and has_presence_terms and has_agent_or_direct_pronoun)
+
+
 def get_capability_registry_issues() -> Dict[str, Any]:
     declared = set(get_all_declared_capabilities())
     bound = set(CAPABILITY_EXECUTION_BINDINGS.keys())
