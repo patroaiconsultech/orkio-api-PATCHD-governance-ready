@@ -644,6 +644,77 @@ def _get_continuous_audit_status_detached(inp: "OrionRuntimeIn", *, org: str = "
                 pass
 
 
+def _platform_self_audit_detached(inp: "OrionRuntimeIn", *, org: str = "public") -> Dict[str, Any]:
+    db: Optional[Session] = None
+    try:
+        db = SessionLocal()
+        if _looks_like_continuous_audit_status_request(inp.message or ""):
+            payload = get_continuous_audit_status_from_message(db, org, inp.message or "")
+            payload["governance_decision"] = evaluate_governance_action(
+                action_scope="read",
+                capability_name="continuous_audit_job_status",
+                target_scope="platform",
+                context=_governance_context_from_message(inp.message),
+                safe_mode=False,
+            )
+            payload["danielic_integrity_passed"] = bool(payload["governance_decision"].get("danielic_integrity_passed"))
+            return payload
+        if _looks_like_continuous_audit_request(inp.message or ""):
+            payload = start_continuous_audit_job(
+                db,
+                org,
+                message=inp.message or "",
+                include_frontend=bool(inp.include_frontend),
+                requested_by_user_name="orion_runtime",
+            )
+            payload["governance_decision"] = evaluate_governance_action(
+                action_scope="diagnose",
+                capability_name="continuous_audit_job",
+                target_scope="platform",
+                context=_governance_context_from_message(inp.message),
+                safe_mode=False,
+            )
+            payload["danielic_integrity_passed"] = bool(payload["governance_decision"].get("danielic_integrity_passed"))
+            return payload
+
+        visible_agent = _resolve_visible_agent(inp.message, default="orkio")
+        payload = _build_platform_self_audit_payload(inp, visible_agent)
+        decision = evaluate_governance_action(
+            action_scope="diagnose",
+            capability_name="platform_self_audit",
+            target_scope="platform",
+            context=_governance_context_from_message(inp.message),
+            safe_mode=False,
+        )
+        payload["governance_decision"] = decision
+        payload["danielic_integrity_passed"] = bool(decision.get("danielic_integrity_passed"))
+        return payload
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
+
+
+def platform_self_audit_readonly_final(inp: "OrionRuntimeIn", *, org: str = "public") -> Dict[str, Any]:
+    shadow_inp = inp.copy(update={"prepare_only": True}) if hasattr(inp, "copy") else inp
+    payload = _platform_self_audit_detached(shadow_inp, org=org)
+    payload["ok"] = True
+    payload["service"] = "orion_internal"
+    payload["mode"] = "analytical_final_readonly"
+    payload["provider"] = "platform"
+    payload["event"] = "ANALYTICAL_FINAL_READONLY_READY"
+    payload["status"] = "ready"
+    payload["report_format"] = "analytical_final_readonly_v1"
+    payload["delivery_contract"] = "analytical_final_readonly_v1"
+    payload["execution_depth"] = "final_readonly"
+    payload["dispatch_executed"] = False
+    payload["visible_agent"] = "orion"
+    payload["target_agent"] = "orion"
+    return payload
+
+
 def _github_repo() -> str:
     return _clean_env("GITHUB_REPO", "")
 
@@ -3106,7 +3177,7 @@ def orion_runtime_execute(inp: "OrionRuntimeIn") -> Dict[str, Any]:
     if audit_op == "create":
         return _start_continuous_audit_job_detached(inp)
     if _looks_like_final_readonly_analysis_request(effective_message):
-        return platform_self_audit(inp)
+        return platform_self_audit_readonly_final(inp)
     if _looks_like_squad_resolution_trace_request(effective_message):
         return squad_resolution_trace_readonly(inp)
     if _looks_like_squad_resolution_request(effective_message):
@@ -3118,12 +3189,12 @@ def orion_runtime_execute(inp: "OrionRuntimeIn") -> Dict[str, Any]:
     if _is_controlled_self_evolution_propose_request(effective_message):
         return platform_self_evolution_plan(inp)
     if _is_orion_direct_diagnostic_request(effective_message, visible_agent):
-        return platform_self_audit(inp)
+        return _platform_self_audit_detached(inp)
     if any(term in lowered for term in (
         "auditoria", "audit", "autoconhecimento", "consultivo", "somente leitura",
         "read only", "diagnóstico", "diagnostico"
     )):
-        return platform_self_audit(inp)
+        return _platform_self_audit_detached(inp)
     if any(term in lowered for term in ("scan runtime", "auditar runtime", "verificar runtime")):
         return runtime_scan(inp)
     if any(term in lowered for term in ("scan repo", "auditar repositório", "auditar repositorio")):
@@ -3138,7 +3209,7 @@ def orion_runtime_execute(inp: "OrionRuntimeIn") -> Dict[str, Any]:
         return _attachment_analysis_read_payload(inp)
     if _looks_like_github_runtime_request(effective_message):
         return github_execute(inp)
-    return platform_self_audit(inp)
+    return _platform_self_audit_detached(inp)
 
 class OrionRuntimeIn(BaseModel):
     message: str = Field(min_length=1)
