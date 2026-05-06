@@ -9,6 +9,7 @@ import re
 
 from app.config.runtime import RUNTIME_FLAGS
 from app.services.governance_service import evaluate_governance_action
+from app.runtime.capability_registry import is_team_roster_question_text
 
 
 def _normalize(text: str) -> str:
@@ -438,78 +439,11 @@ def _looks_like_governance_capability_question(text: str) -> bool:
 
 def _looks_like_team_roster_question(text: str) -> bool:
     """
-    EFATA 777 — team roster guard.
-    Perguntas simples sobre quantidade/lista de especialistas/agentes do time
-    devem responder inventário humano-operacional, sem cair em self-audit,
-    squad resolution, capability inventory ou runtime dispatch.
+    EFATA777_FINAL_AUDITOR_ADJUSTMENT:
+    Delegates roster detection to the canonical registry helper so intent_engine.py
+    and main.py cannot drift apart.
     """
-    raw = str(text or "")
-    txt = _normalize(raw)
-    if not txt:
-        return False
-
-    has_question_shape = ("?" in raw) or _contains_any(txt, [
-        "quantos",
-        "quantas",
-        "quem",
-        "quais",
-        "liste",
-        "lista",
-        "mostre",
-        "me diga",
-        "informe",
-    ])
-    has_roster_subject = _contains_any(txt, [
-        "especialistas",
-        "especialista",
-        "agentes",
-        "agente",
-        "time",
-        "equipe",
-        "squad padrão",
-        "squad padrao",
-        "squad operacional",
-        "squad",
-    ])
-    has_roster_intent = _contains_any(txt, [
-        "quantos especialistas",
-        "quantas especialistas",
-        "quantos agentes",
-        "quem está no time",
-        "quem esta no time",
-        "quem temos no time",
-        "quais especialistas",
-        "quais agentes",
-        "lista de especialistas",
-        "liste os especialistas",
-        "liste agentes",
-        "qual é o time",
-        "qual e o time",
-        "qual squad",
-        "squad padrão",
-        "squad padrao",
-    ])
-
-    execution_terms = [
-        "resolva",
-        "resolver",
-        "dispatch",
-        "execute",
-        "executar",
-        "auditoria",
-        "auditar",
-        "war room",
-        "trace",
-        "patch",
-        "pr",
-        "pull request",
-        "branch",
-        "commit",
-    ]
-    if _contains_any(txt, execution_terms):
-        return False
-
-    return bool(has_roster_subject and (has_roster_intent or has_question_shape or "@orion" in txt or "orion" in txt))
+    return bool(is_team_roster_question_text(text))
 
 
 def _looks_like_squad_resolution_request(text: str) -> bool:
@@ -1260,7 +1194,9 @@ def build_intent_package(
     context["message"] = effective_user_input
     context["raw_message"] = raw_user_input
 
-    if _looks_like_team_roster_question(effective_user_input or raw_user_input or ""):
+    final_readonly_analysis_request = _looks_like_final_readonly_analysis_request(effective_user_input or raw_user_input or "")
+
+    if (not final_readonly_analysis_request) and _looks_like_team_roster_question(effective_user_input or raw_user_input or ""):
         return _build_team_roster_answer_payload(
             raw_user_input=raw_user_input,
             effective_user_input=effective_user_input,
@@ -1274,7 +1210,7 @@ def build_intent_package(
             context=context,
         )
 
-    if _looks_like_squad_resolution_trace_request(effective_user_input or raw_user_input or ""):
+    if (not final_readonly_analysis_request) and _looks_like_squad_resolution_trace_request(effective_user_input or raw_user_input or ""):
         return _build_squad_readonly_payload(
             raw_user_input=raw_user_input,
             effective_user_input=effective_user_input,
@@ -1282,7 +1218,7 @@ def build_intent_package(
             trace_mode=True,
         )
 
-    if _looks_like_squad_resolution_request(effective_user_input or raw_user_input or ""):
+    if (not final_readonly_analysis_request) and _looks_like_squad_resolution_request(effective_user_input or raw_user_input or ""):
         return _build_squad_readonly_payload(
             raw_user_input=raw_user_input,
             effective_user_input=effective_user_input,
@@ -1313,7 +1249,7 @@ def build_intent_package(
         else _looks_like_continuous_audit_request(raw_user_input or effective_user_input or "")
     )
     requested_job_id = _extract_continuous_audit_job_id(raw_user_input or effective_user_input or "") or None
-    final_readonly_analysis_request = _looks_like_final_readonly_analysis_request(effective_user_input or raw_user_input or "")
+    final_readonly_analysis_request = bool(final_readonly_analysis_request)
     squad_resolution_trace_request = (
         False if final_readonly_analysis_request else _looks_like_squad_resolution_trace_request(effective_user_input or raw_user_input or "")
     )
