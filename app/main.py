@@ -12932,6 +12932,14 @@ def _looks_like_generic_safe_refusal(answer: str) -> bool:
         "não posso ajudar",
         "nao posso ajudar",
         "não posso atender",
+        "não posso fornecer a auditoria externa solicitada",
+        "nao posso fornecer a auditoria externa solicitada",
+        "a análise requer a colaboração de especialistas adicionais",
+        "a analise requer a colaboracao de especialistas adicionais",
+        "especialistas adicionais, que não estão disponíveis neste momento",
+        "especialistas adicionais, que nao estao disponiveis neste momento",
+        "solicite a auditoria quando todos os especialistas necessários estiverem presentes",
+        "solicite a auditoria quando todos os especialistas necessarios estiverem presentes",
         "i can't help with that",
         "i cannot help with that",
         "sorry, i can't help with that",
@@ -12940,6 +12948,59 @@ def _looks_like_generic_safe_refusal(answer: str) -> bool:
         "i am sorry, but i can't help with that",
     ]
     return any(marker in txt for marker in refusal_markers)
+
+
+def _looks_like_analytical_final_readonly_unavailability(answer: str) -> bool:
+    txt = re.sub(r"\s+", " ", str(answer or "").strip().lower())
+    if not txt:
+        return False
+    markers = [
+        "não posso fornecer a auditoria externa solicitada",
+        "nao posso fornecer a auditoria externa solicitada",
+        "a análise requer a colaboração de especialistas adicionais",
+        "a analise requer a colaboracao de especialistas adicionais",
+        "especialistas adicionais",
+        "não estão disponíveis neste momento",
+        "nao estao disponiveis neste momento",
+        "solicite a auditoria quando todos os especialistas necessários estiverem presentes",
+        "solicite a auditoria quando todos os especialistas necessarios estiverem presentes",
+        "when all required specialists are available",
+    ]
+    return any(marker in txt for marker in markers)
+
+
+def _build_analytical_final_readonly_prompt(
+    user_message: str,
+    history: Optional[List[Dict[str, str]]],
+    agent_name: Optional[str] = None,
+    *,
+    force_best_effort: bool = False,
+) -> str:
+    raw_user = (user_message or "").strip()
+    previous_answer = _last_assistant_text_from_history(history)
+    agent_label = (agent_name or "Orion").strip() or "Orion"
+    retry_rule = (
+        "A resposta anterior foi conservadora demais. "
+        "Reescreva agora em modo analytical_final_readonly, mantendo Orion como agente visível único e entregando uma análise final objetiva. "
+        if force_best_effort else ""
+    )
+    history_block = f"Última resposta do assistant:\n{previous_answer}\n\n" if previous_answer else ""
+    return (
+        f"Você é {agent_label}. "
+        "Este pedido está no trilho analytical_final_readonly. "
+        "Modo read-only absoluto. Nenhuma execução operacional é permitida. "
+        "O agente visível final é Orion. "
+        "Entregue uma análise final best-effort com base no codebase, contexto e evidências disponíveis. "
+        "NÃO diga que faltam especialistas, que especialistas não estão disponíveis, nem que o usuário deve solicitar novamente depois. "
+        "NÃO peça colaboração adicional para concluir. "
+        "NÃO transforme isso em resolução de squad, trace técnico, capability operacional, constraint violation ou recusa genérica. "
+        "Se houver lacunas, trate-as como limitações explícitas da análise, mas ainda entregue diagnóstico, fragilidades e recomendações priorizadas. "
+        f"{retry_rule}"
+        "Formato esperado: análise final em linguagem natural, com visão geral, fragilidades e melhorias priorizadas. "
+        "Proibido responder com capability_name, template_id, requested_specialists, selected_specialists, dispatch_receipts, specialist_reports ou mensagens de indisponibilidade de especialistas.\n\n"
+        f"{history_block}"
+        f"Pedido atual do usuário:\n{raw_user}"
+    )
 
 def _pick_runtime_primary_agent(
     target_agents: List[Any],
@@ -17821,13 +17882,24 @@ async def chat_stream(
 
                 followup_continuation_applied = False
                 user_msg_for_provider = user_msg
+                intent_name_live = str(
+                    (((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")
+                ).strip().lower()
+                if blocked_reply is None and intent_name_live == "analytical_final_readonly":
+                    _analytical_prompt = _build_analytical_final_readonly_prompt(
+                        message,
+                        history_dicts,
+                        final_signer_agent_name,
+                    )
+                    if _analytical_prompt:
+                        user_msg_for_provider = _analytical_prompt
                 if blocked_reply is None and _is_followup_continue_request(message):
                     _continuation_prompt = _build_followup_continuation_prompt(
                         message,
                         history_dicts,
                         final_signer_agent_name,
                     )
-                    if _continuation_prompt and _continuation_prompt != user_msg:
+                    if _continuation_prompt and _continuation_prompt != user_msg_for_provider:
                         user_msg_for_provider = _continuation_prompt
                         followup_continuation_applied = True
 
@@ -18141,9 +18213,22 @@ async def chat_stream(
                 refusal_retry_applied = False
                 if blocked_reply is None and capability_inventory_answer is None and not (execution_result and execution_result.get("handled")):
                     _ans_text_raw = (ans_obj.get("text") or "").strip() if isinstance(ans_obj, dict) else ""
-                    if _looks_like_generic_safe_refusal(_ans_text_raw):
+                    _analytical_unavailability = (
+                        intent_name_live == "analytical_final_readonly"
+                        and _looks_like_analytical_final_readonly_unavailability(_ans_text_raw)
+                    )
+                    if _looks_like_generic_safe_refusal(_ans_text_raw) or _analytical_unavailability:
                         provider_refusal_detected = True
-                        _repair_prompt = _build_followup_continuation_prompt(message, history_dicts, final_signer_agent_name)
+                        _repair_prompt = (
+                            _build_analytical_final_readonly_prompt(
+                                message,
+                                history_dicts,
+                                final_signer_agent_name,
+                                force_best_effort=True,
+                            )
+                            if intent_name_live == "analytical_final_readonly"
+                            else _build_followup_continuation_prompt(message, history_dicts, final_signer_agent_name)
+                        )
                         if _repair_prompt and _repair_prompt != user_msg_for_provider:
                             try:
                                 yield sse_execution(
@@ -18173,7 +18258,11 @@ async def chat_stream(
                             )
                             if isinstance(retry_ans_obj, dict):
                                 _retry_text = (retry_ans_obj.get("text") or "").strip()
-                                if _retry_text and not _looks_like_generic_safe_refusal(_retry_text):
+                                _retry_unavailability = (
+                                    intent_name_live == "analytical_final_readonly"
+                                    and _looks_like_analytical_final_readonly_unavailability(_retry_text)
+                                )
+                                if _retry_text and not _looks_like_generic_safe_refusal(_retry_text) and not _retry_unavailability:
                                     ans_obj = retry_ans_obj
                                     refusal_retry_applied = True
                 if await request.is_disconnected():
