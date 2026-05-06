@@ -1054,6 +1054,17 @@ def _looks_like_final_readonly_analysis_request(message: str) -> bool:
     wants_final_output = bool(re.search(r"entregue apenas a an[áa]lise final|entregar apenas a an[áa]lise final|n[ãa]o resolva squad|nao resolva squad|n[ãa]o retorne trace|nao retorne trace", raw, flags=re.IGNORECASE))
     return bool(has_analysis and has_scope and read_only and wants_final_output)
 
+
+def _looks_like_governance_capability_question(message: str) -> bool:
+    raw = (message or "").strip().lower()
+    if not raw:
+        return False
+    asks_question = ("?" in str(message or "")) or bool(re.search(r"temos a capacidade|tem capacidade|podemos|[ée] poss[íi]vel|eh possivel", raw, flags=re.IGNORECASE))
+    asks_write_domain = bool(re.search(r"aplicar melhorias no code|aplicar melhorias no c[óo]digo|melhorias no code|melhorias no c[óo]digo|patch no code|abrir pr|pull request|criar branch|commit|merge|deploy", raw, flags=re.IGNORECASE))
+    asks_governance = bool(re.search(r"aprova[cç][ãa]o|autoriza[cç][ãa]o|approval|authorized|sob minha aprova[cç][ãa]o|com minha aprova[cç][ãa]o|mediante minha aprova[cç][ãa]o|ap[óo]s evidenciar as necessidades|evidenciar as necessidades", raw, flags=re.IGNORECASE))
+    return bool(asks_question and asks_write_domain and asks_governance)
+
+
 def _filter_specialists_for_message(selected: List[str], message: str) -> List[str]:
     excluded = set(_dedupe_dispatch_actors(_excluded_agents_from_message(message)))
     out: List[str] = []
@@ -3210,6 +3221,8 @@ def orion_runtime_execute(inp: "OrionRuntimeIn") -> Dict[str, Any]:
         return _get_continuous_audit_status_detached(inp)
     if audit_op == "create":
         return _start_continuous_audit_job_detached(inp)
+    if _looks_like_governance_capability_question(effective_message):
+        return governance_capability_answer(inp)
     if _looks_like_final_readonly_analysis_request(effective_message):
         return platform_self_audit_readonly_final(inp)
     if _looks_like_squad_resolution_trace_request(effective_message):
@@ -3508,6 +3521,36 @@ def _governance_context_from_message(message: str, *, request: Optional[Request]
         "approval_bridge_id": str(embedded_approval.get("approval_id") or "").strip() or None,
         "approval_bridge_scope": str(embedded_approval.get("scope") or "").strip() or None,
         "approval_bridge_source": str(bridge_payload.get("source") or "").strip() or None,
+    }
+
+
+def governance_capability_answer(inp: "OrionRuntimeIn", *, request: Optional[Request] = None) -> Dict[str, Any]:
+    governance_context = _governance_context_from_message(inp.message or "", request=request)
+    approval_actions_ok = bool(governance_context.get("approval_bridge_actions_ok"))
+    authorization_present = bool(governance_context.get("authorization_present"))
+    return {
+        "ok": True,
+        "service": "orion_internal",
+        "mode": "governance_capability_answer",
+        "provider": "platform",
+        "event": "GOVERNANCE_CAPABILITY_ANSWER_READY",
+        "status": "ready",
+        "execution_depth": "final_readonly",
+        "dispatch_executed": False,
+        "visible_agent": "orion",
+        "target_agent": "orion",
+        "authorization_present": authorization_present,
+        "approval_bridge_actions_ok": approval_actions_ok,
+        "admin_access_mode": governance_context.get("admin_access_mode") or "standard",
+        "requires_write_approval": True,
+        "message": (
+            "Sim. Temos capacidade operacional para evidenciar necessidades, propor melhorias e preparar execução governada no codebase.\n\n"
+            "Regras de operação:\n"
+            "- sem aprovação explícita: apenas auditoria, evidência técnica, diagnóstico, plano e proposta em modo read-only.\n"
+            "- com aprovação explícita válida: podemos criar branch, aplicar patch, preparar commit e abrir PR governado.\n"
+            "- merge e deploy continuam sujeitos à política operacional e validação humana.\n"
+            "- escrita silenciosa na main não é permitida por padrão."
+        ),
     }
 
 
