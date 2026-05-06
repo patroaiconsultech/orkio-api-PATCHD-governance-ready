@@ -37,7 +37,7 @@ from .summit_config import get_summit_runtime_config, normalize_language_profile
 from .summit_prompt import build_summit_instructions
 from .summit_metrics import assess_realtime_session, merge_human_review
 from .runtime import get_capability_registry, build_intent_package, build_first_win_plan, build_continuity_hints, build_arcangelic_chain, build_system_overlay, build_runtime_hints, build_trial_hints, build_planner_snapshot, score_memory_candidate, build_memory_snapshot, build_trial_analytics, build_dag_execution_snapshot
-from .runtime.capability_registry import get_team_roster, get_full_agent_roster, get_agent_roster, format_team_roster_answer, is_team_roster_question_text
+from .runtime.capability_registry import get_team_roster, get_full_agent_roster, get_agent_roster, format_team_roster_answer, is_team_roster_question_text, is_presence_status_question_text
 from .numerology.schemas import NumerologyProfileIn, NumerologyProfileOut
 from .numerology.engine import generate_numerology_profile
 from .routes.user import router as user_router
@@ -8791,6 +8791,27 @@ def _is_governance_capability_question_request(user_text: str) -> bool:
 _TEAM_ROSTER_SPECIALISTS = list(get_team_roster("core_technical_squad") or ["orion", "auditor", "cto", "ux_frontend"])
 
 
+def _is_presence_status_question_request(user_text: str) -> bool:
+    """
+    EFATA777_ORION_PRESENCE_AND_SQUAD_PARSE_HOTFIX:
+    Perguntas simples como "@Orion você está online?" devem receber resposta
+    determinística, sem self-audit/runtime/capability.
+    """
+    return bool(is_presence_status_question_text(user_text))
+
+
+def _build_presence_status_answer_text(user_text: str = "") -> str:
+    return "\n".join([
+        "Sim. Estou online e operacional.",
+        "",
+        "Estado:",
+        "- agente visível: Orion",
+        "- modo: read-only consultivo",
+        "- runtime/capability: não acionado para esta pergunta",
+        "- dispatch: false",
+    ])
+
+
 def _is_team_roster_question_request(user_text: str) -> bool:
     """
     EFATA777_FINAL_AUDITOR_ADJUSTMENT:
@@ -12265,7 +12286,7 @@ def _execute_capability_if_authorized(
     runtime_operation = intent_package.get("runtime_operation") if isinstance(intent_package.get("runtime_operation"), dict) else {}
     runtime_kind = str(runtime_operation.get("kind") or "").strip().lower()
     intent_name = str(intent_package.get("intent") or "").strip().lower()
-    if intent_name in {"analytical_final_readonly", "governance_capability_answer", "team_roster_answer"}:
+    if intent_name in {"analytical_final_readonly", "governance_capability_answer", "team_roster_answer", "presence_status_answer"}:
         return None
     planner_snapshot = (runtime_enrichment or {}).get("planner_snapshot") or {}
     required_capability = str(planner_snapshot.get("requires_capability") or "").strip().lower()
@@ -13863,7 +13884,9 @@ def chat(
         if blocked_reply is None:
             try:
                 intent_name_live_sync = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
-                if intent_name_live_sync == "team_roster_answer" or _is_team_roster_question_request(inp.message):
+                if intent_name_live_sync == "presence_status_answer" or _is_presence_status_question_request(inp.message):
+                    capability_inventory_answer = _build_presence_status_answer_text(inp.message)
+                elif intent_name_live_sync == "team_roster_answer" or _is_team_roster_question_request(inp.message):
                     capability_inventory_answer = _build_team_roster_answer_text(inp.message)
                 elif intent_name_live_sync == "governance_capability_answer" or _is_governance_capability_question_request(inp.message):
                     capability_inventory_answer = _build_governance_capability_answer_text(
@@ -18246,7 +18269,9 @@ async def chat_stream(
                 if blocked_reply is None:
                     try:
                         intent_name_live_stream = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
-                        if intent_name_live_stream == "team_roster_answer" or _is_team_roster_question_request(message):
+                        if intent_name_live_stream == "presence_status_answer" or _is_presence_status_question_request(message):
+                            capability_inventory_answer = _build_presence_status_answer_text(message)
+                        elif intent_name_live_stream == "team_roster_answer" or _is_team_roster_question_request(message):
                             capability_inventory_answer = _build_team_roster_answer_text(message)
                         elif intent_name_live_stream == "governance_capability_answer" or _is_governance_capability_question_request(message):
                             capability_inventory_answer = _build_governance_capability_answer_text(
