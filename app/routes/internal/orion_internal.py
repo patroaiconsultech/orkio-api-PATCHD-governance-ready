@@ -794,7 +794,10 @@ def _allowed_write_agents() -> List[str]:
 
 
 def _allowed_read_agents() -> List[str]:
-    raw = _clean_env("GITHUB_READ_ALLOWED_AGENTS", "orkio,orion,chris,auditor")
+    raw = _clean_env(
+        "GITHUB_READ_ALLOWED_AGENTS",
+        "orkio,orion,chris,auditor,cto,ux_frontend,backend_engineer,frontend_engineer,devops_sre,security_guardian,data_db_architect,qa_release_engineer,realtime_voice_engineer",
+    )
     return [x.strip().lower() for x in raw.split(",") if x.strip()]
 
 
@@ -848,6 +851,24 @@ def _canonical_dispatch_actor(value: Any) -> str:
         "ui_ux": "ux_frontend",
         "orion_cto": "orion",
         "cto_runtime": "orion",
+        "backend": "backend_engineer",
+        "backend_dev": "backend_engineer",
+        "backend_engineer": "backend_engineer",
+        "front_engineer": "frontend_engineer",
+        "frontend_engineer": "frontend_engineer",
+        "devops_sre": "devops_sre",
+        "sre": "devops_sre",
+        "security_guardian": "security_guardian",
+        "data_architect": "data_db_architect",
+        "db_architect": "data_db_architect",
+        "database_architect": "data_db_architect",
+        "data_db_architect": "data_db_architect",
+        "qa": "qa_release_engineer",
+        "qa_release": "qa_release_engineer",
+        "qa_release_engineer": "qa_release_engineer",
+        "realtime_engineer": "realtime_voice_engineer",
+        "voice_engineer": "realtime_voice_engineer",
+        "realtime_voice_engineer": "realtime_voice_engineer",
     }
     return aliases.get(raw, raw)
 
@@ -3778,12 +3799,22 @@ def _extract_requested_specialists_from_message(message: str) -> List[str]:
 
 
 def _dispatch_specialist_registry() -> List[str]:
+    # EFATA777_ORION_CHRIS_ROSTER_UNIFICATION_PATCH
+    # Libera especialistas técnicos do guarda-chuva do Orion em modo read-only.
     return _dedupe_dispatch_actors([
         "orkio",
         "orion",
         "auditor",
         "cto",
         "ux_frontend",
+        "backend_engineer",
+        "frontend_engineer",
+        "devops_sre",
+        "security_guardian",
+        "data_db_architect",
+        "qa_release_engineer",
+        "realtime_voice_engineer",
+        # aliases/legado preservados
         "architect",
         "devops",
         "security",
@@ -4319,8 +4350,9 @@ def orion_runtime_execute_alias(inp: OrionExecuteIn) -> Dict[str, Any]:
         return orion_runtime_execute(inp)
     except HTTPException as e:
         detail = getattr(e, "detail", None)
-        status_code = int(getattr(e, "status_code", 0) or 0)
+        status_code = int(getattr(e, "status_code", 500) or 500)
         message = ""
+        error_code = ""
         if isinstance(detail, dict):
             message = str(
                 detail.get("message")
@@ -4329,23 +4361,16 @@ def orion_runtime_execute_alias(inp: OrionExecuteIn) -> Dict[str, Any]:
                 or detail.get("error")
                 or ""
             ).strip()
+            error_code = str(detail.get("error_code") or detail.get("code") or "").strip()
         else:
             message = str(detail or "").strip()
 
-        auth_error = status_code in {401, 403}
         if status_code == 401:
-            error_code = "AUTH_SESSION_EXPIRED"
-            default_message = "Sessão inválida ou expirada."
+            message = message or "Sessão inválida ou expirada."
+            error_code = error_code or "AUTH_SESSION_EXPIRED"
         elif status_code == 403:
-            error_code = "AUTH_FORBIDDEN"
-            default_message = "Acesso não autorizado para esta operação."
-        else:
-            error_code = "RUNTIME_HTTP_EXCEPTION"
-            default_message = "Falha ao avaliar capability operacional solicitada."
-
-        normalized_detail = detail if isinstance(detail, dict) else {"detail": message or str(detail or "").strip()}
-        if auth_error and isinstance(normalized_detail, dict) and not normalized_detail.get("code"):
-            normalized_detail = {**normalized_detail, "code": error_code, "status_code": status_code}
+            message = message or "Acesso não autorizado para esta operação."
+            error_code = error_code or "AUTH_FORBIDDEN"
 
         return {
             "ok": False,
@@ -4353,13 +4378,13 @@ def orion_runtime_execute_alias(inp: OrionExecuteIn) -> Dict[str, Any]:
             "mode": "orion_runtime_execute_alias",
             "provider": "runtime",
             "event": "ORION_RUNTIME_HTTP_EXCEPTION",
-            "error": message or error_code.lower(),
-            "error_code": error_code,
-            "error_type": e.__class__.__name__,
             "status_code": status_code,
-            "auth_error": auth_error,
-            "detail": normalized_detail,
-            "message": message or default_message,
+            "auth_error": status_code in {401, 403},
+            "error": message or "runtime_http_exception",
+            "error_code": error_code or "runtime_http_exception",
+            "error_type": e.__class__.__name__,
+            "detail": detail if isinstance(detail, dict) else {"detail": message or str(detail or "").strip()},
+            "message": message or "Falha ao avaliar capability operacional solicitada.",
             "generated_at": _now_ts(),
         }
     except Exception as e:
@@ -4370,16 +4395,16 @@ def orion_runtime_execute_alias(inp: OrionExecuteIn) -> Dict[str, Any]:
             "mode": "orion_runtime_execute_alias",
             "provider": "runtime",
             "event": "ORION_RUNTIME_UNEXPECTED_EXCEPTION",
-            "error": message or "unexpected_runtime_exception",
-            "error_code": "RUNTIME_UNEXPECTED_EXCEPTION",
-            "error_type": e.__class__.__name__,
             "status_code": 500,
             "auth_error": False,
+            "error": message or "unexpected_runtime_exception",
+            "error_code": e.__class__.__name__ or "UNEXPECTED_RUNTIME_EXCEPTION",
+            "error_type": e.__class__.__name__,
             "detail": {
                 "detail": message or "unexpected_runtime_exception",
                 "exception_type": e.__class__.__name__,
             },
-            "message": message or "Falha ao avaliar capability operacional solicitada.",
+            "message": message or "Falha interna ao avaliar capability operacional.",
             "generated_at": _now_ts(),
         }
 
