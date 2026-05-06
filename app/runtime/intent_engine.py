@@ -308,9 +308,18 @@ def _looks_like_final_readonly_analysis_request(text: str) -> bool:
         "analise arquitetural",
         "auditoria técnica",
         "auditoria tecnica",
+        "auditoria externa",
         "diagnóstico técnico",
         "diagnostico tecnico",
+        "diagnóstico",
+        "diagnostico",
+        "parecer técnico",
+        "parecer tecnico",
+        "resposta técnica",
+        "resposta tecnica",
         "melhorias priorizadas",
+        "recomendações priorizadas",
+        "recomendacoes priorizadas",
         "recomendação consolidada",
         "recomendacao consolidada",
         "análise final",
@@ -332,10 +341,16 @@ def _looks_like_final_readonly_analysis_request(text: str) -> bool:
         "governanca",
         "github bridge",
         "ux",
+        "orkio",
+        "plataforma",
+        "sistema",
+        "arquitetura",
     ])
     read_only = _contains_any(txt, [
         "read-only",
         "read only",
+        "modo read-only",
+        "modo read only",
         "somente leitura",
         "não executar",
         "nao executar",
@@ -352,7 +367,12 @@ def _looks_like_final_readonly_analysis_request(text: str) -> bool:
         "nao retorne trace",
         "não resolva squad",
         "nao resolva squad",
+        "apenas a análise final",
+        "apenas a analise final",
     ])
+
+    # Aceita prompts mais curtos de auditoria externa/diagnóstico técnico da plataforma,
+    # desde que estejam claramente em modo read-only e peçam uma saída final analítica.
     return bool(has_analysis and has_code_scope and read_only and wants_final_output)
 
 
