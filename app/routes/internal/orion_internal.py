@@ -712,6 +712,11 @@ def platform_self_audit_readonly_final(inp: "OrionRuntimeIn", *, org: str = "pub
     payload["dispatch_executed"] = False
     payload["visible_agent"] = "orion"
     payload["target_agent"] = "orion"
+    payload["best_effort_analysis"] = True
+    payload["specialist_unavailability_is_not_blocking"] = True
+    payload["refusal_policy_override"] = "do_not_refuse_for_missing_specialists"
+    payload["response_contract"] = "deliver_final_analysis_best_effort"
+    payload["constraint_notes"] = []
     return payload
 
 
