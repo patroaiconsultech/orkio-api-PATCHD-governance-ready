@@ -436,6 +436,82 @@ def _looks_like_governance_capability_question(text: str) -> bool:
     return bool(asks_question and asks_write_domain and asks_governance)
 
 
+def _looks_like_team_roster_question(text: str) -> bool:
+    """
+    EFATA 777 — team roster guard.
+    Perguntas simples sobre quantidade/lista de especialistas/agentes do time
+    devem responder inventário humano-operacional, sem cair em self-audit,
+    squad resolution, capability inventory ou runtime dispatch.
+    """
+    raw = str(text or "")
+    txt = _normalize(raw)
+    if not txt:
+        return False
+
+    has_question_shape = ("?" in raw) or _contains_any(txt, [
+        "quantos",
+        "quantas",
+        "quem",
+        "quais",
+        "liste",
+        "lista",
+        "mostre",
+        "me diga",
+        "informe",
+    ])
+    has_roster_subject = _contains_any(txt, [
+        "especialistas",
+        "especialista",
+        "agentes",
+        "agente",
+        "time",
+        "equipe",
+        "squad padrão",
+        "squad padrao",
+        "squad operacional",
+        "squad",
+    ])
+    has_roster_intent = _contains_any(txt, [
+        "quantos especialistas",
+        "quantas especialistas",
+        "quantos agentes",
+        "quem está no time",
+        "quem esta no time",
+        "quem temos no time",
+        "quais especialistas",
+        "quais agentes",
+        "lista de especialistas",
+        "liste os especialistas",
+        "liste agentes",
+        "qual é o time",
+        "qual e o time",
+        "qual squad",
+        "squad padrão",
+        "squad padrao",
+    ])
+
+    execution_terms = [
+        "resolva",
+        "resolver",
+        "dispatch",
+        "execute",
+        "executar",
+        "auditoria",
+        "auditar",
+        "war room",
+        "trace",
+        "patch",
+        "pr",
+        "pull request",
+        "branch",
+        "commit",
+    ]
+    if _contains_any(txt, execution_terms):
+        return False
+
+    return bool(has_roster_subject and (has_roster_intent or has_question_shape or "@orion" in txt or "orion" in txt))
+
+
 def _looks_like_squad_resolution_request(text: str) -> bool:
     txt = _normalize(text)
     if not txt:
@@ -1108,6 +1184,71 @@ def _build_governance_capability_answer_payload(
     }
 
 
+def _build_team_roster_answer_payload(
+    *,
+    raw_user_input: str,
+    effective_user_input: str,
+    context: Dict[str, Any],
+) -> Dict[str, Any]:
+    governance_decision = evaluate_governance_action(
+        action_scope="read",
+        capability_name=None,
+        target_scope="platform",
+        context=context,
+        safe_mode=bool(context.get("safe_mode", False)),
+    )
+    runtime_op = {
+        "kind": "",
+        "action_scope": "read",
+        "target_scope": "platform",
+        "capability_name": None,
+        "template_id": "team_roster_answer_template_v1",
+        "admin_access_mode": "standard",
+        "requires_write_approval": False,
+        "execution_mode": "team_roster_answer",
+        "force_dispatch": False,
+        "final_readonly_analysis_request": False,
+        "governance_capability_question": False,
+        "team_roster_question": True,
+        "requested_specialists": [],
+        "expected_specialist_reports": [],
+        "requires_explicit_approval_for_write": True,
+    }
+    return {
+        "intent": "team_roster_answer",
+        "confidence": 0.995,
+        "recommended_agents": ["orion"],
+        "advisor_agents": ["orion"],
+        "runtime_operation": runtime_op,
+        "requires_runtime_execution": False,
+        "target_agent": "orion",
+        "delivery_contract": "team_roster_answer_v1",
+        "template_id": "team_roster_answer_template_v1",
+        "structured_output": True,
+        "first_win_goal": "deliver_team_roster_answer",
+        "action_scope": "read",
+        "target_scope": "platform",
+        "capability_name": None,
+        "governance_decision": governance_decision,
+        "allowed": bool(governance_decision.get("allowed")),
+        "requires_human_authorization": False,
+        "admin_access_mode": "standard",
+        "requires_write_approval": False,
+        "team_technical_audit": False,
+        "platform_improvement_review": False,
+        "continuous_audit_request": False,
+        "continuous_audit_status_request": False,
+        "final_readonly_analysis_request": False,
+        "governance_capability_question": False,
+        "team_roster_question": True,
+        "incremental_dispatch_followup": False,
+        "expected_specialist_reports": [],
+        "has_completed_dispatch_context": bool(_has_completed_dispatch_context(context)),
+        "hard_constraints": _extract_hard_constraints(effective_user_input or raw_user_input or ""),
+        "requested_job_id": None,
+    }
+
+
 def build_intent_package(
     user_input: str,
     context: Optional[Dict[str, Any]] = None,
@@ -1118,6 +1259,13 @@ def build_intent_package(
     context = dict(context or {})
     context["message"] = effective_user_input
     context["raw_message"] = raw_user_input
+
+    if _looks_like_team_roster_question(effective_user_input or raw_user_input or ""):
+        return _build_team_roster_answer_payload(
+            raw_user_input=raw_user_input,
+            effective_user_input=effective_user_input,
+            context=context,
+        )
 
     if _looks_like_governance_capability_question(effective_user_input or raw_user_input or ""):
         return _build_governance_capability_answer_payload(
