@@ -1029,9 +1029,9 @@ def build_intent_package(
     capability_name = _infer_capability(action_scope, text)
 
     if final_readonly_analysis_request:
-        intent = "platform_audit"
-        capability_name = "platform_self_audit"
-        action_scope = "diagnose"
+        intent = "analytical_final_readonly"
+        capability_name = None
+        action_scope = "read"
         target_scope = "platform"
     elif squad_resolution_trace_request:
         intent = "squad_resolution_trace_readonly"
@@ -1085,7 +1085,7 @@ def build_intent_package(
         orion_only = False
     elif required_signer == "orion":
         orion_only = True
-    team_technical_audit = _looks_like_team_technical_audit_request(effective_user_input or raw_user_input or "") or final_readonly_analysis_request
+    team_technical_audit = _looks_like_team_technical_audit_request(effective_user_input or raw_user_input or "")
     excluded_agents = _dedupe_preserve(_excluded_agents(effective_user_input or raw_user_input or "") + specialists_forbidden)
 
     if final_readonly_analysis_request:
@@ -1095,7 +1095,8 @@ def build_intent_package(
         continuous_audit_request = False
         continuous_audit_status_request = False
         incremental_dispatch_followup = False
-        orion_only = True
+        team_technical_audit = False
+        orion_only = False
     elif squad_resolution_trace_request or squad_resolution_request:
         team_technical_audit = False
         platform_improvement_review = False
@@ -1133,24 +1134,28 @@ def build_intent_package(
         platform_improvement_review = False
 
     runtime_kind = (
-        "squad_resolution_trace_readonly"
-        if squad_resolution_trace_request
+        ""
+        if final_readonly_analysis_request
         else (
-            "squad_resolve_readonly"
-            if squad_resolution_request
+            "squad_resolution_trace_readonly"
+            if squad_resolution_trace_request
             else (
-                "dispatch_incremental_followup"
-                if incremental_dispatch_followup
+                "squad_resolve_readonly"
+                if squad_resolution_request
                 else (
-                    "continuous_audit_job_status"
-                    if continuous_audit_status_request
+                    "dispatch_incremental_followup"
+                    if incremental_dispatch_followup
                     else (
-                        "continuous_audit_job"
-                        if continuous_audit_request
+                        "continuous_audit_job_status"
+                        if continuous_audit_status_request
                         else (
-                            "controlled_self_evolution_propose_only"
-                            if platform_improvement_review
-                            else (intent if intent != "general_guidance" else "")
+                            "continuous_audit_job"
+                            if continuous_audit_request
+                            else (
+                                "controlled_self_evolution_propose_only"
+                                if platform_improvement_review
+                                else (intent if intent != "general_guidance" else "")
+                            )
                         )
                     )
                 )
@@ -1168,7 +1173,16 @@ def build_intent_package(
 
     template_id = None
 
-    if squad_resolution_trace_request:
+    if final_readonly_analysis_request:
+        recommended_agents = _dedupe_preserve(["orion"])
+        advisor_agents = _dedupe_preserve(["orion", "auditor", "cto", "ux_frontend", "metatron"])
+        target_agent = "orion"
+        delivery_contract = "analytical_final_readonly_v1"
+        template_id = "analytical_final_readonly_template_v1"
+        structured_output = True
+        expected_specialist_reports = []
+        visible_signer_expected = "orion"
+    elif squad_resolution_trace_request:
         recommended_agents = _dedupe_preserve([required_signer or "orion"])
         advisor_agents = _dedupe_preserve(recommended_agents + ["metatron"])
         target_agent = required_signer or "orion"
@@ -1295,6 +1309,7 @@ def build_intent_package(
         "platform_improvement_review": bool(platform_improvement_review),
         "continuous_audit_request": bool(continuous_audit_request),
         "continuous_audit_status_request": bool(continuous_audit_status_request),
+        "final_readonly_analysis_request": bool(final_readonly_analysis_request),
         "incremental_dispatch_followup": bool(incremental_dispatch_followup),
         "hard_constraints_present": bool(hard_constraints.get("has_hard_constraints")),
         "required_signer": required_signer or None,
@@ -1303,27 +1318,31 @@ def build_intent_package(
         "selected_specialists_count_must_be": selected_specialists_count_must_be,
         "requested_specialists": list(requested_squad_specialists or specialists_required or recommended_agents),
         "execution_mode": (
-            "incremental_analysis"
-            if incremental_dispatch_followup
+            "analytical_final_readonly"
+            if final_readonly_analysis_request
             else (
-                "read_status"
-                if continuous_audit_status_request
+                "incremental_analysis"
+                if incremental_dispatch_followup
                 else (
-                    "read_only_continuous"
-                    if continuous_audit_request
+                    "read_status"
+                    if continuous_audit_status_request
                     else (
-                        "read_only_squad_trace"
-                        if squad_resolution_trace_request
+                        "read_only_continuous"
+                        if continuous_audit_request
                         else (
-                            "read_only_squad_resolution"
-                            if squad_resolution_request
+                            "read_only_squad_trace"
+                            if squad_resolution_trace_request
                             else (
-                                "execute_repair"
-                                if pwa_console_repair_request
+                                "read_only_squad_resolution"
+                                if squad_resolution_request
                                 else (
-                                    "propose_only_dispatch"
-                                    if platform_improvement_review
-                                    else ("read_only_dispatch" if team_technical_audit else None)
+                                    "execute_repair"
+                                    if pwa_console_repair_request
+                                    else (
+                                        "propose_only_dispatch"
+                                        if platform_improvement_review
+                                        else ("read_only_dispatch" if team_technical_audit else None)
+                                    )
                                 )
                             )
                         )
@@ -1353,7 +1372,14 @@ def build_intent_package(
     payload = {
         "intent": intent,
         "confidence": (
-            0.99 if (pwa_console_repair_request or platform_improvement_review or continuous_audit_request or continuous_audit_status_request)
+            0.99
+            if (
+                final_readonly_analysis_request
+                or pwa_console_repair_request
+                or platform_improvement_review
+                or continuous_audit_request
+                or continuous_audit_status_request
+            )
             else (0.99 if incremental_dispatch_followup else (0.98 if runtime_op.get("kind") else 0.62))
         ),
         "recommended_agents": recommended_agents,
@@ -1364,7 +1390,11 @@ def build_intent_package(
         "delivery_contract": delivery_contract,
         "template_id": template_id,
         "structured_output": structured_output,
-        "first_win_goal": "execute_orion_runtime" if runtime_op.get("kind") else "clarify_next_step",
+        "first_win_goal": (
+            "deliver_final_analysis"
+            if final_readonly_analysis_request
+            else ("execute_orion_runtime" if runtime_op.get("kind") else "clarify_next_step")
+        ),
         "action_scope": action_scope,
         "target_scope": target_scope,
         "capability_name": capability_name,
@@ -1377,6 +1407,7 @@ def build_intent_package(
         "platform_improvement_review": bool(platform_improvement_review),
         "continuous_audit_request": bool(continuous_audit_request),
         "continuous_audit_status_request": bool(continuous_audit_status_request),
+        "final_readonly_analysis_request": bool(final_readonly_analysis_request),
         "incremental_dispatch_followup": bool(incremental_dispatch_followup),
         "expected_specialist_reports": expected_specialist_reports,
         "has_completed_dispatch_context": bool(has_completed_dispatch_context),
