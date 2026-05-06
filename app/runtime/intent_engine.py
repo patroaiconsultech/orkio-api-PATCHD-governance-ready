@@ -9,7 +9,7 @@ import re
 
 from app.config.runtime import RUNTIME_FLAGS
 from app.services.governance_service import evaluate_governance_action
-from app.runtime.capability_registry import is_team_roster_question_text
+from app.runtime.capability_registry import is_team_roster_question_text, is_presence_status_question_text, get_full_agent_roster
 
 
 def _normalize(text: str) -> str:
@@ -446,6 +446,15 @@ def _looks_like_team_roster_question(text: str) -> bool:
     return bool(is_team_roster_question_text(text))
 
 
+def _looks_like_presence_status_question(text: str) -> bool:
+    """
+    EFATA777_ORION_PRESENCE_AND_SQUAD_PARSE_HOTFIX:
+    Presence/status questions must not fall into platform_self_audit just because
+    they mention @Orion.
+    """
+    return bool(is_presence_status_question_text(text))
+
+
 def _looks_like_squad_resolution_request(text: str) -> bool:
     txt = _normalize(text)
     if not txt:
@@ -480,11 +489,38 @@ def _looks_like_squad_resolution_trace_request(text: str) -> bool:
     )
 
 
+def _extract_known_roster_agents_from_text(text: str) -> list[str]:
+    """
+    Extracts only canonical agent ids from free text.
+    Prevents tokens like "backend_engineer._modo_read_only._não_execute_dispatch"
+    from becoming specialist ids.
+    """
+    raw = str(text or "").lower().replace("@", " ")
+    normalized = re.sub(r"[^a-z0-9_]+", "_", raw)
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    padded = f"_{normalized}_"
+    out: list[str] = []
+    seen: set[str] = set()
+    for agent in list(get_full_agent_roster() or []):
+        slug = str(agent or "").strip().lower()
+        if not slug:
+            continue
+        token = f"_{slug}_"
+        if token in padded and slug not in seen:
+            out.append(slug)
+            seen.add(slug)
+    return out
+
+
 def _extract_requested_specialists_from_text(text: str) -> list[str]:
     hard_constraints = _extract_hard_constraints(text or "")
     required = _dedupe_preserve(list(hard_constraints.get("specialists_required") or []))
     if required:
         return required
+
+    known_agents = _extract_known_roster_agents_from_text(text or "")
+    if known_agents and _looks_like_squad_resolution_request(text or ""):
+        return _dedupe_preserve(known_agents)
 
     lines = [str(line or "").strip() for line in str(text or "").splitlines()]
     collected: list[str] = []
@@ -1118,6 +1154,73 @@ def _build_governance_capability_answer_payload(
     }
 
 
+def _build_presence_status_answer_payload(
+    *,
+    raw_user_input: str,
+    effective_user_input: str,
+    context: Dict[str, Any],
+) -> Dict[str, Any]:
+    governance_decision = evaluate_governance_action(
+        action_scope="read",
+        capability_name=None,
+        target_scope="platform",
+        context=context,
+        safe_mode=bool(context.get("safe_mode", False)),
+    )
+    runtime_op = {
+        "kind": "",
+        "action_scope": "read",
+        "target_scope": "platform",
+        "capability_name": None,
+        "template_id": "presence_status_answer_template_v1",
+        "admin_access_mode": "standard",
+        "requires_write_approval": False,
+        "execution_mode": "presence_status_answer",
+        "force_dispatch": False,
+        "final_readonly_analysis_request": False,
+        "governance_capability_question": False,
+        "team_roster_question": False,
+        "presence_status_question": True,
+        "requested_specialists": [],
+        "expected_specialist_reports": [],
+        "requires_explicit_approval_for_write": True,
+    }
+    return {
+        "intent": "presence_status_answer",
+        "confidence": 0.995,
+        "recommended_agents": ["orion"],
+        "advisor_agents": ["orion"],
+        "runtime_operation": runtime_op,
+        "requires_runtime_execution": False,
+        "target_agent": "orion",
+        "delivery_contract": "presence_status_answer_v1",
+        "template_id": "presence_status_answer_template_v1",
+        "structured_output": True,
+        "first_win_goal": "deliver_presence_status_answer",
+        "action_scope": "read",
+        "target_scope": "platform",
+        "capability_name": None,
+        "governance_decision": governance_decision,
+        "allowed": bool(governance_decision.get("allowed")),
+        "requires_human_authorization": False,
+        "admin_access_mode": "standard",
+        "requires_write_approval": False,
+        "team_technical_audit": False,
+        "platform_improvement_review": False,
+        "continuous_audit_request": False,
+        "continuous_audit_status_request": False,
+        "final_readonly_analysis_request": False,
+        "governance_capability_question": False,
+        "team_roster_question": False,
+        "presence_status_question": True,
+        "incremental_dispatch_followup": False,
+        "expected_specialist_reports": [],
+        "has_completed_dispatch_context": bool(_has_completed_dispatch_context(context)),
+        "hard_constraints": _extract_hard_constraints(effective_user_input or raw_user_input or ""),
+        "requested_job_id": None,
+    }
+
+
 def _build_team_roster_answer_payload(
     *,
     raw_user_input: str,
@@ -1195,6 +1298,13 @@ def build_intent_package(
     context["raw_message"] = raw_user_input
 
     final_readonly_analysis_request = _looks_like_final_readonly_analysis_request(effective_user_input or raw_user_input or "")
+
+    if (not final_readonly_analysis_request) and _looks_like_presence_status_question(effective_user_input or raw_user_input or ""):
+        return _build_presence_status_answer_payload(
+            raw_user_input=raw_user_input,
+            effective_user_input=effective_user_input,
+            context=context,
+        )
 
     if (not final_readonly_analysis_request) and _looks_like_team_roster_question(effective_user_input or raw_user_input or ""):
         return _build_team_roster_answer_payload(
