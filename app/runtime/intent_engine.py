@@ -9,7 +9,7 @@ import re
 
 from app.config.runtime import RUNTIME_FLAGS
 from app.services.governance_service import evaluate_governance_action
-from app.runtime.capability_registry import is_team_roster_question_text, is_presence_status_question_text, get_full_agent_roster
+from app.runtime.capability_registry import is_team_roster_question_text, is_presence_status_question_text, is_war_room_readonly_architecture_plan_text, is_readonly_implementation_plan_text, get_full_agent_roster
 
 
 def _normalize(text: str) -> str:
@@ -463,6 +463,24 @@ def _looks_like_presence_status_question(text: str) -> bool:
     they mention @Orion.
     """
     return bool(is_presence_status_question_text(text))
+
+
+def _looks_like_war_room_readonly_architecture_plan(text: str) -> bool:
+    """
+    EFATA777_WAR_ROOM_READONLY_PLAN_INTENT_PATCH:
+    Plano técnico/arquitetural read-only para receipts/lineage/accountability.
+    Deve ter precedência sobre self-audit, runtime capability e autorização operacional.
+    """
+    return bool(is_war_room_readonly_architecture_plan_text(text))
+
+
+def _looks_like_readonly_implementation_plan(text: str) -> bool:
+    """
+    EFATA777_READONLY_IMPLEMENTATION_PLAN_INTENT_PATCH:
+    Plano técnico de implementação/patch em modo read-only.
+    Deve ter precedência sobre governança operacional, self-audit e runtime.
+    """
+    return bool(is_readonly_implementation_plan_text(text))
 
 
 def _looks_like_squad_resolution_request(text: str) -> bool:
@@ -1296,6 +1314,148 @@ def _build_team_roster_answer_payload(
     }
 
 
+
+
+def _build_readonly_implementation_plan_payload(
+    *,
+    raw_user_input: str,
+    effective_user_input: str,
+    context: Dict[str, Any],
+) -> Dict[str, Any]:
+    governance_decision = evaluate_governance_action(
+        action_scope="read",
+        capability_name=None,
+        target_scope="platform",
+        context=context,
+        safe_mode=bool(context.get("safe_mode", False)),
+    )
+    runtime_op = {
+        "kind": "",
+        "action_scope": "read",
+        "target_scope": "platform",
+        "capability_name": None,
+        "template_id": "readonly_implementation_plan_template_v1",
+        "admin_access_mode": "standard",
+        "requires_write_approval": False,
+        "execution_mode": "readonly_implementation_plan",
+        "force_dispatch": False,
+        "final_readonly_analysis_request": False,
+        "governance_capability_question": False,
+        "team_roster_question": False,
+        "presence_status_question": False,
+        "war_room_readonly_architecture_plan": False,
+        "readonly_implementation_plan": True,
+        "requested_specialists": [],
+        "expected_specialist_reports": [],
+        "requires_explicit_approval_for_write": True,
+    }
+    return {
+        "intent": "readonly_implementation_plan",
+        "confidence": 0.995,
+        "recommended_agents": ["orion"],
+        "advisor_agents": ["orion", "cto", "auditor", "backend_engineer", "devops_sre", "qa_release_engineer"],
+        "runtime_operation": runtime_op,
+        "requires_runtime_execution": False,
+        "target_agent": "orion",
+        "delivery_contract": "readonly_implementation_plan_v1",
+        "template_id": "readonly_implementation_plan_template_v1",
+        "structured_output": True,
+        "first_win_goal": "deliver_readonly_implementation_plan",
+        "action_scope": "read",
+        "target_scope": "platform",
+        "capability_name": None,
+        "governance_decision": governance_decision,
+        "allowed": bool(governance_decision.get("allowed")),
+        "requires_human_authorization": False,
+        "admin_access_mode": "standard",
+        "requires_write_approval": False,
+        "team_technical_audit": False,
+        "platform_improvement_review": False,
+        "continuous_audit_request": False,
+        "continuous_audit_status_request": False,
+        "final_readonly_analysis_request": False,
+        "governance_capability_question": False,
+        "team_roster_question": False,
+        "presence_status_question": False,
+        "war_room_readonly_architecture_plan": False,
+        "readonly_implementation_plan": True,
+        "incremental_dispatch_followup": False,
+        "expected_specialist_reports": [],
+        "has_completed_dispatch_context": bool(_has_completed_dispatch_context(context)),
+        "hard_constraints": _extract_hard_constraints(effective_user_input or raw_user_input or ""),
+        "requested_job_id": None,
+    }
+
+
+def _build_war_room_readonly_architecture_plan_payload(
+    *,
+    raw_user_input: str,
+    effective_user_input: str,
+    context: Dict[str, Any],
+) -> Dict[str, Any]:
+    governance_decision = evaluate_governance_action(
+        action_scope="read",
+        capability_name=None,
+        target_scope="platform",
+        context=context,
+        safe_mode=bool(context.get("safe_mode", False)),
+    )
+    runtime_op = {
+        "kind": "",
+        "action_scope": "read",
+        "target_scope": "platform",
+        "capability_name": None,
+        "template_id": "war_room_readonly_architecture_plan_template_v1",
+        "admin_access_mode": "standard",
+        "requires_write_approval": False,
+        "execution_mode": "war_room_readonly_architecture_plan",
+        "force_dispatch": False,
+        "final_readonly_analysis_request": False,
+        "governance_capability_question": False,
+        "team_roster_question": False,
+        "presence_status_question": False,
+        "war_room_readonly_architecture_plan": True,
+        "requested_specialists": [],
+        "expected_specialist_reports": [],
+        "requires_explicit_approval_for_write": True,
+    }
+    return {
+        "intent": "war_room_readonly_architecture_plan",
+        "confidence": 0.995,
+        "recommended_agents": ["orion"],
+        "advisor_agents": ["orion", "cto", "auditor", "devops_sre", "security_guardian"],
+        "runtime_operation": runtime_op,
+        "requires_runtime_execution": False,
+        "target_agent": "orion",
+        "delivery_contract": "war_room_readonly_architecture_plan_v1",
+        "template_id": "war_room_readonly_architecture_plan_template_v1",
+        "structured_output": True,
+        "first_win_goal": "deliver_war_room_readonly_architecture_plan",
+        "action_scope": "read",
+        "target_scope": "platform",
+        "capability_name": None,
+        "governance_decision": governance_decision,
+        "allowed": bool(governance_decision.get("allowed")),
+        "requires_human_authorization": False,
+        "admin_access_mode": "standard",
+        "requires_write_approval": False,
+        "team_technical_audit": False,
+        "platform_improvement_review": False,
+        "continuous_audit_request": False,
+        "continuous_audit_status_request": False,
+        "final_readonly_analysis_request": False,
+        "governance_capability_question": False,
+        "team_roster_question": False,
+        "presence_status_question": False,
+        "war_room_readonly_architecture_plan": True,
+        "incremental_dispatch_followup": False,
+        "expected_specialist_reports": [],
+        "has_completed_dispatch_context": bool(_has_completed_dispatch_context(context)),
+        "hard_constraints": _extract_hard_constraints(effective_user_input or raw_user_input or ""),
+        "requested_job_id": None,
+    }
+
+
 def build_intent_package(
     user_input: str,
     context: Optional[Dict[str, Any]] = None,
@@ -1308,6 +1468,20 @@ def build_intent_package(
     context["raw_message"] = raw_user_input
 
     final_readonly_analysis_request = _looks_like_final_readonly_analysis_request(effective_user_input or raw_user_input or "")
+
+    if (not final_readonly_analysis_request) and _looks_like_readonly_implementation_plan(effective_user_input or raw_user_input or ""):
+        return _build_readonly_implementation_plan_payload(
+            raw_user_input=raw_user_input,
+            effective_user_input=effective_user_input,
+            context=context,
+        )
+
+    if (not final_readonly_analysis_request) and _looks_like_war_room_readonly_architecture_plan(effective_user_input or raw_user_input or ""):
+        return _build_war_room_readonly_architecture_plan_payload(
+            raw_user_input=raw_user_input,
+            effective_user_input=effective_user_input,
+            context=context,
+        )
 
     if (not final_readonly_analysis_request) and _looks_like_presence_status_question(effective_user_input or raw_user_input or ""):
         return _build_presence_status_answer_payload(
