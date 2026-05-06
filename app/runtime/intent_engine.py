@@ -330,6 +330,10 @@ def _looks_like_final_readonly_analysis_request(text: str) -> bool:
         "recomendacao consolidada",
         "análise final",
         "analise final",
+        "análise técnica final",
+        "analise tecnica final",
+        "análise técnica",
+        "analise tecnica",
     ])
     has_code_scope = _contains_any(txt, [
         "code",
@@ -351,6 +355,12 @@ def _looks_like_final_readonly_analysis_request(text: str) -> bool:
         "plataforma",
         "sistema",
         "arquitetura",
+        "técnica",
+        "tecnica",
+        "técnico",
+        "tecnico",
+        "análise técnica",
+        "analise tecnica",
     ])
     read_only = _contains_any(txt, [
         "read-only",
