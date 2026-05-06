@@ -3752,11 +3752,39 @@ def _looks_like_squad_resolution_trace_request(message: str) -> bool:
     )
 
 
+def _extract_known_dispatch_actors_from_text(text: str) -> List[str]:
+    """
+    EFATA777_ORION_PRESENCE_AND_SQUAD_PARSE_HOTFIX:
+    Extract only known specialist ids from free text.
+    Prevents instruction tails from being glued to a specialist, e.g.
+    "backend_engineer. Modo read-only. Não execute dispatch."
+    """
+    raw = str(text or "").lower().replace("@", " ")
+    normalized = re.sub(r"[^a-z0-9_]+", "_", raw)
+    normalized = re.sub(r"_+", "_", normalized).strip("_")
+    padded = f"_{normalized}_"
+    out: List[str] = []
+    seen: set = set()
+    for actor in _dispatch_specialist_registry():
+        slug = _canonical_dispatch_actor(actor)
+        if not slug:
+            continue
+        token = f"_{slug}_"
+        if token in padded and slug not in seen:
+            out.append(slug)
+            seen.add(slug)
+    return out
+
+
 def _extract_requested_specialists_from_message(message: str) -> List[str]:
     constraints = _extract_hard_constraints(message or "")
     required = _dedupe_dispatch_actors(list(constraints.get("specialists_required") or []))
     if required:
         return required
+
+    known_actors = _extract_known_dispatch_actors_from_text(message or "")
+    if known_actors and _looks_like_squad_resolution_request(message or ""):
+        return _dedupe_dispatch_actors(known_actors)
 
     lines = [str(line or "").strip() for line in str(message or "").splitlines()]
     collected: List[str] = []
