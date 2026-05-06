@@ -1,3 +1,6 @@
+# EFATA 777 V7 COMPLETE
+# Consolidated package for governed capability answers + analytical readonly + registry alignment + realtime self-heal hardening.
+
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
@@ -5,11 +8,46 @@ from typing import Any, Dict, List, Optional
 
 CAPABILITY_EXECUTION_BINDINGS = {
     # GitHub runtime
+    "governance_capability_answer": {
+        "purpose": "responder pergunta de governança/capacidade sem executar ações",
+        "risk_level": "low",
+        "requires_authorization": False,
+        "allowed_targets": ["platform", "backend", "frontend", "cross_repo"],
+        "governed": True,
+    },
+    "safe_evolution_control": {
+        "purpose": "explicar limites e regras de evolução governada",
+        "risk_level": "low",
+        "requires_authorization": False,
+        "allowed_targets": ["platform", "backend", "frontend", "cross_repo"],
+        "governed": True,
+    },
+    "db_schema_read": {
+        "purpose": "inspecionar schema e derivações de banco em modo leitura",
+        "risk_level": "low",
+        "requires_authorization": False,
+        "allowed_targets": ["backend", "platform"],
+        "governed": True,
+    },
     "github_repo_read": {
         "executor": "orion_internal.github_execute",
         "mode": "runtime",
         "allowed_agents": ["orkio", "orion", "auditor"],
         "write": False,
+    },
+    "governed_patch_execution": {
+        "purpose": "executar patch governado após autorização explícita",
+        "risk_level": "medium",
+        "requires_authorization": True,
+        "allowed_targets": ["backend", "frontend", "cross_repo"],
+        "governed": True,
+    },
+    "db_schema_fix_governed": {
+        "purpose": "corrigir schema em fluxo governado",
+        "risk_level": "medium",
+        "requires_authorization": True,
+        "allowed_targets": ["backend", "platform"],
+        "governed": True,
     },
     "github_repo_write": {
         "executor": "orion_internal.github_execute",
@@ -42,6 +80,38 @@ CAPABILITY_EXECUTION_BINDINGS = {
         "write": False,
     },
     "github_pr_prepare": {
+        "executor": "orion_internal.github_execute",
+        "mode": "runtime",
+        "allowed_agents": ["orion"],
+        "write": True,
+    },
+
+
+    "governance_capability_answer": {
+        "executor": "orion_internal.governance_capability_answer",
+        "mode": "runtime",
+        "allowed_agents": ["orkio", "orion"],
+        "write": False,
+    },
+    "governed_patch_execution": {
+        "executor": "orion_internal.github_execute",
+        "mode": "runtime",
+        "allowed_agents": ["orion"],
+        "write": True,
+    },
+    "safe_evolution_control": {
+        "executor": "orion_internal.governance_capability_answer",
+        "mode": "runtime",
+        "allowed_agents": ["orkio", "orion"],
+        "write": False,
+    },
+    "db_schema_read": {
+        "executor": "orion_internal.platform_self_audit",
+        "mode": "runtime",
+        "allowed_agents": ["orkio", "orion", "auditor"],
+        "write": False,
+    },
+    "db_schema_fix_governed": {
         "executor": "orion_internal.github_execute",
         "mode": "runtime",
         "allowed_agents": ["orion"],
@@ -158,6 +228,9 @@ CAPABILITY_REGISTRY = {
             "premium_audit_backlog_generate",
             "premium_audit_patch_candidate_select",
             "controlled_self_evolution_execute_proposal",
+            "governance_capability_answer",
+            "safe_evolution_control",
+            "db_schema_read",
             "squad_resolve_readonly",
             "squad_resolution_trace_readonly",
         ],
@@ -175,6 +248,12 @@ CAPABILITY_REGISTRY = {
             "improvement review",
             "quick wins",
             "plataforma",
+            "governança",
+            "governanca",
+            "aprovação",
+            "aprovacao",
+            "capacidade de aplicar melhorias",
+            "sob minha aprovação",
             "root causes",
             "risks",
             "next actions",
@@ -208,9 +287,11 @@ CAPABILITY_REGISTRY = {
             "github_repo_write",
             "github_pr_prepare",
             "governed_patch_execution",
+            "governance_capability_answer",
             "safe_evolution_control",
             "db_schema_read",
             "db_schema_fix_governed",
+            "safe_evolution_control",
             "squad_agents_list",
             "platform_self_audit",
             "platform_improvement_review",
@@ -252,6 +333,12 @@ CAPABILITY_REGISTRY = {
             "squad",
             "frontend",
             "empty state premium",
+            "governança",
+            "governanca",
+            "aprovação",
+            "aprovacao",
+            "capacidade operacional",
+            "sob minha aprovação",
             "root causes",
             "risks",
             "next actions",
@@ -291,6 +378,8 @@ CAPABILITY_REGISTRY = {
             "github_pr_compare_status",
             "technical_analysis",
             "risk_guard",
+            "governance_capability_answer",
+            "db_schema_read",
         ],
         "triggers": [
             "auditor",
@@ -306,6 +395,10 @@ CAPABILITY_REGISTRY = {
             "classificacao operacional",
             "read only",
             "somente leitura",
+            "governança",
+            "governanca",
+            "aprovação",
+            "aprovacao",
             "intent_engine.py",
             "capability_registry.py",
             "review de melhorias",
@@ -333,6 +426,7 @@ CAPABILITY_REGISTRY = {
             "repo_structure_scan",
             "routes_scan",
             "runtime_scan",
+            "db_schema_read",
             "controlled_self_evolution_propose_only",
             "premium_audit_backlog_generate",
             "premium_audit_patch_candidate_select",
@@ -528,6 +622,33 @@ GOVERNED_CAPABILITY_PROFILES = {
         "governed": True,
     },
 }
+
+
+def get_all_declared_capabilities() -> List[str]:
+    declared: set[str] = set()
+    for meta in CAPABILITY_REGISTRY.values():
+        for capability in (meta.get("capabilities") or []):
+            value = str(capability or "").strip()
+            if value:
+                declared.add(value)
+    return sorted(declared)
+
+
+def get_capability_registry_issues() -> Dict[str, Any]:
+    declared = set(get_all_declared_capabilities())
+    bound = set(CAPABILITY_EXECUTION_BINDINGS.keys())
+    governed = set(GOVERNED_CAPABILITY_PROFILES.keys())
+    return {
+        "declared_without_binding": sorted(declared - bound),
+        "binding_without_declared": sorted(bound - declared),
+        "governed_without_binding": sorted(governed - bound),
+        "write_capabilities": sorted(
+            capability
+            for capability, binding in CAPABILITY_EXECUTION_BINDINGS.items()
+            if bool(binding.get("write"))
+        ),
+    }
+
 
 
 def get_governed_capability_profile(capability: str) -> Dict[str, Any]:
