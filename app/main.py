@@ -11619,8 +11619,10 @@ def _should_execute_runtime_from_enrichment(runtime_enrichment: Optional[Dict[st
     intent_package = runtime_enrichment.get("intent_package")
     if not isinstance(intent_package, dict):
         return False
+    intent_name = str(intent_package.get("intent") or "").strip().lower()
+    if intent_name == "analytical_final_readonly":
+        return False
     return bool(intent_package.get("requires_runtime_execution"))
-
 
 
 
@@ -12082,6 +12084,9 @@ def _execute_capability_if_authorized(
     intent_package = ((runtime_enrichment or {}).get("intent_package") or {})
     runtime_operation = intent_package.get("runtime_operation") if isinstance(intent_package.get("runtime_operation"), dict) else {}
     runtime_kind = str(runtime_operation.get("kind") or "").strip().lower()
+    intent_name = str(intent_package.get("intent") or "").strip().lower()
+    if intent_name == "analytical_final_readonly":
+        return None
     planner_snapshot = (runtime_enrichment or {}).get("planner_snapshot") or {}
     required_capability = str(planner_snapshot.get("requires_capability") or "").strip().lower()
     capability_name = str(
@@ -13445,12 +13450,15 @@ def chat(
         try:
             intent_package_live = runtime_enrichment.get("intent_package") if isinstance(runtime_enrichment.get("intent_package"), dict) else {}
             runtime_operation_live = intent_package_live.get("runtime_operation") if isinstance(intent_package_live.get("runtime_operation"), dict) else {}
+            intent_name_live = str(intent_package_live.get("intent") or "").strip().lower()
             capability_name_live = str(
                 runtime_operation_live.get("capability_name")
                 or intent_package_live.get("capability_name")
                 or ""
             ).strip().lower()
-            if capability_name_live in {
+            if intent_name_live == "analytical_final_readonly":
+                should_execute_runtime = False
+            elif capability_name_live in {
                 "squad_resolve_readonly",
                 "squad_resolution_trace_readonly",
                 "platform_self_audit",
