@@ -315,6 +315,8 @@ def _looks_like_final_readonly_analysis_request(text: str) -> bool:
         "diagnostico",
         "parecer técnico",
         "parecer tecnico",
+        "auditoria externa técnica",
+        "auditoria externa tecnica",
         "resposta técnica",
         "resposta tecnica",
         "melhorias priorizadas",
