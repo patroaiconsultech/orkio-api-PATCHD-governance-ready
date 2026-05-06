@@ -1882,6 +1882,271 @@ def is_presence_status_question_text(text: str) -> bool:
     return bool(has_question_shape and has_presence_terms and has_agent_or_direct_pronoun)
 
 
+
+def is_war_room_readonly_architecture_plan_text(text: str) -> bool:
+    """
+    EFATA777_WAR_ROOM_READONLY_PLAN_INTENT_PATCH:
+    Detecta pedidos de plano técnico/arquitetural read-only para receipts,
+    lineage, accountability e observabilidade transacional.
+
+    Deve ser tratado como resposta consultiva determinística, sem dispatch,
+    sem capability execution, sem GitHub e sem self-audit operacional.
+    """
+    raw = str(text or "")
+    txt = _roster_normalize_text(raw)
+    if not txt:
+        return False
+
+    # Autorização isolada continua pertencendo à governança operacional.
+    isolated_authorization = txt.strip() in {
+        "autorizado",
+        "autorizada",
+        "esta autorizado",
+        "está autorizado",
+        "autorizado pelo criador",
+        "pode executar",
+    }
+    if isolated_authorization:
+        return False
+
+    read_only_terms = [
+        "read only",
+        "read-only",
+        "modo read only",
+        "modo read-only",
+        "somente leitura",
+        "nao execute",
+        "não execute",
+        "nao acione capability",
+        "não acione capability",
+        "nao abra pr",
+        "não abra pr",
+        "nao escreva no github",
+        "não escreva no github",
+        "nao altere arquivos",
+        "não altere arquivos",
+        "sem executar",
+        "sem execução",
+        "sem execucao",
+    ]
+    planning_terms = [
+        "plano tecnico de arquitetura",
+        "plano técnico de arquitetura",
+        "plano tecnico",
+        "plano técnico",
+        "plano de arquitetura",
+        "plano tecnico final",
+        "plano técnico final",
+        "arquitetura sugerida",
+        "ordem dos patches",
+        "criterios de aceite",
+        "critérios de aceite",
+    ]
+    maturity_terms = [
+        "receipts",
+        "receipt",
+        "lineage",
+        "accountability",
+        "observabilidade transacional",
+        "observability",
+        "runtime receipts",
+        "governance lineage",
+        "governanca lineage",
+        "governança lineage",
+        "maturidade operacional",
+        "orchestration_receipt",
+        "intent_receipt",
+        "execution_receipt",
+        "audit_receipt",
+        "governance_receipt",
+        "consolidation_receipt",
+        "signer_receipt",
+        "trace_id",
+        "dispatch_executed",
+        "governance_decision",
+    ]
+    blocking_terms = [
+        "abrir pr agora",
+        "aplicar patch agora",
+        "escrever no github agora",
+        "criar branch agora",
+        "faça o commit",
+        "faca o commit",
+        "merge agora",
+        "deploy agora",
+    ]
+
+    if _roster_contains_any(txt, blocking_terms):
+        return False
+
+    has_readonly_guard = _roster_contains_any(txt, read_only_terms)
+    has_plan_shape = _roster_contains_any(txt, planning_terms)
+    has_maturity_scope = _roster_contains_any(txt, maturity_terms)
+
+    explicit_no_runtime = _roster_contains_any(txt, [
+        "nao execute dispatch",
+        "não execute dispatch",
+        "nao acione capability",
+        "não acione capability",
+        "nao faça self audit",
+        "não faça self-audit",
+        "nao retorne platform_self_audit_ready",
+        "não retorne platform_self_audit_ready",
+    ])
+
+    return bool((has_readonly_guard or explicit_no_runtime) and has_plan_shape and has_maturity_scope)
+
+
+
+def is_readonly_implementation_plan_text(text: str) -> bool:
+    """
+    EFATA777_READONLY_IMPLEMENTATION_PLAN_INTENT_PATCH:
+    Detecta pedidos de plano técnico de implementação/patch em modo read-only.
+
+    Este detector existe para diferenciar:
+    - planejamento consultivo de patch, helpers, funções e pontos de integração;
+    - execução operacional real, GitHub, PR, branch, commit ou aplicação de patch.
+
+    Deve ser tratado como resposta determinística consultiva, sem dispatch,
+    sem capability execution, sem GitHub e sem self-audit operacional.
+    """
+    raw = str(text or "")
+    txt = _roster_normalize_text(raw)
+    if not txt:
+        return False
+
+    isolated_authorization = txt.strip() in {
+        "autorizado",
+        "autorizada",
+        "esta autorizado",
+        "está autorizado",
+        "autorizado pelo criador",
+        "pode executar",
+    }
+    if isolated_authorization:
+        return False
+
+    read_only_terms = [
+        "read only",
+        "read-only",
+        "modo read only",
+        "modo read-only",
+        "read only absoluto",
+        "read-only absoluto",
+        "modo read only absoluto",
+        "modo read-only absoluto",
+        "somente leitura",
+        "nao execute",
+        "não execute",
+        "nao acione capability",
+        "não acione capability",
+        "nao abra pr",
+        "não abra pr",
+        "nao escreva no github",
+        "não escreva no github",
+        "nao altere arquivos",
+        "não altere arquivos",
+        "nao aplique patch",
+        "não aplique patch",
+        "sem executar",
+        "sem execução",
+        "sem execucao",
+        "sem persistência",
+        "sem persistencia",
+        "sem alterar arquivos",
+    ]
+
+    implementation_plan_terms = [
+        "plano tecnico final do patch",
+        "plano técnico final do patch",
+        "plano tecnico do patch",
+        "plano técnico do patch",
+        "plano final do patch",
+        "plano técnico final",
+        "plano tecnico final",
+        "plano tecnico de implementacao",
+        "plano técnico de implementação",
+        "plano de implementacao",
+        "plano de implementação",
+        "arquivos a ajustar",
+        "funcoes novas",
+        "funções novas",
+        "pontos de integracao",
+        "pontos de integração",
+        "criterios de aceite",
+        "critérios de aceite",
+        "testes pos deploy",
+        "testes pós-deploy",
+        "testes pós deploy",
+        "testes pos-deploy",
+        "riscos",
+        "pontos de integração",
+    ]
+
+    implementation_scope_terms = [
+        "efata777_runtime_receipts_readonly_helpers_patch",
+        "runtime_receipts_readonly_helpers_patch",
+        "receipts_readonly_helpers",
+        "receipts readonly helpers",
+        "receipts read-only helpers",
+        "helpers internos",
+        "helpers read-only",
+        "helpers readonly",
+        "logs estruturados",
+        "logs estruturados de decisao",
+        "logs estruturados de decisão",
+        "runtime receipts",
+        "receipts",
+        "receipt",
+        "lineage",
+        "accountability",
+        "observabilidade transacional",
+        "governance lineage",
+        "trace_id",
+        "dispatch_executed",
+        "governance_decision",
+    ]
+
+    # Bloqueios positivos de execução real. Frases negativas como
+    # "não aplique patch" são tratadas como guarda read-only acima.
+    positive_execution_terms = [
+        "aplique o patch agora",
+        "aplicar o patch agora",
+        "execute o patch agora",
+        "executar o patch agora",
+        "escreva no github agora",
+        "abrir pr agora",
+        "abra pr agora",
+        "criar branch agora",
+        "faça commit agora",
+        "faca commit agora",
+        "merge agora",
+        "deploy agora",
+    ]
+    if _roster_contains_any(txt, positive_execution_terms):
+        return False
+
+    has_readonly_guard = _roster_contains_any(txt, read_only_terms)
+    has_plan_shape = _roster_contains_any(txt, implementation_plan_terms)
+    has_implementation_scope = _roster_contains_any(txt, implementation_scope_terms)
+
+    explicit_no_execution = _roster_contains_any(txt, [
+        "nao execute dispatch",
+        "não execute dispatch",
+        "nao acione capability",
+        "não acione capability",
+        "nao abra pr",
+        "não abra pr",
+        "nao escreva no github",
+        "não escreva no github",
+        "nao altere arquivos",
+        "não altere arquivos",
+        "nao aplique patch",
+        "não aplique patch",
+    ])
+
+    return bool((has_readonly_guard or explicit_no_execution) and has_plan_shape and has_implementation_scope)
+
 def get_capability_registry_issues() -> Dict[str, Any]:
     declared = set(get_all_declared_capabilities())
     bound = set(CAPABILITY_EXECUTION_BINDINGS.keys())
