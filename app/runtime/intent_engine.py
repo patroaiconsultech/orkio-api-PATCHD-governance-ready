@@ -378,6 +378,61 @@ def _looks_like_final_readonly_analysis_request(text: str) -> bool:
     return bool(has_analysis and has_code_scope and read_only and wants_final_output)
 
 
+def _looks_like_governance_capability_question(text: str) -> bool:
+    txt = _normalize(text)
+    if not txt:
+        return False
+
+    asks_question = ("?" in str(text or "")) or _contains_any(txt, [
+        "temos a capacidade",
+        "tem capacidade",
+        "podemos",
+        "é possível",
+        "e possivel",
+        "eh possivel",
+    ])
+    asks_write_domain = _contains_any(txt, [
+        "aplicar melhorias no code",
+        "aplicar melhorias no código",
+        "aplicar melhorias no codigo",
+        "aplicar melhorias no codebase",
+        "melhorias no code",
+        "melhorias no código",
+        "melhorias no codigo",
+        "alterar o código",
+        "alterar o codigo",
+        "patch no code",
+        "abrir pr",
+        "pull request",
+        "criar branch",
+        "commit",
+        "merge",
+        "deploy",
+    ])
+    asks_governance = _contains_any(txt, [
+        "aprovação",
+        "aprovacao",
+        "autorização",
+        "autorizacao",
+        "approval",
+        "authorized",
+        "sob minha aprovação",
+        "sob minha aprovacao",
+        "sob minha autorização",
+        "sob minha autorizacao",
+        "com minha aprovação",
+        "com minha aprovacao",
+        "mediante minha aprovação",
+        "mediante minha aprovacao",
+        "após evidenciar as necessidades",
+        "apos evidenciar as necessidades",
+        "depois de evidenciar as necessidades",
+        "depois de evidenciar",
+        "evidenciar as necessidades",
+    ])
+    return bool(asks_question and asks_write_domain and asks_governance)
+
+
 def _looks_like_squad_resolution_request(text: str) -> bool:
     txt = _normalize(text)
     if not txt:
@@ -987,6 +1042,69 @@ def _runtime_self_audit_override(intent: str):
     }
 
 
+def _build_governance_capability_answer_payload(
+    *,
+    raw_user_input: str,
+    effective_user_input: str,
+    context: Dict[str, Any],
+) -> Dict[str, Any]:
+    governance_decision = evaluate_governance_action(
+        action_scope="read",
+        capability_name=None,
+        target_scope="platform",
+        context=context,
+        safe_mode=bool(context.get("safe_mode", False)),
+    )
+    runtime_op = {
+        "kind": "",
+        "action_scope": "read",
+        "target_scope": "platform",
+        "capability_name": None,
+        "template_id": "governance_capability_answer_template_v1",
+        "admin_access_mode": "standard",
+        "requires_write_approval": True,
+        "execution_mode": "governance_capability_answer",
+        "force_dispatch": False,
+        "final_readonly_analysis_request": False,
+        "governance_capability_question": True,
+        "requested_specialists": [],
+        "expected_specialist_reports": [],
+        "requires_explicit_approval_for_write": True,
+    }
+    return {
+        "intent": "governance_capability_answer",
+        "confidence": 0.995,
+        "recommended_agents": ["orion"],
+        "advisor_agents": ["orion"],
+        "runtime_operation": runtime_op,
+        "requires_runtime_execution": False,
+        "target_agent": "orion",
+        "delivery_contract": "governance_capability_answer_v1",
+        "template_id": "governance_capability_answer_template_v1",
+        "structured_output": True,
+        "first_win_goal": "deliver_governance_capability_answer",
+        "action_scope": "read",
+        "target_scope": "platform",
+        "capability_name": None,
+        "governance_decision": governance_decision,
+        "allowed": bool(governance_decision.get("allowed")),
+        "requires_human_authorization": False,
+        "admin_access_mode": "standard",
+        "requires_write_approval": True,
+        "team_technical_audit": False,
+        "platform_improvement_review": False,
+        "continuous_audit_request": False,
+        "continuous_audit_status_request": False,
+        "final_readonly_analysis_request": False,
+        "governance_capability_question": True,
+        "incremental_dispatch_followup": False,
+        "expected_specialist_reports": [],
+        "has_completed_dispatch_context": bool(_has_completed_dispatch_context(context)),
+        "hard_constraints": _extract_hard_constraints(effective_user_input or raw_user_input or ""),
+        "requested_job_id": None,
+    }
+
+
 def build_intent_package(
     user_input: str,
     context: Optional[Dict[str, Any]] = None,
@@ -997,6 +1115,13 @@ def build_intent_package(
     context = dict(context or {})
     context["message"] = effective_user_input
     context["raw_message"] = raw_user_input
+
+    if _looks_like_governance_capability_question(effective_user_input or raw_user_input or ""):
+        return _build_governance_capability_answer_payload(
+            raw_user_input=raw_user_input,
+            effective_user_input=effective_user_input,
+            context=context,
+        )
 
     if _looks_like_squad_resolution_trace_request(effective_user_input or raw_user_input or ""):
         return _build_squad_readonly_payload(
