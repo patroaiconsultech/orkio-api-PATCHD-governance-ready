@@ -12969,6 +12969,49 @@ def _looks_like_analytical_final_readonly_unavailability(answer: str) -> bool:
     return any(marker in txt for marker in markers)
 
 
+def _looks_like_analytical_final_readonly_generic_output(answer: str) -> bool:
+    txt = re.sub(r"\s+", " ", str(answer or "").strip().lower())
+    if not txt:
+        return False
+
+    concrete_anchors = [
+        "app/main.py",
+        "app/runtime/intent_engine.py",
+        "app/routes/internal/orion_internal.py",
+        "intent_engine",
+        "orion_internal",
+        "/api/chat/stream",
+        "/api/auth/heartbeat",
+        "/api/me",
+        "squad_resolve_readonly",
+        "constraint_violation",
+        "401",
+        "200 ok",
+        "runtime",
+        "chat/stream",
+    ]
+    broad_advice_markers = [
+        "microserviços",
+        "microservicos",
+        "api gateway",
+        "redux",
+        "zustand",
+        "jwt",
+        "websockets para sse",
+        "websocket para sse",
+    ]
+    has_anchor = any(marker in txt for marker in concrete_anchors)
+    has_broad_advice = any(marker in txt for marker in broad_advice_markers)
+    looks_high_level = (
+        "visão geral" in txt
+        or "visao geral" in txt
+        or "melhorias prioritárias" in txt
+        or "melhorias prioritarias" in txt
+        or "fragilidades arquiteturais" in txt
+    )
+    return bool((has_broad_advice and not has_anchor) or (looks_high_level and not has_anchor))
+
+
 def _build_analytical_final_readonly_prompt(
     user_message: str,
     history: Optional[List[Dict[str, str]]],
@@ -12980,8 +13023,8 @@ def _build_analytical_final_readonly_prompt(
     previous_answer = _last_assistant_text_from_history(history)
     agent_label = (agent_name or "Orion").strip() or "Orion"
     retry_rule = (
-        "A resposta anterior foi conservadora demais. "
-        "Reescreva agora em modo analytical_final_readonly, mantendo Orion como agente visível único e entregando uma análise final objetiva. "
+        "A resposta anterior ficou conservadora ou genérica demais. "
+        "Reescreva agora em modo analytical_final_readonly, mantendo Orion como agente visível único e entregando análise final concreta, ancorada em arquivos, endpoints, fluxos e sintomas já observados. "
         if force_best_effort else ""
     )
     history_block = f"Última resposta do assistant:\n{previous_answer}\n\n" if previous_answer else ""
@@ -12990,17 +13033,29 @@ def _build_analytical_final_readonly_prompt(
         "Este pedido está no trilho analytical_final_readonly. "
         "Modo read-only absoluto. Nenhuma execução operacional é permitida. "
         "O agente visível final é Orion. "
-        "Entregue uma análise final best-effort com base no codebase, contexto e evidências disponíveis. "
+        "Entregue uma análise final best-effort com base no codebase, no histórico do chat e nas evidências operacionais já observadas. "
         "NÃO diga que faltam especialistas, que especialistas não estão disponíveis, nem que o usuário deve solicitar novamente depois. "
         "NÃO peça colaboração adicional para concluir. "
         "NÃO transforme isso em resolução de squad, trace técnico, capability operacional, constraint violation ou recusa genérica. "
-        "Se houver lacunas, trate-as como limitações explícitas da análise, mas ainda entregue diagnóstico, fragilidades e recomendações priorizadas. "
+        "Se houver lacunas, trate-as como hipóteses explícitas, mas ainda entregue diagnóstico, fragilidades e recomendações priorizadas. "
+        "Sua resposta precisa ser CONCRETA: cite arquivos, funções, módulos, endpoints ou fluxos quando houver base para isso. "
+        "Use, quando pertinentes, âncoras como app/main.py, app/runtime/intent_engine.py, app/routes/internal/orion_internal.py, /api/chat/stream, /api/auth/heartbeat, /api/me, squad_resolve_readonly, CONSTRAINT_VIOLATION, 401 e 200 OK. "
+        "Se uma afirmação for hipótese e não fato confirmado, marque claramente como hipótese. "
+        "Evite recomendações genéricas e amplas sem evidência direta; não recomende microserviços, API Gateway, Redux, Zustand ou JWT como resposta padrão se isso não estiver ancorado no problema observado. "
+        "Priorize causa raiz concreta, impacto real e melhoria incremental viável. "
         f"{retry_rule}"
-        "Formato esperado: análise final em linguagem natural, com visão geral, fragilidades e melhorias priorizadas. "
+        "Formato obrigatório: "
+        "1. visão geral objetiva; "
+        "2. evidências concretas observadas; "
+        "3. causa raiz provável; "
+        "4. fragilidades arquiteturais reais; "
+        "5. melhorias priorizadas; "
+        "6. riscos e validação. "
         "Proibido responder com capability_name, template_id, requested_specialists, selected_specialists, dispatch_receipts, specialist_reports ou mensagens de indisponibilidade de especialistas.\n\n"
         f"{history_block}"
         f"Pedido atual do usuário:\n{raw_user}"
     )
+
 
 def _pick_runtime_primary_agent(
     target_agents: List[Any],
@@ -18217,7 +18272,11 @@ async def chat_stream(
                         intent_name_live == "analytical_final_readonly"
                         and _looks_like_analytical_final_readonly_unavailability(_ans_text_raw)
                     )
-                    if _looks_like_generic_safe_refusal(_ans_text_raw) or _analytical_unavailability:
+                    _analytical_generic = (
+                        intent_name_live == "analytical_final_readonly"
+                        and _looks_like_analytical_final_readonly_generic_output(_ans_text_raw)
+                    )
+                    if _looks_like_generic_safe_refusal(_ans_text_raw) or _analytical_unavailability or _analytical_generic:
                         provider_refusal_detected = True
                         _repair_prompt = (
                             _build_analytical_final_readonly_prompt(
@@ -18233,7 +18292,7 @@ async def chat_stream(
                             try:
                                 yield sse_execution(
                                     "provider_refusal_retry",
-                                    "Provider retornou recusa genérica; aplicando retry contextual",
+                                    "Provider retornou recusa genérica ou análise superficial; aplicando retry contextual",
                                     kind="warning",
                                     scope="agent",
                                     agent_id=final_signer_agent_id,
