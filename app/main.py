@@ -37,6 +37,7 @@ from .summit_config import get_summit_runtime_config, normalize_language_profile
 from .summit_prompt import build_summit_instructions
 from .summit_metrics import assess_realtime_session, merge_human_review
 from .runtime import get_capability_registry, build_intent_package, build_first_win_plan, build_continuity_hints, build_arcangelic_chain, build_system_overlay, build_runtime_hints, build_trial_hints, build_planner_snapshot, score_memory_candidate, build_memory_snapshot, build_trial_analytics, build_dag_execution_snapshot
+from .runtime.capability_registry import get_team_roster, get_full_agent_roster, get_agent_roster, format_team_roster_answer, is_team_roster_question_text
 from .numerology.schemas import NumerologyProfileIn, NumerologyProfileOut
 from .numerology.engine import generate_numerology_profile
 from .routes.user import router as user_router
@@ -8783,89 +8784,32 @@ def _is_governance_capability_question_request(user_text: str) -> bool:
     return bool(asks_question and asks_write_domain and asks_governance)
 
 
-_TEAM_ROSTER_SPECIALISTS = ["orion", "auditor", "cto", "ux_frontend"]
+
+# EFATA777_ORION_CHRIS_ROSTER_UNIFICATION_PATCH
+# Roster determinístico: main.py consulta a fonte canônica em app/runtime/capability_registry.py.
+# Compatibilidade retroativa: o squad técnico padrão continua sendo estes 4.
+_TEAM_ROSTER_SPECIALISTS = list(get_team_roster("core_technical_squad") or ["orion", "auditor", "cto", "ux_frontend"])
 
 
 def _is_team_roster_question_request(user_text: str) -> bool:
     """
-    EFATA 777 — resposta determinística para perguntas de roster/time.
-    Evita que perguntas simples sobre especialistas caiam em platform_self_audit
-    ou runtime dispatch.
+    EFATA777_FINAL_AUDITOR_ADJUSTMENT:
+    Delegates roster detection to the canonical registry helper so main.py
+    cannot diverge from intent_engine.py.
     """
-    raw = str(user_text or "")
-    txt = raw.strip().lower()
-    if not txt:
-        return False
-
-    has_question_shape = ("?" in raw) or any(term in txt for term in [
-        "quantos",
-        "quantas",
-        "quem",
-        "quais",
-        "liste",
-        "lista",
-        "mostre",
-        "me diga",
-        "informe",
-    ])
-    has_roster_subject = any(term in txt for term in [
-        "especialistas",
-        "especialista",
-        "agentes",
-        "agente",
-        "time",
-        "equipe",
-        "squad padrão",
-        "squad padrao",
-        "squad operacional",
-        "squad",
-    ])
-    has_roster_intent = any(term in txt for term in [
-        "quantos especialistas",
-        "quantas especialistas",
-        "quantos agentes",
-        "quem está no time",
-        "quem esta no time",
-        "quem temos no time",
-        "quais especialistas",
-        "quais agentes",
-        "lista de especialistas",
-        "liste os especialistas",
-        "liste agentes",
-        "qual é o time",
-        "qual e o time",
-        "qual squad",
-        "squad padrão",
-        "squad padrao",
-    ])
-    execution_terms = [
-        "resolva",
-        "resolver",
-        "dispatch",
-        "execute",
-        "executar",
-        "auditoria",
-        "auditar",
-        "war room",
-        "trace",
-        "patch",
-        "pr",
-        "pull request",
-        "branch",
-        "commit",
-    ]
-    if any(term in txt for term in execution_terms):
-        return False
-
-    return bool(has_roster_subject and (has_roster_intent or has_question_shape or "@orion" in txt or "orion" in txt))
+    return bool(is_team_roster_question_text(user_text))
 
 
 def _build_team_roster_answer_text(user_text: str = "") -> str:
-    specialists = list(_TEAM_ROSTER_SPECIALISTS)
-    return "\n".join([
-        f"Temos {len(specialists)} especialistas no squad operacional padrão:",
-        *[f"- {name}" for name in specialists],
-    ])
+    try:
+        return format_team_roster_answer(user_text or "")
+    except Exception:
+        core = list(get_team_roster("core_technical_squad") or ["orion", "auditor", "cto", "ux_frontend"])
+        return "\n".join([
+            f"Temos {len(core)} especialistas no squad operacional padrão:",
+            *[f"- {name}" for name in core],
+        ])
+
 
 def _build_governance_capability_answer_text(
     user_text: str,
