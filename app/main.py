@@ -10,6 +10,7 @@ import json, time, uuid, re, math
 import base64
 import asyncio
 import jwt
+from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
 from app.self_heal.secret_broker import resolve_github_token
@@ -6152,6 +6153,35 @@ def _resolve_dispatch_agent_by_slug(
     return None
 
 
+def _readonly_dispatch_specialist_slugs() -> set:
+    # EFATA777_ORION_FINAL_ROUTING_AND_SQUAD_POLICY_HOTFIX
+    # Especialistas que podem aparecer em resolução read-only mesmo quando ainda
+    # não existem como Agent persistido no banco. Não habilita execução nem dispatch.
+    return {
+        "orion",
+        "auditor",
+        "cto",
+        "ux_frontend",
+        "backend_engineer",
+        "frontend_engineer",
+        "devops_sre",
+        "security_guardian",
+        "data_db_architect",
+        "qa_release_engineer",
+        "realtime_voice_engineer",
+        "architect",
+        "devops",
+        "security",
+        "memory_ops",
+        "stage_manager",
+    }
+
+
+def _is_known_readonly_dispatch_specialist(slug: str) -> bool:
+    slug = _canonical_dispatch_specialist_slug(slug) or ""
+    return bool(slug and slug in _readonly_dispatch_specialist_slugs())
+
+
 def _build_runtime_constraint_violation_text(constraints: Dict[str, Any], violations: List[str]) -> str:
     lines = ["CONSTRAINT_VIOLATION"]
     if constraints.get("required_signer"):
@@ -6384,6 +6414,11 @@ def _apply_runtime_hard_constraints_to_targets(
         resolved_names: List[str] = []
         for slug in specialists_required:
             ag = _resolve_by_slug(slug)
+            if ag is None and readonly_squad and _is_known_readonly_dispatch_specialist(slug):
+                # Read-only squad resolution is a planning trace, not execution.
+                # Use a virtual specialist so newly formalized Orion agents do not
+                # get incorrectly reported as missing before DB seeding catches up.
+                ag = SimpleNamespace(id=f"readonly_virtual:{slug}", name=slug)
             if ag is None:
                 missing.append(slug)
                 continue
@@ -7848,12 +7883,12 @@ def _looks_like_final_readonly_analysis_request_message(user_text: str) -> bool:
         return False
 
     has_analysis = bool(re.search(
-        r"an[áa]lise detalhada|an[áa]lise arquitetural|auditoria t[ée]cnica|diagn[óo]stico t[ée]cnico|melhorias priorizadas|recomendac[aã]o consolidada|an[áa]lise final",
+        r"an[áa]lise detalhada|an[áa]lise arquitetural|an[áa]lise t[ée]cnica final|an[áa]lise t[ée]cnica|auditoria t[ée]cnica|auditoria externa|parecer t[ée]cnico|diagn[óo]stico t[ée]cnico|melhorias priorizadas|recomendac[aã]o consolidada|an[áa]lise final",
         txt,
         flags=re.IGNORECASE,
     ))
     has_scope = bool(re.search(
-        r"code|codebase|c[óo]digo|codigo|runtime|backend|frontend|console|chat stream|sse|intent|governan[çc]a|github bridge|ux",
+        r"code|codebase|c[óo]digo|codigo|runtime|backend|frontend|console|chat stream|sse|intent|governan[çc]a|github bridge|ux|orkio|plataforma|sistema|arquitetura|t[ée]cnic[ao]",
         txt,
         flags=re.IGNORECASE,
     ))
