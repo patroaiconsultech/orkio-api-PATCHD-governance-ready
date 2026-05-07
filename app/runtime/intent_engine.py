@@ -1879,7 +1879,16 @@ def build_intent_package(
         "specialists_required": specialists_required,
         "specialists_forbidden": specialists_forbidden,
         "selected_specialists_count_must_be": selected_specialists_count_must_be,
-        "requested_specialists": list(requested_squad_specialists or specialists_required or recommended_agents),
+        "requested_specialists": list(
+            (requested_squad_specialists or specialists_required)
+            if (platform_improvement_review or team_technical_audit)
+            else (requested_squad_specialists or specialists_required or recommended_agents)
+        ),
+        "requested_specialists_are_hints": bool(
+            (platform_improvement_review or team_technical_audit)
+            and not specialists_required
+            and selected_specialists_count_must_be is None
+        ),
         "execution_mode": (
             "analytical_final_readonly"
             if final_readonly_analysis_request
