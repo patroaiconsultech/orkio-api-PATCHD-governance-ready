@@ -8157,25 +8157,29 @@ def _orion_operational_maturity_request_flags(user_text: str) -> Dict[str, Any]:
     if not txt:
         return {"requested": False}
 
-    maturity_patterns = [
+    explicit_anchor_patterns = [
         r"maturidade\s+operacional",
         r"prontid[aã]o\s+operacional",
         r"operacionalmente\s+madur",
         r"runtime\s+operacionalmente\s+madur",
-        r"rastreabil",
-        r"observabil",
-        r"governan[cç]a",
-        r"separa[cç][aã]o\s+entre\s+orquestra",
-        r"separa[cç][aã]o\s+entre\s+agente\s+vis[ií]vel\s+e\s+executor",
+        r"auditoria\s+interna\s+de\s+maturidade",
+        r"crit[eé]rios\s+de\s+prontid[aã]o\s+operacional",
+    ]
+    evidence_patterns = [
         r"lacunas\s+de\s+rastreabilidade",
         r"lacunas\s+de\s+observabilidade",
         r"lacunas\s+de\s+governan[cç]a",
-        r"crit[eé]rios\s+de\s+prontid[aã]o\s+operacional",
-        r"auditoria\s+interna\s+de\s+maturidade",
+        r"separa[cç][aã]o\s+entre\s+orquestra",
+        r"separa[cç][aã]o\s+entre\s+agente\s+vis[ií]vel\s+e\s+executor",
     ]
+
+    explicit_anchor = any(re.search(p, txt, flags=re.IGNORECASE) for p in explicit_anchor_patterns)
+    evidence_hit = any(re.search(p, txt, flags=re.IGNORECASE) for p in evidence_patterns)
+
     return {
-        "requested": any(re.search(p, txt, flags=re.IGNORECASE) for p in maturity_patterns),
+        "requested": bool(explicit_anchor or evidence_hit),
     }
+
 
 
 def _pick_target_agent_by_slug(target_agents: Optional[List[Dict[str, Any]]], slug: str) -> Optional[Dict[str, Any]]:
