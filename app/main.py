@@ -910,11 +910,23 @@ _founder_guidance_lock = _threading.Lock()
 _founder_guidance_state: dict = {}  # {(org, thread_id): {"action": str, "turns_left": int, "goal": str}}
 
 _GITHUB_WRITE_APPROVAL_TTL_SECONDS = int(os.getenv("GITHUB_WRITE_APPROVAL_TTL_SECONDS", "3600") or "3600")
-_github_write_lock = _threading.Lock()
-_github_write_approval_state: dict = {}  # {(org, thread_id, user_id): approval_dict}
+_github_write_lock = globals().get("_github_write_lock") or _threading.Lock()
 
+_github_write_approval_state = globals().get("_github_write_approval_state")
+if not isinstance(_github_write_approval_state, dict):
+    _github_write_approval_state = {}  # {(org, thread_id, user_id): approval_dict}
 
-_github_write_execution_state: dict = {}  # {(org, thread_id, user_id): execution_receipts}
+_github_write_active_approval_state = globals().get("_github_write_active_approval_state")
+if not isinstance(_github_write_active_approval_state, dict):
+    _github_write_active_approval_state = _github_write_approval_state
+
+_github_write_pending_approval_state = globals().get("_github_write_pending_approval_state")
+if not isinstance(_github_write_pending_approval_state, dict):
+    _github_write_pending_approval_state = {}
+
+_github_write_execution_state = globals().get("_github_write_execution_state")
+if not isinstance(_github_write_execution_state, dict):
+    _github_write_execution_state = {}  # {(org, thread_id, user_id): execution_receipts}
 
 
 def _github_write_execution_key(org: str, thread_id: Optional[str], payload: Optional[Dict[str, Any]]) -> str:
@@ -3341,6 +3353,24 @@ def _capability_execution_result_from_exception(exc: Exception, *, context: str 
             "status_code": 403,
             "error_code": error_code or "AUTH_FORBIDDEN",
             "message": message or "Acesso não autorizado para esta operação.",
+        })
+        return base
+
+    raw_message = message or str(exc or "").strip()
+
+    if isinstance(exc, NameError) and "_github_write_pending_approval_state" in raw_message:
+        base.update({
+            "status_code": 500,
+            "error_code": "GOVERNANCE_STATE_NOT_READY",
+            "message": "FALHA CONTROLADA DE GOVERNANÇA\n\nerror_code: GOVERNANCE_STATE_NOT_READY\ndispatch_executed: false\nwrite_executed: false\ngithub_executed: false",
+        })
+        return base
+
+    if isinstance(exc, TypeError) and "object does not support item assignment" in raw_message:
+        base.update({
+            "status_code": 500,
+            "error_code": "GOVERNANCE_PAYLOAD_NOT_READY",
+            "message": "FALHA CONTROLADA DE GOVERNANÇA\n\nerror_code: GOVERNANCE_PAYLOAD_NOT_READY\ndispatch_executed: false\nwrite_executed: false\ngithub_executed: false",
         })
         return base
 
@@ -7111,6 +7141,7 @@ def _github_write_store_pending_proposal(
     requested_actions: Optional[List[str]] = None,
     requested_paths: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
+    _github_write_ensure_state_globals()
     now = now_ts()
     identity = _github_write_identity(payload)
     normalized_patch_id = _github_normalize_patch_id(patch_id)
@@ -7143,6 +7174,7 @@ def _github_write_store_pending_proposal(
 
 
 def _github_write_get_pending_proposal(org: str, thread_id: Optional[str], payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    _github_write_ensure_state_globals()
     key = _github_write_pending_key(org, thread_id, payload)
     userwide_key = _github_write_user_approval_key(org, str((payload or {}).get("sub") or "unknown").strip())
     now = now_ts()
@@ -7159,6 +7191,7 @@ def _github_write_get_pending_proposal(org: str, thread_id: Optional[str], paylo
 
 
 def _github_write_clear_pending_proposal(org: str, thread_id: Optional[str], payload: Optional[Dict[str, Any]]) -> None:
+    _github_write_ensure_state_globals()
     key = _github_write_pending_key(org, thread_id, payload)
     userwide_key = _github_write_user_approval_key(org, str((payload or {}).get("sub") or "unknown").strip())
     with _github_write_lock:
@@ -7171,8 +7204,28 @@ def _github_write_is_identity_question(user_text: str) -> bool:
     if not low:
         return False
     return bool(
-        re.search(r"(quem\s+est[aá]\s+autorizando|quem\s+autoriza|quem\s+est[aá]\s+interagindo|identidade\s+autenticada|admin\s+master|sou\s+o\s+admin\s+master|criador\s+autoriz)", low, flags=re.IGNORECASE)
+        re.search(
+            r"(quem\s+est[aá]\s+autorizando|quem\s+autoriza|quem\s+est[aá]\s+interagindo|identidade\s+autenticada|admin\s+master|sou\s+o\s+admin\s+master|criador\s+autoriz|qual\s+[ée]\s+minha\s+autoridade|quem\s+pode\s+aprovar\s+escrita|quem\s+[ée]\s+o\s+admin\s+master)",
+            low,
+            flags=re.IGNORECASE,
+        )
     )
+
+
+def _github_write_ensure_state_globals() -> None:
+    global _github_write_approval_state
+    global _github_write_active_approval_state
+    global _github_write_pending_approval_state
+    global _github_write_execution_state
+
+    if not isinstance(_github_write_approval_state, dict):
+        _github_write_approval_state = {}
+    if not isinstance(_github_write_active_approval_state, dict):
+        _github_write_active_approval_state = _github_write_approval_state
+    if not isinstance(_github_write_pending_approval_state, dict):
+        _github_write_pending_approval_state = {}
+    if not isinstance(_github_write_execution_state, dict):
+        _github_write_execution_state = {}
 
 
 def _github_write_subject(payload: Optional[Dict[str, Any]]) -> str:
@@ -7192,6 +7245,11 @@ def _github_write_user_approval_key(org: str, user_id: Optional[str]) -> str:
     return f"{org_key}::userwide::{user_key}"
 
 def _github_write_cleanup_locked() -> None:
+    global _github_write_approval_state
+    global _github_write_active_approval_state
+    global _github_write_pending_approval_state
+
+    _github_write_ensure_state_globals()
     now = now_ts()
 
     stale_approvals = []
@@ -7216,8 +7274,12 @@ def _github_write_cleanup_locked() -> None:
     for key in stale_pending:
         _github_write_pending_approval_state.pop(key, None)
 
+    if not isinstance(_github_write_active_approval_state, dict):
+        _github_write_active_approval_state = _github_write_approval_state
+
 
 def _github_write_get_active_approval(org: str, thread_id: Optional[str], payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    _github_write_ensure_state_globals()
     user_id = str((payload or {}).get("sub") or "").strip()
     thread_key = _github_write_approval_key(org, thread_id, user_id)
     userwide_key = _github_write_user_approval_key(org, user_id)
@@ -7267,6 +7329,7 @@ def _github_write_embed_runtime_approval_message(
         return txt
 
 def _github_write_clear_approval(org: str, thread_id: Optional[str], payload: Optional[Dict[str, Any]]) -> None:
+    _github_write_ensure_state_globals()
     user_id = str((payload or {}).get("sub") or "").strip()
     thread_key = _github_write_approval_key(org, thread_id, user_id)
     userwide_key = _github_write_user_approval_key(org, user_id)
@@ -7613,6 +7676,7 @@ def _github_write_policy_snapshot(
     payload: Optional[Dict[str, Any]],
     db: Optional[Session] = None,
 ) -> Dict[str, Any]:
+    _github_write_ensure_state_globals()
     capabilities = _build_runtime_capabilities_payload(db=db, org=org)
     github = capabilities.get("github") if isinstance(capabilities.get("github"), dict) else {}
     approval = _github_write_get_active_approval(org, thread_id, payload)
@@ -7700,6 +7764,7 @@ def _github_write_validate_tokenized_approval(
     payload: Optional[Dict[str, Any]],
     auth_flags: Dict[str, Any],
 ) -> Dict[str, Any]:
+    _github_write_ensure_state_globals()
     identity = _github_write_identity(payload)
     patch_id = _github_normalize_patch_id(str(auth_flags.get("patch_id") or ""))
     approval_token = str(auth_flags.get("approval_token") or "").strip().upper().replace("_", "-")
@@ -7796,6 +7861,7 @@ def _github_store_write_approval(
     auth_flags: Dict[str, Any],
     pending: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    _github_write_ensure_state_globals()
     pending = dict(pending or {})
     user_id = str((payload or {}).get("sub") or "").strip()
     key = _github_write_approval_key(org, thread_id, user_id)
@@ -7864,6 +7930,29 @@ def _github_store_write_approval(
 
 
 
+def _build_github_write_identity_text(snapshot: Dict[str, Any]) -> str:
+    identity = snapshot.get("identity") if isinstance(snapshot.get("identity"), dict) else {}
+    active = snapshot.get("active_approval") if isinstance(snapshot.get("active_approval"), dict) else {}
+    pending = snapshot.get("pending_approval_proposal") if isinstance(snapshot.get("pending_approval_proposal"), dict) else {}
+    lines = [
+        "IDENTIDADE E AUTORIDADE OPERACIONAL",
+        "",
+        f"authenticated: {bool(identity.get('email') or identity.get('sub'))}",
+        f"user_email: {identity.get('email') or 'n/d'}",
+        f"is_admin_master: {bool(identity.get('is_admin_master'))}",
+        f"write_approval_authority: {bool(identity.get('write_authority'))}",
+        f"admin_console_access: {bool(identity.get('admin_console_access'))}",
+        f"authority_source: {identity.get('authority_source') or 'none'}",
+        "",
+        f"approval_model: {identity.get('approval_model') or 'tokenized_pending_proposal_scope'}",
+        f"active_approval_present: {bool(active)}",
+        f"pending_proposal_present: {bool(pending)}",
+        "dispatch_executed: false",
+        "write_executed: false",
+    ]
+    return "\n".join(lines)
+
+
 def _build_github_write_response_text(
     *,
     org: str,
@@ -7880,6 +7969,9 @@ def _build_github_write_response_text(
         req_flags["create_branch"] = True
         req_flags["requested"] = True
     can_govern = bool(snapshot.get("can_govern"))
+
+    if _github_write_is_identity_question(user_text):
+        return _build_github_write_identity_text(snapshot)
 
     if auth_flags.get("deny_execution"):
         _github_write_clear_approval(org, thread_id, payload)
