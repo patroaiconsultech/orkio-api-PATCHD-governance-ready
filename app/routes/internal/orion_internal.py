@@ -8,6 +8,7 @@ import os
 import re
 import time
 import uuid
+import hashlib
 import urllib.request as _urllib_request
 import urllib.parse as _urllib_parse
 import ssl as _ssl
@@ -18,7 +19,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 from app.db import SessionLocal, get_db
-from app.models import ContinuousAuditArtifact, ContinuousAuditJob, ContinuousAuditReceipt
+from app.models import ContinuousAuditArtifact, ContinuousAuditJob, ContinuousAuditReceipt, EvolutionProposal
 from app.services.identity_service import load_active_identity
 from app.core.orkio_constitution import load_constitution
 from app.core.orkio_permissions import load_permissions
@@ -75,6 +76,215 @@ def _json_loads(value: Any, default: Any) -> Any:
     except Exception:
         return default
 
+
+def _proposal_title_from_payload(payload: Dict[str, Any]) -> str:
+    selected = str(payload.get("selected_improvement") or "").strip()
+    if selected:
+        return selected[:180]
+    final_consolidation = str(payload.get("final_consolidation") or "").strip()
+    if final_consolidation:
+        return final_consolidation[:180]
+    summary = str(payload.get("technical_summary") or "").strip()
+    return (summary[:180] or "Governed assisted evolution proposal")
+
+
+def _proposal_summary_from_payload(payload: Dict[str, Any]) -> str:
+    blocks: List[str] = []
+    for key in ("technical_summary", "user_impact", "root_cause", "technical_risk", "final_consolidation"):
+        value = str(payload.get(key) or "").strip()
+        if value and value not in blocks:
+            blocks.append(value)
+    if not blocks:
+        return "Proposal generated from assisted platform self-evolution review."
+    return "\n\n".join(blocks)[:4000]
+
+
+def _proposal_domain_scope_from_payload(payload: Dict[str, Any]) -> str:
+    probable = [str(item).strip().lower() for item in list(payload.get("probable_files") or []) if str(item).strip()]
+    key_files = [str(item).strip().lower() for item in list(payload.get("key_files") or []) if str(item).strip()]
+    focus = [str(item).strip().lower() for item in list(payload.get("focus_areas") or []) if str(item).strip()]
+    raw = " ".join(probable + key_files + focus)
+    if "src/" in raw or "frontend" in raw or "appconsole" in raw or "console" in raw:
+        return "frontend"
+    return "platform"
+
+
+def _proposal_action_from_payload(payload: Dict[str, Any]) -> str:
+    scope = _proposal_domain_scope_from_payload(payload)
+    if scope == "frontend":
+        return "frontend_patch"
+    return "platform_improvement"
+
+
+def _proposal_category_from_payload(payload: Dict[str, Any]) -> str:
+    scope = _proposal_domain_scope_from_payload(payload)
+    return "ux_frontend" if scope == "frontend" else "platform_governance"
+
+
+def _proposal_fingerprint_from_payload(org_slug: str, payload: Dict[str, Any]) -> str:
+    basis = {
+        "org": str(org_slug or "public").strip().lower(),
+        "title": _proposal_title_from_payload(payload),
+        "domain_scope": _proposal_domain_scope_from_payload(payload),
+        "action": _proposal_action_from_payload(payload),
+        "probable_files": list(payload.get("probable_files") or []),
+        "key_files": list(payload.get("key_files") or []),
+        "focus_areas": list(payload.get("focus_areas") or []),
+    }
+    raw = json.dumps(basis, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha1(raw.encode("utf-8")).hexdigest()
+
+
+def _assisted_evolution_decision_json(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "source_event": str(payload.get("event") or "").strip(),
+        "delivery_contract": str(payload.get("delivery_contract") or "").strip(),
+        "technical_summary": str(payload.get("technical_summary") or "").strip(),
+        "selected_improvement": str(payload.get("selected_improvement") or "").strip(),
+        "root_cause": str(payload.get("root_cause") or "").strip(),
+        "user_impact": str(payload.get("user_impact") or "").strip(),
+        "technical_risk": str(payload.get("technical_risk") or "").strip(),
+        "probable_files": list(payload.get("probable_files") or []),
+        "implementation_steps": list(payload.get("implementation_steps") or []),
+        "recommended_actions": list(payload.get("recommended_actions") or []),
+        "key_files": list(payload.get("key_files") or []),
+        "focus_areas": list(payload.get("focus_areas") or []),
+        "priority_score": int(payload.get("priority_score") or 0),
+        "priority_score_label": str(payload.get("priority_score_label") or "").strip(),
+        "human_approval_required": True,
+        "pr_required": True,
+        "assisted_mode": "proposal_only",
+    }
+
+
+def _persist_assisted_evolution_proposal(
+    db: Session,
+    *,
+    org_slug: str,
+    payload: Dict[str, Any],
+    requested_by_user_id: Optional[str] = None,
+    requested_by_user_name: Optional[str] = None,
+) -> Dict[str, Any]:
+    if db is None:
+        return {}
+    fingerprint = _proposal_fingerprint_from_payload(org_slug, payload)
+    now_ts = _now_ts()
+    title = _proposal_title_from_payload(payload)
+    summary = _proposal_summary_from_payload(payload)
+    action = _proposal_action_from_payload(payload)
+    domain_scope = _proposal_domain_scope_from_payload(payload)
+    category = _proposal_category_from_payload(payload)
+    severity = "medium"
+    code = "ASSISTED_EVOLUTION_PROPOSAL"
+    decision_json = _assisted_evolution_decision_json(payload)
+    finding_json = {
+        "title": title,
+        "summary": summary,
+        "technical_summary": str(payload.get("technical_summary") or "").strip(),
+        "selected_improvement": str(payload.get("selected_improvement") or "").strip(),
+        "key_files": list(payload.get("key_files") or []),
+        "probable_files": list(payload.get("probable_files") or []),
+        "focus_areas": list(payload.get("focus_areas") or []),
+        "generated_by": "orion_internal",
+    }
+    issue_json = {
+        "source_event": str(payload.get("event") or "").strip(),
+        "delivery_contract": str(payload.get("delivery_contract") or "").strip(),
+        "requested_by_user_id": str(requested_by_user_id or "").strip() or None,
+        "requested_by_user_name": str(requested_by_user_name or "").strip() or None,
+    }
+
+    row = db.execute(
+        select(EvolutionProposal).where(
+            EvolutionProposal.org_slug == (org_slug or "public"),
+            EvolutionProposal.fingerprint == fingerprint,
+        )
+    ).scalars().first()
+
+    created = False
+    if row is None:
+        row = EvolutionProposal(
+            id=f"proposal_{_new_id()}",
+            org_slug=org_slug or "public",
+            fingerprint=fingerprint,
+            code=code,
+            severity=severity,
+            category=category,
+            source="orion_assisted_evolution",
+            action=action,
+            status="awaiting_master_approval",
+            title=title,
+            summary=summary,
+            finding_json=_json_dumps(finding_json),
+            issue_json=_json_dumps(issue_json),
+            decision_json=_json_dumps(decision_json),
+            domain_scope=domain_scope,
+            recurrence_window_count=1,
+            blast_radius_accumulated=0,
+            security_accumulated=0,
+            last_priority_score=int(payload.get("priority_score") or 0),
+            last_recommendation="review_only",
+            last_cadence_seconds=0,
+            first_detected_at=now_ts,
+            last_detected_at=now_ts,
+            detected_count=1,
+            last_trace_id=str(payload.get("source_audit_reference") or "").strip() or None,
+            created_at=now_ts,
+            updated_at=now_ts,
+        )
+        db.add(row)
+        created = True
+    else:
+        row.code = code
+        row.severity = severity
+        row.category = category
+        row.source = "orion_assisted_evolution"
+        row.action = action
+        row.title = title
+        row.summary = summary
+        row.finding_json = _json_dumps(finding_json)
+        row.issue_json = _json_dumps(issue_json)
+        row.decision_json = _json_dumps(decision_json)
+        row.domain_scope = domain_scope
+        row.last_priority_score = int(payload.get("priority_score") or 0)
+        row.last_recommendation = "review_only"
+        row.last_detected_at = now_ts
+        row.updated_at = now_ts
+        row.detected_count = int(getattr(row, "detected_count", 0) or 0) + 1
+        if not str(getattr(row, "status", "") or "").strip():
+            row.status = "awaiting_master_approval"
+        if not getattr(row, "first_detected_at", None):
+            row.first_detected_at = now_ts
+        if not getattr(row, "created_at", None):
+            row.created_at = now_ts
+
+    db.commit()
+    try:
+        db.refresh(row)
+    except Exception:
+        pass
+
+    return {
+        "proposal_id": str(getattr(row, "id", "") or "").strip(),
+        "proposal_status": str(getattr(row, "status", "") or "").strip() or "awaiting_master_approval",
+        "proposal_title": str(getattr(row, "title", "") or "").strip(),
+        "proposal_created": bool(created),
+        "proposal_domain_scope": str(getattr(row, "domain_scope", "") or "").strip() or domain_scope,
+        "proposal_action": str(getattr(row, "action", "") or "").strip() or action,
+        "awaiting_master_approval": str(getattr(row, "status", "") or "").strip() == "awaiting_master_approval",
+    }
+
+
+def _payload_wants_assisted_proposal_persistence(payload: Dict[str, Any]) -> bool:
+    event = str(payload.get("event") or "").strip().upper()
+    mode = str(payload.get("mode") or "").strip().lower()
+    contract = str(payload.get("delivery_contract") or "").strip().lower()
+    if event in {"PLATFORM_IMPROVEMENT_REVIEW_EXECUTED", "CONTROLLED_SELF_EVOLUTION_PROPOSED"}:
+        return True
+    return mode in {"platform_improvement_review", "controlled_self_evolution_propose_only"} or contract in {
+        "platform_improvement_review_v1",
+        "controlled_self_evolution_propose_only_v1",
+    }
 
 def _extract_continuous_audit_job_id(message: str) -> str:
     effective = _continuous_audit_effective_input(message or "")
@@ -683,15 +893,47 @@ def _platform_self_audit_detached(inp: "OrionRuntimeIn", *, org: str = "public")
 
         visible_agent = _resolve_visible_agent(inp.message, default="orkio")
         payload = _build_platform_self_audit_payload(inp, visible_agent)
+        governance_context = _governance_context_from_message(inp.message, request=request)
         decision = evaluate_governance_action(
             action_scope="diagnose",
             capability_name="platform_self_audit",
             target_scope="platform",
-            context=_governance_context_from_message(inp.message),
+            context=governance_context,
             safe_mode=False,
         )
         payload["governance_decision"] = decision
         payload["danielic_integrity_passed"] = bool(decision.get("danielic_integrity_passed"))
+
+        if payload.get("ok") and _payload_wants_assisted_proposal_persistence(payload):
+            proposal_meta = _persist_assisted_evolution_proposal(
+                db,
+                org_slug=org,
+                payload=payload,
+                requested_by_user_id=requested_by_user_id,
+                requested_by_user_name=requested_by_user_name,
+            )
+            if proposal_meta:
+                payload.update(proposal_meta)
+                payload["assisted_evolution_ready"] = True
+                payload["next_authorization_command"] = (
+                    str(payload.get("next_authorization_command") or "").strip()
+                    or f"Aprove a proposal {proposal_meta.get('proposal_id')} no Evolution Center antes de qualquer execução governada."
+                )
+                existing_actions = list(payload.get("recommended_actions") or [])
+                proposal_action = f"Revisar proposal governada {proposal_meta.get('proposal_id')} no Evolution Center."
+                approval_action = "Aprovar explicitamente a proposal antes de qualquer patch, PR, merge ou deploy."
+                if proposal_action not in existing_actions:
+                    existing_actions.insert(0, proposal_action)
+                if approval_action not in existing_actions:
+                    existing_actions.append(approval_action)
+                payload["recommended_actions"] = existing_actions
+                payload["proposal_reference"] = {
+                    "id": proposal_meta.get("proposal_id"),
+                    "status": proposal_meta.get("proposal_status"),
+                    "title": proposal_meta.get("proposal_title"),
+                    "domain_scope": proposal_meta.get("proposal_domain_scope"),
+                    "action": proposal_meta.get("proposal_action"),
+                }
         return payload
     finally:
         if db is not None:
@@ -3953,15 +4195,47 @@ def platform_self_audit(
 
         visible_agent = _resolve_visible_agent(inp.message, default="orkio")
         payload = _build_platform_self_audit_payload(inp, visible_agent)
+        governance_context = _governance_context_from_message(inp.message, request=request)
         decision = evaluate_governance_action(
             action_scope="diagnose",
             capability_name="platform_self_audit",
             target_scope="platform",
-            context=_governance_context_from_message(inp.message),
+            context=governance_context,
             safe_mode=False,
         )
         payload["governance_decision"] = decision
         payload["danielic_integrity_passed"] = bool(decision.get("danielic_integrity_passed"))
+
+        if payload.get("ok") and _payload_wants_assisted_proposal_persistence(payload):
+            proposal_meta = _persist_assisted_evolution_proposal(
+                db,
+                org_slug=org,
+                payload=payload,
+                requested_by_user_id=requested_by_user_id,
+                requested_by_user_name=requested_by_user_name,
+            )
+            if proposal_meta:
+                payload.update(proposal_meta)
+                payload["assisted_evolution_ready"] = True
+                payload["next_authorization_command"] = (
+                    str(payload.get("next_authorization_command") or "").strip()
+                    or f"Aprove a proposal {proposal_meta.get('proposal_id')} no Evolution Center antes de qualquer execução governada."
+                )
+                existing_actions = list(payload.get("recommended_actions") or [])
+                proposal_action = f"Revisar proposal governada {proposal_meta.get('proposal_id')} no Evolution Center."
+                approval_action = "Aprovar explicitamente a proposal antes de qualquer patch, PR, merge ou deploy."
+                if proposal_action not in existing_actions:
+                    existing_actions.insert(0, proposal_action)
+                if approval_action not in existing_actions:
+                    existing_actions.append(approval_action)
+                payload["recommended_actions"] = existing_actions
+                payload["proposal_reference"] = {
+                    "id": proposal_meta.get("proposal_id"),
+                    "status": proposal_meta.get("proposal_status"),
+                    "title": proposal_meta.get("proposal_title"),
+                    "domain_scope": proposal_meta.get("proposal_domain_scope"),
+                    "action": proposal_meta.get("proposal_action"),
+                }
         return payload
     finally:
         if own_db and db is not None:
