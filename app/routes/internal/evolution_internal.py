@@ -15,14 +15,14 @@ from sqlalchemy.orm import Session
 
 from app.db import get_db
 from app.models import EvolutionProposal, EvolutionExecution, EvolutionSignalSnapshot, EvolutionCycleLog
-from app.security import decode_token
-
 from app.self_heal.governance import EvolutionGovernanceService, run_governed_scan_cycle, detection_touch_cooldown_seconds, recurrence_window_seconds
 from app.self_heal.policy import SelfHealPolicy, POLICY_VERSION
 from app.self_heal.trust import build_trust_envelope, coerce_trust_envelope, trust_gate_reasons
 from app.self_heal.semantic_validation import run_semantic_validation, run_post_execution_semantic_integrity
 from app.self_heal.validators.base import SemanticValidationContext
 from app.self_heal.credential_scope import is_branch_allowed, is_protected_branch, resolve_scoped_credentials
+
+from app.services.admin_master_identity import get_master_admin_key, require_admin_console_access, require_master_admin_access
 
 from .schema_patch_engine import classify_and_patch
 
@@ -45,19 +45,8 @@ def _default_branch() -> str:
     return _clean_env("GITHUB_BRANCH", "main") or "main"
 
 
-def _master_admin_emails() -> list[str]:
-    raw = (
-        _clean_env("MASTER_ADMIN_EMAILS", "")
-        or _clean_env("SUPER_ADMIN_EMAILS", "")
-        or _clean_env("ADMIN_EMAILS", "")
-    )
-    if not raw:
-        return []
-    return [x.strip().lower() for x in raw.split(",") if x.strip()]
-
-
 def _master_admin_key() -> str:
-    return _clean_env("MASTER_ADMIN_KEY", "") or _clean_env("ADMIN_API_KEY", "")
+    return get_master_admin_key()
 
 
 def _safe_branch_name(table_name: str) -> str:
@@ -936,31 +925,18 @@ def _serialize_cycle_log(row: EvolutionCycleLog) -> Dict[str, Any]:
     }
 
 
+def _require_admin_console_access(
+    authorization: Optional[str] = Header(default=None),
+    x_admin_key: Optional[str] = Header(default=None),
+) -> Dict[str, Any]:
+    return require_admin_console_access(authorization=authorization, x_admin_key=x_admin_key)
+
+
 def _require_master_admin_access(
     authorization: Optional[str] = Header(default=None),
     x_admin_key: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
-    master_key = _master_admin_key()
-    if x_admin_key and master_key and x_admin_key == master_key:
-        return {"role": "master_admin", "via": "x_admin_key"}
-
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Master admin required")
-
-    token = authorization.split(" ", 1)[1].strip()
-    try:
-        payload = decode_token(token)
-    except Exception as exc:
-        raise HTTPException(status_code=401, detail=f"Invalid token: {exc}") from exc
-
-    role = str(payload.get("role", "") or "").strip().lower()
-    email = str(payload.get("email", "") or "").strip().lower()
-    if role not in {"admin", "owner", "superadmin"}:
-        raise HTTPException(status_code=403, detail="Master admin role required")
-    allowed = set(_master_admin_emails())
-    if allowed and email not in allowed:
-        raise HTTPException(status_code=403, detail="Master admin email required")
-    return payload
+    return require_master_admin_access(authorization=authorization, x_admin_key=x_admin_key)
 
 
 class EvolutionClassifyIn(BaseModel):
@@ -1617,7 +1593,7 @@ def _execute_approved_proposal(
 
 
 @router.get("/health")
-def evolution_health(_admin=Depends(_require_master_admin_access), db: Session = Depends(get_db)):
+def evolution_health(_admin=Depends(_require_admin_console_access), db: Session = Depends(get_db)):
     rows = db.execute(select(EvolutionProposal)).scalars().all()
     pending = [r for r in rows if getattr(r, "status", None) == "awaiting_master_approval"]
     approved = [r for r in rows if getattr(r, "status", None) == "approved"]
@@ -1788,7 +1764,7 @@ def evolution_health(_admin=Depends(_require_master_admin_access), db: Session =
 
 
 @router.get("/actions")
-def evolution_actions_catalog(_admin=Depends(_require_master_admin_access)):
+def evolution_actions_catalog(_admin=Depends(_require_admin_console_access)):
     return {
         "ok": True,
         "items": [
@@ -1800,7 +1776,7 @@ def evolution_actions_catalog(_admin=Depends(_require_master_admin_access)):
 
 
 @router.get("/policy")
-def evolution_policy_overview(_admin=Depends(_require_master_admin_access)):
+def evolution_policy_overview(_admin=Depends(_require_admin_console_access)):
     policy = SelfHealPolicy()
     return {
         "ok": True,
@@ -1810,7 +1786,7 @@ def evolution_policy_overview(_admin=Depends(_require_master_admin_access)):
 
 
 @router.post("/classify")
-def evolution_classify(payload: EvolutionClassifyIn, _admin=Depends(_require_master_admin_access)):
+def evolution_classify(payload: EvolutionClassifyIn, _admin=Depends(_require_admin_console_access)):
     result = classify_and_patch(payload.error_text)
     return {
         "ok": True,
@@ -1820,7 +1796,7 @@ def evolution_classify(payload: EvolutionClassifyIn, _admin=Depends(_require_mas
 
 @router.post("/scan-now")
 async def evolution_scan_now(
-    _admin=Depends(_require_master_admin_access),
+    _admin=Depends(_require_admin_console_access),
     db: Session = Depends(get_db),
 ):
     trace_id = _new_trace_id()
@@ -1841,7 +1817,7 @@ def evolution_list_proposals(
     q: Optional[str] = Query(default=None, max_length=200),
     sort: str = Query(default="priority"),
     limit: int = Query(default=50, ge=1, le=200),
-    _admin=Depends(_require_master_admin_access),
+    _admin=Depends(_require_admin_console_access),
     db: Session = Depends(get_db),
 ):
     rows = db.execute(select(EvolutionProposal)).scalars().all()
@@ -1877,7 +1853,7 @@ def evolution_list_proposals(
 @router.get("/proposals/{proposal_id}")
 def evolution_get_proposal(
     proposal_id: str,
-    _admin=Depends(_require_master_admin_access),
+    _admin=Depends(_require_admin_console_access),
     db: Session = Depends(get_db),
 ):
     row = db.execute(
@@ -2349,7 +2325,7 @@ def evolution_propose_schema_patch(payload: EvolutionProposeIn, _admin=Depends(_
 @router.post("/batch/plan")
 def evolution_batch_plan(
     payload: EvolutionBatchPlanIn,
-    _admin=Depends(_require_master_admin_access),
+    _admin=Depends(_require_admin_console_access),
     db: Session = Depends(get_db),
 ):
     rows = db.execute(select(EvolutionProposal)).scalars().all()
