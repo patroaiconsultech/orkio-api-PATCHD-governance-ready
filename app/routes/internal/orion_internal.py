@@ -18,7 +18,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 from app.db import SessionLocal, get_db
-from app.models import ContinuousAuditArtifact, ContinuousAuditJob, ContinuousAuditReceipt, EvolutionProposal
+from app.models import ContinuousAuditArtifact, ContinuousAuditJob, ContinuousAuditReceipt
 from app.services.identity_service import load_active_identity
 from app.core.orkio_constitution import load_constitution
 from app.core.orkio_permissions import load_permissions
@@ -74,180 +74,6 @@ def _json_loads(value: Any, default: Any) -> Any:
         return parsed if parsed is not None else default
     except Exception:
         return default
-
-
-
-def _assisted_evolution_domain_scope(payload: Dict[str, Any]) -> str:
-    files = payload.get("probable_files") if isinstance(payload.get("probable_files"), list) else []
-    if not files:
-        files = payload.get("key_files") if isinstance(payload.get("key_files"), list) else []
-    lowered = [str(item or "").strip().lower() for item in files if str(item or "").strip()]
-    if lowered and all(item.startswith("src/") for item in lowered):
-        return "frontend"
-    if lowered and all(item.startswith("app/") for item in lowered):
-        return "backend"
-    if any(item.startswith("src/") for item in lowered):
-        return "frontend"
-    if any(item.startswith("app/") for item in lowered):
-        return "backend"
-    return "platform"
-
-
-def _assisted_evolution_action(payload: Dict[str, Any]) -> str:
-    scope = _assisted_evolution_domain_scope(payload)
-    if scope == "frontend":
-        return "frontend_patch"
-    if scope == "backend":
-        return "backend_patch"
-    return "platform_patch"
-
-
-def _assisted_evolution_title(payload: Dict[str, Any]) -> str:
-    explicit = str(payload.get("selected_improvement") or payload.get("title") or "").strip()
-    if explicit:
-        return explicit[:240]
-    summary = str(payload.get("technical_summary") or "").strip()
-    return (summary or "Assisted evolution proposal").strip()[:240]
-
-
-def _assisted_evolution_summary(payload: Dict[str, Any]) -> str:
-    pieces: List[str] = []
-    for key in ("technical_summary", "root_cause", "user_impact", "technical_risk", "final_consolidation"):
-        value = str(payload.get(key) or "").strip()
-        if value:
-            pieces.append(value)
-    if not pieces:
-        recs = payload.get("recommended_actions") if isinstance(payload.get("recommended_actions"), list) else []
-        pieces = [str(item).strip() for item in recs if str(item).strip()]
-    return "\n\n".join(pieces[:5]).strip()[:4000]
-
-
-def _assisted_evolution_fingerprint(payload: Dict[str, Any]) -> str:
-    seed = {
-        "scope": _assisted_evolution_domain_scope(payload),
-        "action": _assisted_evolution_action(payload),
-        "title": _assisted_evolution_title(payload),
-        "selected_improvement": str(payload.get("selected_improvement") or "").strip(),
-        "root_cause": str(payload.get("root_cause") or "").strip(),
-        "probable_files": list(payload.get("probable_files") or [])[:20] if isinstance(payload.get("probable_files"), list) else [],
-        "key_files": list(payload.get("key_files") or [])[:20] if isinstance(payload.get("key_files"), list) else [],
-    }
-    raw = json.dumps(seed, ensure_ascii=False, sort_keys=True)
-    return hashlib.sha256(raw.encode("utf-8")).hexdigest()
-
-
-def _persist_assisted_evolution_proposal(payload: Dict[str, Any]) -> Dict[str, Any]:
-    if not isinstance(payload, dict) or not payload:
-        return {}
-    try:
-        title = _assisted_evolution_title(payload)
-        summary = _assisted_evolution_summary(payload)
-        fingerprint = _assisted_evolution_fingerprint(payload)
-        action = _assisted_evolution_action(payload)
-        domain_scope = _assisted_evolution_domain_scope(payload)
-        now = _now_ts()
-        db = SessionLocal()
-        try:
-            row = db.execute(
-                select(EvolutionProposal).where(EvolutionProposal.fingerprint == fingerprint)
-            ).scalar_one_or_none()
-            issue_json = {
-                "source": "assisted_evolution_runtime",
-                "event": str(payload.get("event") or "").strip(),
-                "delivery_contract": str(payload.get("delivery_contract") or "").strip(),
-                "scope": domain_scope,
-                "key_files": list(payload.get("key_files") or []) if isinstance(payload.get("key_files"), list) else [],
-                "probable_files": list(payload.get("probable_files") or []) if isinstance(payload.get("probable_files"), list) else [],
-            }
-            decision_json = {
-                "recommended_actions": list(payload.get("recommended_actions") or []) if isinstance(payload.get("recommended_actions"), list) else [],
-                "priority_score": payload.get("priority_score"),
-                "priority_score_label": str(payload.get("priority_score_label") or "").strip(),
-                "human_approval_required": True,
-                "delivery_contract": str(payload.get("delivery_contract") or "").strip(),
-                "execution_depth": str(payload.get("execution_depth") or "").strip(),
-                "assisted_evolution": True,
-            }
-            finding_json = {
-                "technical_summary": str(payload.get("technical_summary") or "").strip(),
-                "selected_improvement": str(payload.get("selected_improvement") or "").strip(),
-                "root_cause": str(payload.get("root_cause") or "").strip(),
-                "user_impact": str(payload.get("user_impact") or "").strip(),
-                "technical_risk": str(payload.get("technical_risk") or "").strip(),
-                "final_consolidation": str(payload.get("final_consolidation") or "").strip(),
-            }
-            created = False
-            if row is None:
-                row = EvolutionProposal(
-                    id=f"eprop_{_new_id()[:12]}",
-                    org_slug="system",
-                    fingerprint=fingerprint,
-                    code="assisted_evolution_proposal",
-                    severity="MEDIUM",
-                    category="assisted_evolution",
-                    source="orion_runtime",
-                    action=action,
-                    status="awaiting_master_approval",
-                    title=title,
-                    summary=summary,
-                    finding_json=_json_dumps(finding_json),
-                    issue_json=_json_dumps(issue_json),
-                    decision_json=_json_dumps(decision_json),
-                    domain_scope=domain_scope,
-                    recurrence_window_count=1,
-                    blast_radius_accumulated=0,
-                    security_accumulated=0,
-                    last_priority_score=int(payload.get("priority_score") or 0),
-                    last_recommendation=(decision_json["recommended_actions"][0] if decision_json["recommended_actions"] else ""),
-                    last_cadence_seconds=0,
-                    first_detected_at=now,
-                    last_detected_at=now,
-                    detected_count=1,
-                    created_at=now,
-                    updated_at=now,
-                )
-                db.add(row)
-                created = True
-            else:
-                row.title = title
-                row.summary = summary
-                row.finding_json = _json_dumps(finding_json)
-                row.issue_json = _json_dumps(issue_json)
-                row.decision_json = _json_dumps(decision_json)
-                row.action = action
-                row.domain_scope = domain_scope
-                row.last_priority_score = int(payload.get("priority_score") or getattr(row, "last_priority_score", 0) or 0)
-                row.last_recommendation = (decision_json["recommended_actions"][0] if decision_json["recommended_actions"] else getattr(row, "last_recommendation", "") or "")
-                row.last_detected_at = now
-                row.detected_count = int(getattr(row, "detected_count", 0) or 0) + 1
-                if str(getattr(row, "status", "") or "").lower() in {"resolved", "rejected", "failed", "rolled_back"}:
-                    row.status = "awaiting_master_approval"
-                row.updated_at = now
-            db.commit()
-            payload["proposal_id"] = row.id
-            payload["proposal_status"] = str(getattr(row, "status", "") or "").strip()
-            payload["proposal_title"] = str(getattr(row, "title", "") or "").strip()
-            payload["proposal_created"] = bool(created)
-            payload["proposal_reference"] = f"/admin/evolution?proposal_id={row.id}"
-            payload["assisted_evolution_ready"] = True
-            payload["proposal_domain_scope"] = str(getattr(row, "domain_scope", "") or domain_scope).strip()
-            payload["proposal_action"] = str(getattr(row, "action", "") or action).strip()
-            if not str(payload.get("next_authorization_command") or "").strip():
-                payload["next_authorization_command"] = f"Approve proposal {row.id} no Evolution Center antes de qualquer execução."
-            return {
-                "proposal_id": row.id,
-                "proposal_status": str(getattr(row, "status", "") or "").strip(),
-                "proposal_title": str(getattr(row, "title", "") or "").strip(),
-                "proposal_created": bool(created),
-                "proposal_reference": f"/admin/evolution?proposal_id={row.id}",
-                "assisted_evolution_ready": True,
-                "proposal_domain_scope": str(getattr(row, "domain_scope", "") or domain_scope).strip(),
-                "proposal_action": str(getattr(row, "action", "") or action).strip(),
-            }
-        finally:
-            db.close()
-    except Exception:
-        return {}
 
 
 def _extract_continuous_audit_job_id(message: str) -> str:
@@ -1208,8 +1034,6 @@ def _constraint_violation_payload(message: str, *, constraints: Dict[str, Any], 
         "final_consolidation": "Dispatch abortado antes da execução porque as hard constraints solicitadas não puderam ser satisfeitas com segurança.",
         "generated_at": _now_ts(),
     }
-    _persist_assisted_evolution_proposal(payload)
-    return payload
 
 def _is_orion_only_request(message: str) -> bool:
     raw = (message or "").strip().lower()
@@ -2172,6 +1996,64 @@ def _build_controlled_self_evolution_sections(selected_specialists: List[str]) -
     }
 
 
+
+
+def _is_governed_persisted_proposal_request(message: str) -> bool:
+    txt = (message or "").strip().lower()
+    if not txt:
+        return False
+    direct_markers = (
+        "proposta governada persistida",
+        "proposal governada persistida",
+        "governed persistent proposal",
+        "consolidem como proposta governada persistida",
+        "consolidar como proposta governada persistida",
+    )
+    if any(marker in txt for marker in direct_markers):
+        return True
+    return (
+        ("proposta" in txt or "proposal" in txt)
+        and ("persistid" in txt or "governad" in txt)
+        and ("app console" in txt or "console" in txt)
+    )
+
+
+def _build_governed_persisted_proposal_response(
+    *,
+    decision: str = "proposal_not_created",
+    proposal_id: str = "",
+    proposal_status: str = "unavailable",
+    proposal_title: str = "App Console improvement proposal",
+    proposal_action: str = "none",
+    proposal_domain_scope: str = "frontend/app_console",
+    assisted_evolution_ready: bool = False,
+    next_authorization_command: str = "",
+    message: str = "",
+) -> Dict[str, Any]:
+    payload: Dict[str, Any] = {
+        "ok": True,
+        "service": "orion_internal",
+        "provider": "platform",
+        "mode": "governed_persisted_proposal",
+        "event": "GOVERNED_PERSISTED_PROPOSAL_UNAVAILABLE" if decision != "proposal_created" else "GOVERNED_PERSISTED_PROPOSAL_CREATED",
+        "status": "executed",
+        "report_format": "governed_persisted_proposal_v1",
+        "delivery_contract": "governed_persisted_proposal_v1",
+        "decision": str(decision or "proposal_not_created").strip(),
+        "proposal_id": str(proposal_id or "").strip(),
+        "proposal_status": str(proposal_status or "unavailable").strip(),
+        "proposal_title": str(proposal_title or "App Console improvement proposal").strip(),
+        "proposal_action": str(proposal_action or "none").strip(),
+        "proposal_domain_scope": str(proposal_domain_scope or "frontend/app_console").strip(),
+        "assisted_evolution_ready": bool(assisted_evolution_ready),
+        "next_authorization_command": str(next_authorization_command or "").strip(),
+        "dispatch_executed": False,
+        "write_executed": False,
+        "github_executed": False,
+        "message": str(message or "").strip(),
+    }
+    return payload
+
 def platform_self_evolution_plan(inp: "OrionRuntimeIn") -> Dict[str, Any]:
     constraints = _extract_hard_constraints(inp.message)
     visible_agent = _resolve_visible_agent(inp.message, default="orion")
@@ -2188,7 +2070,7 @@ def platform_self_evolution_plan(inp: "OrionRuntimeIn") -> Dict[str, Any]:
     specialist_reports = _audit_specialist_reports(selected_specialists, "specialist")
     counts = _dispatch_receipt_counts(dispatch_receipts, specialist_reports, selected_specialists)
     sections = _build_controlled_self_evolution_sections(selected_specialists)
-    payload = {
+    return {
         "ok": True,
         "service": "orion_internal",
         "mode": "controlled_self_evolution_propose_only",
@@ -2244,7 +2126,23 @@ def platform_self_evolution_plan(inp: "OrionRuntimeIn") -> Dict[str, Any]:
 
 
 def platform_improvement_review(inp: "OrionRuntimeIn") -> Dict[str, Any]:
+    if _is_governed_persisted_proposal_request(inp.message):
+        return _build_governed_persisted_proposal_response(
+            decision="proposal_not_created",
+            proposal_status="unavailable",
+            proposal_title="App Console improvement proposal",
+            proposal_action="none",
+            proposal_domain_scope="frontend/app_console",
+            assisted_evolution_ready=False,
+            next_authorization_command="",
+            message="Fluxo de proposta governada persistida ainda não está disponível nesta execução.",
+        )
+
     payload = platform_self_evolution_plan(inp)
+    if payload is None:
+        payload = {}
+    if not isinstance(payload, dict):
+        payload = {}
     payload["mode"] = "platform_improvement_review"
     payload["event"] = "PLATFORM_IMPROVEMENT_REVIEW_EXECUTED"
     payload["report_format"] = "platform_improvement_review_v1"
