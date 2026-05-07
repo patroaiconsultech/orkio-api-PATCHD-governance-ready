@@ -6028,10 +6028,16 @@ def _runtime_hard_constraints_from_enrichment(runtime_enrichment: Optional[Dict[
     if not isinstance(runtime_enrichment, dict):
         return {}
     intent_package = runtime_enrichment.get("intent_package") if isinstance(runtime_enrichment.get("intent_package"), dict) else {}
-    runtime_operation = intent_package.get("runtime_operation") if isinstance(intent_package.get("runtime_operation"), dict) else {}
+    runtime_operation = intent_package.get("runtime_operation") if isinstance(runtime_operation := intent_package.get("runtime_operation"), dict) else {}
     required_signer = _canonical_dispatch_specialist_slug(runtime_operation.get("required_signer"))
+
+    requested_specialists_are_hints = bool(runtime_operation.get("requested_specialists_are_hints"))
+    required_source = list(runtime_operation.get("specialists_required") or [])
+    if not required_source and not requested_specialists_are_hints:
+        required_source = list(runtime_operation.get("requested_specialists") or [])
+
     specialists_required = [
-        slug for slug in (_canonical_dispatch_specialist_slug(item) for item in list(runtime_operation.get("specialists_required") or runtime_operation.get("requested_specialists") or []))
+        slug for slug in (_canonical_dispatch_specialist_slug(item) for item in required_source)
         if slug
     ]
     seen_required = set()
@@ -6044,10 +6050,21 @@ def _runtime_hard_constraints_from_enrichment(runtime_enrichment: Optional[Dict[
     specialists_forbidden = [slug for slug in specialists_forbidden if not (slug in seen_forbidden or seen_forbidden.add(slug))]
     count_must_be = runtime_operation.get("selected_specialists_count_must_be")
     try:
-        count_must_be = int(count_must_be) if count_must_be is not None else (len(specialists_required) if specialists_required else None)
+        if count_must_be is not None:
+            count_must_be = int(count_must_be)
+        elif specialists_required:
+            count_must_be = len(specialists_required)
+        else:
+            count_must_be = None
     except Exception:
         count_must_be = len(specialists_required) if specialists_required else None
-    has_hard_constraints = bool(required_signer or specialists_required or specialists_forbidden or count_must_be is not None or runtime_operation.get("hard_constraints_present"))
+    has_hard_constraints = bool(
+        required_signer
+        or specialists_required
+        or specialists_forbidden
+        or count_must_be is not None
+        or runtime_operation.get("hard_constraints_present")
+    )
     return {
         "required_signer": required_signer,
         "specialists_required": specialists_required,
