@@ -1293,6 +1293,9 @@ def estimate_tokens(text: str) -> int:
 
 
 _RUNTIME_CAPABILITY_MODELS = {
+    # Execution/capability pseudo-models must never reach the pricing registry
+    # as billable model names. They are mapped to the configured chat model
+    # before calculate_cost(), preventing PRICING_FALLBACK noise.
     "github_capability",
     "squad_agents_list",
     "platform_self_audit",
@@ -1308,6 +1311,13 @@ _RUNTIME_CAPABILITY_MODELS = {
     "github_pr_prepare",
     "db_schema_fix_governed",
     "db_schema_read",
+    "runtime_capability_inventory",
+    "runtime_capability_execution",
+    "readonly_implementation_plan",
+    "war_room_readonly_architecture_plan",
+    "team_roster_answer",
+    "presence_status_answer",
+    "analytical_final_readonly",
 }
 
 def _safe_billable_model_name(raw_model: Optional[str], agent: Optional[Any] = None) -> str:
@@ -3497,7 +3507,7 @@ def _startup_runtime_fingerprint():
     Loga patch e rotas críticas carregadas para detectar drift entre ZIP e runtime.
     """
     try:
-        logger.warning(
+        logger.info(
             "ORKIO_API_STARTUP patch=%s version=%s build=%s sentinel=%s feature=%s behavior=%s",
             patch_id(),
             APP_VERSION,
@@ -3506,7 +3516,7 @@ def _startup_runtime_fingerprint():
             PATCH_FEATURE,
             PATCH_EXPECTED_BEHAVIOR,
         )
-        logger.warning(
+        logger.info(
             "ORKIO_API_ROUTES register=%s validate_access_code=%s summit_session_start=%s audio_transcriptions=%s realtime_start=%s realtime_end=%s",
             _route_methods_for("/api/auth/register"),
             _route_methods_for("/api/auth/validate-access-code"),
@@ -3565,7 +3575,7 @@ def _startup_orkio_governance_bootstrap():
         app.state.governance_ready = bool(boot["health"].get("governance_ready"))
         app.state.safe_mode = bool(boot["health"].get("safe_mode"))
         app.state.safe_mode_reason = str(boot["health"].get("safe_mode_reason") or "")
-        logger.warning(
+        logger.info(
             "ORKIO_GOVERNANCE_READY ready=%s safe_mode=%s reason=%s identity=%s constitution=%s capabilities=%s",
             app.state.governance_ready,
             app.state.safe_mode,
@@ -4260,12 +4270,12 @@ async def _startup():
     try:
         if start_evolution_loop is None:
             try:
-                logger.warning("EVOLUTION_LOOP_IMPORT_UNAVAILABLE")
+                logger.info("EVOLUTION_LOOP_IMPORT_UNAVAILABLE")
             except Exception:
                 pass
         else:
             try:
-                logger.warning("EVOLUTION_LOOP_BOOT_REQUESTED")
+                logger.info("EVOLUTION_LOOP_BOOT_REQUESTED")
             except Exception:
                 pass
 
@@ -9688,22 +9698,21 @@ def _emit_runtime_readonly_receipts(
             "receipt_types": list(receipts.keys()),
             "source": source,
         }
-        payload = json.dumps(summary, ensure_ascii=False, sort_keys=True, default=str)
+        # EFATA777_OBSERVABILITY_SEVERITY_AND_PRICING_POLISH:
+        # A emissão oficial de receipts passa a ser única e por stdout.
+        # Railway classifica stdout como info; evitar uvicorn.error impede
+        # duplicidade e falso severity=error para evento operacional normal.
+        if str(receipt_phase or "") == "final_after_persistence" and not _runtime_receipt_clean(message_id, ""):
+            return receipts
 
-        # EFATA777_RUNTIME_RECEIPTS_LOG_VISIBILITY_FIX:
-        # Emitir no logger da aplicação, no logger uvicorn.error e no stdout.
-        # Em Railway, stdout é capturado como log de severidade info; isso torna
-        # RUNTIME_READONLY_RECEIPTS comprovável em produção mesmo quando o logger
-        # "orkio" estiver com nível/handler não propagado.
-        logger.info("RUNTIME_READONLY_RECEIPTS %s", payload)
-        try:
-            logging.getLogger("uvicorn.error").info("RUNTIME_READONLY_RECEIPTS %s", payload)
-        except Exception:
-            pass
+        payload = json.dumps(summary, ensure_ascii=False, sort_keys=True, default=str)
         try:
             print(f"RUNTIME_READONLY_RECEIPTS {payload}", flush=True)
         except Exception:
-            pass
+            try:
+                logger.info("RUNTIME_READONLY_RECEIPTS %s", payload)
+            except Exception:
+                pass
     except Exception:
         try:
             logger.exception("RUNTIME_READONLY_RECEIPTS_LOG_FAILED")
