@@ -6028,16 +6028,10 @@ def _runtime_hard_constraints_from_enrichment(runtime_enrichment: Optional[Dict[
     if not isinstance(runtime_enrichment, dict):
         return {}
     intent_package = runtime_enrichment.get("intent_package") if isinstance(runtime_enrichment.get("intent_package"), dict) else {}
-    runtime_operation = intent_package.get("runtime_operation") if isinstance(runtime_operation := intent_package.get("runtime_operation"), dict) else {}
+    runtime_operation = intent_package.get("runtime_operation") if isinstance(intent_package.get("runtime_operation"), dict) else {}
     required_signer = _canonical_dispatch_specialist_slug(runtime_operation.get("required_signer"))
-
-    requested_specialists_are_hints = bool(runtime_operation.get("requested_specialists_are_hints"))
-    required_source = list(runtime_operation.get("specialists_required") or [])
-    if not required_source and not requested_specialists_are_hints:
-        required_source = list(runtime_operation.get("requested_specialists") or [])
-
     specialists_required = [
-        slug for slug in (_canonical_dispatch_specialist_slug(item) for item in required_source)
+        slug for slug in (_canonical_dispatch_specialist_slug(item) for item in list(runtime_operation.get("specialists_required") or runtime_operation.get("requested_specialists") or []))
         if slug
     ]
     seen_required = set()
@@ -6050,21 +6044,10 @@ def _runtime_hard_constraints_from_enrichment(runtime_enrichment: Optional[Dict[
     specialists_forbidden = [slug for slug in specialists_forbidden if not (slug in seen_forbidden or seen_forbidden.add(slug))]
     count_must_be = runtime_operation.get("selected_specialists_count_must_be")
     try:
-        if count_must_be is not None:
-            count_must_be = int(count_must_be)
-        elif specialists_required:
-            count_must_be = len(specialists_required)
-        else:
-            count_must_be = None
+        count_must_be = int(count_must_be) if count_must_be is not None else (len(specialists_required) if specialists_required else None)
     except Exception:
         count_must_be = len(specialists_required) if specialists_required else None
-    has_hard_constraints = bool(
-        required_signer
-        or specialists_required
-        or specialists_forbidden
-        or count_must_be is not None
-        or runtime_operation.get("hard_constraints_present")
-    )
+    has_hard_constraints = bool(required_signer or specialists_required or specialists_forbidden or count_must_be is not None or runtime_operation.get("hard_constraints_present"))
     return {
         "required_signer": required_signer,
         "specialists_required": specialists_required,
@@ -8174,29 +8157,25 @@ def _orion_operational_maturity_request_flags(user_text: str) -> Dict[str, Any]:
     if not txt:
         return {"requested": False}
 
-    explicit_anchor_patterns = [
+    maturity_patterns = [
         r"maturidade\s+operacional",
         r"prontid[aã]o\s+operacional",
         r"operacionalmente\s+madur",
         r"runtime\s+operacionalmente\s+madur",
-        r"auditoria\s+interna\s+de\s+maturidade",
-        r"crit[eé]rios\s+de\s+prontid[aã]o\s+operacional",
-    ]
-    evidence_patterns = [
+        r"rastreabil",
+        r"observabil",
+        r"governan[cç]a",
+        r"separa[cç][aã]o\s+entre\s+orquestra",
+        r"separa[cç][aã]o\s+entre\s+agente\s+vis[ií]vel\s+e\s+executor",
         r"lacunas\s+de\s+rastreabilidade",
         r"lacunas\s+de\s+observabilidade",
         r"lacunas\s+de\s+governan[cç]a",
-        r"separa[cç][aã]o\s+entre\s+orquestra",
-        r"separa[cç][aã]o\s+entre\s+agente\s+vis[ií]vel\s+e\s+executor",
+        r"crit[eé]rios\s+de\s+prontid[aã]o\s+operacional",
+        r"auditoria\s+interna\s+de\s+maturidade",
     ]
-
-    explicit_anchor = any(re.search(p, txt, flags=re.IGNORECASE) for p in explicit_anchor_patterns)
-    evidence_hit = any(re.search(p, txt, flags=re.IGNORECASE) for p in evidence_patterns)
-
     return {
-        "requested": bool(explicit_anchor or evidence_hit),
+        "requested": any(re.search(p, txt, flags=re.IGNORECASE) for p in maturity_patterns),
     }
-
 
 
 def _pick_target_agent_by_slug(target_agents: Optional[List[Dict[str, Any]]], slug: str) -> Optional[Dict[str, Any]]:
@@ -10579,6 +10558,14 @@ def _build_execution_result_payload(result: Dict[str, Any]) -> str:
     main_risk = (result.get("main_risk") or "").strip()
     recommended_actions = result.get("recommended_actions") if isinstance(result.get("recommended_actions"), list) else None
     execution_depth = (result.get("execution_depth") or "").strip()
+    proposal_id = str(result.get("proposal_id") or "").strip()
+    proposal_status = str(result.get("proposal_status") or "").strip()
+    proposal_title = str(result.get("proposal_title") or "").strip()
+    proposal_reference = str(result.get("proposal_reference") or "").strip()
+    proposal_domain_scope = str(result.get("proposal_domain_scope") or "").strip()
+    proposal_action = str(result.get("proposal_action") or "").strip()
+    proposal_created = result.get("proposal_created")
+    assisted_evolution_ready = result.get("assisted_evolution_ready")
     total_entries = result.get("total_entries")
     dirs = result.get("dirs") if isinstance(result.get("dirs"), list) else None
     confidence = result.get("confidence")
@@ -10695,6 +10682,22 @@ def _build_execution_result_payload(result: Dict[str, Any]) -> str:
         parts.append(f"followup_mode: {followup_mode}")
     if followup_subtype:
         parts.append(f"followup_subtype: {followup_subtype}")
+    if proposal_id:
+        parts.append(f"proposal_id: {proposal_id}")
+    if proposal_status:
+        parts.append(f"proposal_status: {proposal_status}")
+    if proposal_title:
+        parts.append(f"proposal_title: {proposal_title}")
+    if proposal_action:
+        parts.append(f"proposal_action: {proposal_action}")
+    if proposal_domain_scope:
+        parts.append(f"proposal_domain_scope: {proposal_domain_scope}")
+    if proposal_reference:
+        parts.append(f"proposal_reference: {proposal_reference}")
+    if proposal_created is not None:
+        parts.append(f"proposal_created: {bool(proposal_created)}")
+    if assisted_evolution_ready is not None:
+        parts.append(f"assisted_evolution_ready: {bool(assisted_evolution_ready)}")
 
     if repository_details:
         parts.append("repository_details:")
@@ -12763,6 +12766,12 @@ def _normalize_orion_runtime_execution_result(raw: Dict[str, Any]) -> Dict[str, 
         "github_error",
         "branch_name",
         "required_signer",
+        "proposal_id",
+        "proposal_status",
+        "proposal_title",
+        "proposal_reference",
+        "proposal_domain_scope",
+        "proposal_action",
     ]
     scalar_numeric_fields = [
         "selected_specialists_count",
@@ -12778,6 +12787,7 @@ def _normalize_orion_runtime_execution_result(raw: Dict[str, Any]) -> Dict[str, 
         "behind_by",
         "files_count",
         "selected_specialists_count_must_be",
+        "proposal_created",
     ]
     scalar_passthrough_fields = [
         "compact_dispatch_details",
@@ -12792,6 +12802,7 @@ def _normalize_orion_runtime_execution_result(raw: Dict[str, Any]) -> Dict[str, 
         "pr_found",
         "merge_executed",
         "deploy_executed",
+        "assisted_evolution_ready",
     ]
     list_fields = [
         "repositories",
@@ -14700,7 +14711,6 @@ def chat(
             inp.message,
             prev,
             available_agents=[getattr(a, "name", None) for a in target_agents],
-            payload=user,
         )
     except Exception:
         try:
@@ -15570,7 +15580,6 @@ def _build_runtime_enrichment(
     message: str,
     prev_messages: Optional[List[Any]] = None,
     available_agents: Optional[List[str]] = None,
-    payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     prev_messages = prev_messages or []
     memories = _load_recent_runtime_memories(db, org, uid)
@@ -15589,17 +15598,6 @@ def _build_runtime_enrichment(
             "sticky_visible_agent": thread_dispatch_contract.get("visible_agent") or "",
             "sticky_selected_specialists": list(thread_dispatch_contract.get("selected_specialists") or []),
         })
-
-    session_authority = build_admin_authority_context(payload or {})
-    context.update({
-        "session_user_id": str((payload or {}).get("sub") or uid or "").strip() or None,
-        "session_role": str((payload or {}).get("role") or "").strip().lower() or None,
-        "session_admin_console_access": bool(session_authority.get("admin_console_access")),
-        "session_is_admin_master": bool(session_authority.get("is_admin_master")),
-        "session_write_approval_authority": bool(session_authority.get("write_approval_authority")),
-        "session_authority_source": session_authority.get("authority_source"),
-    })
-
     intent_package = build_intent_package(message, context=context)
     first_win_plan = build_first_win_plan(intent_package)
     continuity_hints = build_continuity_hints(
@@ -15686,40 +15684,6 @@ def _build_runtime_enrichment(
             runtime_hints = {"capabilities": _get_runtime_capability_registry(db=db, org=org)}
     except Exception:
         pass
-
-    authority_runtime_block = {
-        "role": str((payload or {}).get("role") or "").strip().lower() or None,
-        "admin_console_access": bool(session_authority.get("admin_console_access")),
-        "is_admin_master": bool(session_authority.get("is_admin_master")),
-        "write_approval_authority": bool(session_authority.get("write_approval_authority")),
-        "authority_source": session_authority.get("authority_source"),
-    }
-    try:
-        if isinstance(runtime_hints, dict):
-            runtime_hints["session_authority"] = authority_runtime_block
-    except Exception:
-        pass
-
-    try:
-        overlay_lines = [
-            "Session authority for this request:",
-            f"- session_role: {authority_runtime_block.get('role') or 'unknown'}",
-            f"- admin_console_access: {str(bool(authority_runtime_block.get('admin_console_access'))).lower()}",
-            f"- is_admin_master: {str(bool(authority_runtime_block.get('is_admin_master'))).lower()}",
-            f"- write_approval_authority: {str(bool(authority_runtime_block.get('write_approval_authority'))).lower()}",
-            f"- authority_source: {authority_runtime_block.get('authority_source') or 'none'}",
-            "Authority instructions:",
-            "1. When the user asks about can_approve/can_execute, answer according to the current session authority.",
-            "2. Do not downgrade a master-approved session to generic read-only if write_approval_authority=true.",
-            "3. Proposal generation may remain available even when approval/execution is blocked.",
-            "4. Approval/execution of a pending proposal requires actual session authority and a valid pending proposal.",
-        ]
-        authority_overlay = "\n".join([str(line) for line in overlay_lines if str(line).strip()])
-        if authority_overlay:
-            system_overlay = ((system_overlay or "").strip() + "\n\n" + authority_overlay).strip()
-    except Exception:
-        pass
-
     return {
         "intent_package": intent_package,
         "first_win_plan": first_win_plan,
@@ -18718,7 +18682,6 @@ async def chat_stream(
             message,
             prev[-24:],
             available_agents=[getattr(a, "name", None) for a in target_agents_rows],
-            payload=user,
         )
     except Exception:
         try:
