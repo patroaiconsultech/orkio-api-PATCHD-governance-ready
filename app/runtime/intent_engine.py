@@ -1488,6 +1488,13 @@ def build_intent_package(
     context["message"] = effective_user_input
     context["raw_message"] = raw_user_input
 
+    session_is_admin_master = bool(context.get("session_is_admin_master"))
+    session_write_approval_authority = bool(context.get("session_write_approval_authority"))
+    session_admin_console_access = bool(context.get("session_admin_console_access"))
+    if session_write_approval_authority and _looks_like_explicit_approval_or_execution_request(effective_user_input or raw_user_input or ""):
+        context["explicit_authorization"] = True
+        context["authorization_present"] = True
+
     final_readonly_analysis_request = _looks_like_final_readonly_analysis_request(effective_user_input or raw_user_input or "")
 
     if (not final_readonly_analysis_request) and _looks_like_readonly_implementation_plan(effective_user_input or raw_user_input or ""):
@@ -1923,6 +1930,10 @@ def build_intent_package(
         "continuous_audit_supported": bool(continuous_audit_request or continuous_audit_status_request),
         "requested_job_id": requested_job_id,
         "use_latest_continuous_audit_job": bool(continuous_audit_status_request and not requested_job_id),
+        "session_admin_console_access": bool(session_admin_console_access),
+        "session_is_admin_master": bool(session_is_admin_master),
+        "session_write_approval_authority": bool(session_write_approval_authority),
+        "required_authority_for_execution": ("master_admin" if requires_write_approval else "standard"),
     }
 
     payload = {
@@ -1971,6 +1982,10 @@ def build_intent_package(
         "has_completed_dispatch_context": bool(has_completed_dispatch_context),
         "hard_constraints": hard_constraints,
         "requested_job_id": requested_job_id,
+        "session_admin_console_access": bool(session_admin_console_access),
+        "session_is_admin_master": bool(session_is_admin_master),
+        "session_write_approval_authority": bool(session_write_approval_authority),
+        "required_authority_for_execution": ("master_admin" if requires_write_approval else "standard"),
     }
     payload.update(_runtime_self_audit_override(intent))
     return payload
