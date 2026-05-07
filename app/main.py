@@ -14683,6 +14683,7 @@ def chat(
             inp.message,
             prev,
             available_agents=[getattr(a, "name", None) for a in target_agents],
+            payload=user,
         )
     except Exception:
         try:
@@ -15552,6 +15553,7 @@ def _build_runtime_enrichment(
     message: str,
     prev_messages: Optional[List[Any]] = None,
     available_agents: Optional[List[str]] = None,
+    payload: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     prev_messages = prev_messages or []
     memories = _load_recent_runtime_memories(db, org, uid)
@@ -15570,6 +15572,17 @@ def _build_runtime_enrichment(
             "sticky_visible_agent": thread_dispatch_contract.get("visible_agent") or "",
             "sticky_selected_specialists": list(thread_dispatch_contract.get("selected_specialists") or []),
         })
+
+    session_authority = build_admin_authority_context(payload or {})
+    context.update({
+        "session_user_id": str((payload or {}).get("sub") or uid or "").strip() or None,
+        "session_role": str((payload or {}).get("role") or "").strip().lower() or None,
+        "session_admin_console_access": bool(session_authority.get("admin_console_access")),
+        "session_is_admin_master": bool(session_authority.get("is_admin_master")),
+        "session_write_approval_authority": bool(session_authority.get("write_approval_authority")),
+        "session_authority_source": session_authority.get("authority_source"),
+    })
+
     intent_package = build_intent_package(message, context=context)
     first_win_plan = build_first_win_plan(intent_package)
     continuity_hints = build_continuity_hints(
@@ -15656,6 +15669,40 @@ def _build_runtime_enrichment(
             runtime_hints = {"capabilities": _get_runtime_capability_registry(db=db, org=org)}
     except Exception:
         pass
+
+    authority_runtime_block = {
+        "role": str((payload or {}).get("role") or "").strip().lower() or None,
+        "admin_console_access": bool(session_authority.get("admin_console_access")),
+        "is_admin_master": bool(session_authority.get("is_admin_master")),
+        "write_approval_authority": bool(session_authority.get("write_approval_authority")),
+        "authority_source": session_authority.get("authority_source"),
+    }
+    try:
+        if isinstance(runtime_hints, dict):
+            runtime_hints["session_authority"] = authority_runtime_block
+    except Exception:
+        pass
+
+    try:
+        overlay_lines = [
+            "Session authority for this request:",
+            f"- session_role: {authority_runtime_block.get('role') or 'unknown'}",
+            f"- admin_console_access: {str(bool(authority_runtime_block.get('admin_console_access'))).lower()}",
+            f"- is_admin_master: {str(bool(authority_runtime_block.get('is_admin_master'))).lower()}",
+            f"- write_approval_authority: {str(bool(authority_runtime_block.get('write_approval_authority'))).lower()}",
+            f"- authority_source: {authority_runtime_block.get('authority_source') or 'none'}",
+            "Authority instructions:",
+            "1. When the user asks about can_approve/can_execute, answer according to the current session authority.",
+            "2. Do not downgrade a master-approved session to generic read-only if write_approval_authority=true.",
+            "3. Proposal generation may remain available even when approval/execution is blocked.",
+            "4. Approval/execution of a pending proposal requires actual session authority and a valid pending proposal.",
+        ]
+        authority_overlay = "\n".join([str(line) for line in overlay_lines if str(line).strip()])
+        if authority_overlay:
+            system_overlay = ((system_overlay or "").strip() + "\n\n" + authority_overlay).strip()
+    except Exception:
+        pass
+
     return {
         "intent_package": intent_package,
         "first_win_plan": first_win_plan,
@@ -18654,6 +18701,7 @@ async def chat_stream(
             message,
             prev[-24:],
             available_agents=[getattr(a, "name", None) for a in target_agents_rows],
+            payload=user,
         )
     except Exception:
         try:
