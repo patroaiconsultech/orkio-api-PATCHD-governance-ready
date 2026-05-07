@@ -235,6 +235,27 @@ def _looks_like_orion_only_request(text: str) -> bool:
     return True
 
 
+def _looks_like_explicit_approval_or_execution_request(text: str) -> bool:
+    txt = _normalize(text)
+    if not txt:
+        return False
+    return _contains_any(txt, [
+        "aprovar",
+        "aprove",
+        "approve",
+        "approval",
+        "execute",
+        "executar",
+        "execução",
+        "execucao",
+        "can_approve",
+        "can_execute",
+        "action_taken",
+        "prossiga somente se houver proposal válida",
+        "prossiga somente se houver proposal valida",
+    ])
+
+
 def _looks_like_team_technical_audit_request(text: str) -> bool:
     """Detecta pedidos de auditoria/análise técnica read-only do code/runtime."""
     txt = _normalize(text)
@@ -1656,7 +1677,11 @@ def build_intent_package(
         continuous_audit_status_request = False
         team_technical_audit = False
         orion_only = True
-    elif orion_only or team_technical_audit:
+    elif team_technical_audit or (
+        orion_only
+        and not _looks_like_explicit_approval_or_execution_request(effective_user_input or raw_user_input or "")
+        and (capability_name == "platform_self_audit" or action_scope == "diagnose")
+    ):
         capability_name = capability_name or "platform_self_audit"
         intent = "platform_self_audit"
         platform_improvement_review = False
