@@ -8,57 +8,21 @@ import requests
 from fastapi import APIRouter, HTTPException, Query, Header, Depends
 from pydantic import BaseModel, Field
 
-from app.security import decode_token
 from app.self_heal.credential_scope import branch_allowlist, is_branch_allowed, is_protected_branch, resolve_scoped_credentials, control_plane_github_context
+from app.services.admin_master_identity import get_master_admin_key, require_master_admin_access
 
 router = APIRouter(prefix="/api/internal/git", tags=["git-internal"])
 
 
-def _master_admin_emails() -> list[str]:
-    raw = (
-        _env("MASTER_ADMIN_EMAILS", "")
-        or _env("SUPER_ADMIN_EMAILS", "")
-        or _env("ADMIN_EMAILS", "")
-    )
-    if not raw:
-        return []
-    return [x.strip().lower() for x in raw.split(",") if x.strip()]
-
-
 def _master_admin_key() -> str:
-    return _env("MASTER_ADMIN_KEY", "") or _env("ADMIN_API_KEY", "")
+    return get_master_admin_key()
 
 
 def _require_master_admin_access(
     authorization: Optional[str] = Header(default=None),
     x_admin_key: Optional[str] = Header(default=None),
 ) -> Dict[str, Any]:
-    master_key = _master_admin_key()
-    if x_admin_key and master_key and x_admin_key == master_key:
-        return {"role": "master_admin", "via": "x_admin_key"}
-
-    if not authorization or not authorization.lower().startswith("bearer "):
-        raise HTTPException(status_code=401, detail="Master admin required")
-
-    token = authorization.split(" ", 1)[1].strip()
-    try:
-        payload = decode_token(token)
-    except Exception as exc:
-        raise HTTPException(status_code=401, detail=f"Invalid token: {exc}") from exc
-
-    role = str(payload.get("role", "") or "").strip().lower()
-    email = str(payload.get("email", "") or "").strip().lower()
-    if role not in {"admin", "owner", "superadmin"}:
-        raise HTTPException(status_code=403, detail="Master admin role required")
-    allowed = set(_master_admin_emails())
-    if allowed and email not in allowed:
-        raise HTTPException(status_code=403, detail="Master admin email required")
-    return {
-        "sub": payload.get("sub"),
-        "email": email,
-        "role": role,
-        "via": "bearer",
-    }
+    return require_master_admin_access(authorization=authorization, x_admin_key=x_admin_key)
 
 
 def _env(name: str, default: str = "") -> str:
