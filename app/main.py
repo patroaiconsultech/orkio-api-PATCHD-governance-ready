@@ -17,6 +17,17 @@ from typing import Any, Dict, List, Optional
 from app.self_heal.secret_broker import resolve_github_token
 from app.self_heal.credential_scope import control_plane_github_context
 
+from app.services.admin_master_identity import (
+    admin_master_emails_configured,
+    build_admin_authority_context,
+    extract_identity_email,
+    extract_identity_name,
+    extract_identity_role,
+    get_admin_master_emails,
+    has_admin_console_access,
+    is_admin_master,
+)
+
 from fastapi import FastAPI, Depends, HTTPException, Header, UploadFile, File as UpFile, Request, Form, BackgroundTasks
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
@@ -1505,16 +1516,15 @@ def resolve_stt_language(preferred: Optional[str] = None) -> Optional[str]:
     return mapping.get(raw, raw.split("-")[0] or None)
 
 def _ensure_admin_user_state(u: Optional[User]) -> bool:
-    """Best-effort structural admin promotion for configured emails."""
+    """Best-effort structural admin promotion for configured admin/master emails."""
     if not u:
         return False
     email = ((getattr(u, "email", None) or "")).strip().lower()
-    admin_set = set(admin_emails())
-    super_admin_set = set(super_admin_emails())
-    if not email or (email not in admin_set and email not in super_admin_set):
+    configured_admins = set(admin_emails()) | set(super_admin_emails()) | set(get_admin_master_emails())
+    if not email or email not in configured_admins:
         return False
     changed = False
-    # Keep DB-compatible role value; frontend/admin access is derived from role/is_admin/admin flags.
+    # Keep DB-compatible role value; frontend/admin access and write authority are derived from canonical flags.
     if (getattr(u, "role", None) or "user").strip().lower() != "admin":
         u.role = "admin"
         changed = True
@@ -1532,20 +1542,12 @@ def _is_user_approved(u: Optional[User]) -> bool:
     return bool(u and ((getattr(u, "role", None) == "admin") or getattr(u, "approved_at", None)))
 
 def _user_has_admin_console_access(u: Optional[User]) -> bool:
-    if not u:
-        return False
-    role = (getattr(u, "role", "") or "").strip().lower()
-    if role in {"admin", "owner", "superadmin"}:
-        return True
-    if bool(getattr(u, "is_admin", False)):
-        return True
-    if bool(getattr(u, "admin", False)):
-        return True
-    return False
+    return bool(has_admin_console_access(u))
 
 
 def _serialize_user_payload(u: User, usage_tier: Optional[str] = None) -> Dict[str, Any]:
-    admin_access = _user_has_admin_console_access(u)
+    authority = build_admin_authority_context(u)
+    admin_access = bool(authority.get("admin_console_access"))
     return {
         "id": u.id,
         "org_slug": getattr(u, "org_slug", None),
@@ -1554,6 +1556,10 @@ def _serialize_user_payload(u: User, usage_tier: Optional[str] = None) -> Dict[s
         "role": u.role,
         "is_admin": admin_access,
         "admin": admin_access,
+        "is_admin_master": bool(authority.get("is_admin_master")),
+        "write_approval_authority": bool(authority.get("write_approval_authority")),
+        "admin_console_access": admin_access,
+        "authority_source": authority.get("authority_source"),
         "approved_at": getattr(u, "approved_at", None),
         "usage_tier": usage_tier or getattr(u, "usage_tier", None),
         "signup_code_label": getattr(u, "signup_code_label", None),
@@ -1649,6 +1655,7 @@ def _build_auth_response(u: User, org: str, usage_tier: Optional[str], *, ip: Op
     user_payload = _serialize_user_payload(u, usage_tier)
     auth_status = _auth_status_for_user(u)
     onboarding_completed = bool(user_payload.get("onboarding_completed"))
+    authority = build_admin_authority_context(u)
     payload: Dict[str, Any] = {
         "user": user_payload,
         "auth_status": auth_status,
@@ -1671,13 +1678,19 @@ def _build_auth_response(u: User, org: str, usage_tier: Optional[str], *, ip: Op
         "signup_code_label": getattr(u, "signup_code_label", None),
         "product_scope": getattr(u, "product_scope", None),
         "onboarding_completed": onboarding_completed,
+        "is_admin": bool(authority.get("admin_console_access")),
+        "admin": bool(authority.get("admin_console_access")),
+        "is_admin_master": bool(authority.get("is_admin_master")),
+        "admin_console_access": bool(authority.get("admin_console_access")),
+        "write_approval_authority": bool(authority.get("write_approval_authority")),
+        "authority_source": authority.get("authority_source"),
         "auth_issued_at": now_ts(),
     }
     if auth_context:
         token_payload["auth_context"] = auth_context
     payload["access_token"] = mint_token(token_payload)
     payload["token_type"] = "bearer"
-    payload["redirect_to"] = "/admin" if _user_has_admin_console_access(u) else "/app"
+    payload["redirect_to"] = "/admin" if bool(authority.get("admin_console_access")) else "/app"
     return payload
 
 
@@ -7005,95 +7018,33 @@ def _github_require_explicit_pr_approval() -> bool:
     return _env_flag("REQUIRE_EXPLICIT_PR_APPROVAL", True)
 
 def _admin_master_configured_emails() -> set[str]:
-    raw = (
-        os.getenv("ADMIN_MASTER_EMAILS", "").strip()
-        or os.getenv("ORKIO_ADMIN_MASTER_EMAILS", "").strip()
-        or os.getenv("SUPER_ADMIN_EMAILS", "").strip()
-    )
-    return {x.strip().lower() for x in raw.split(",") if x.strip()}
+    return set(get_admin_master_emails())
 
 
 
 def _admin_master_emails_configured() -> bool:
-    return bool(_admin_master_configured_emails())
+    return bool(admin_master_emails_configured())
 
 
 def _payload_identity_email(payload: Optional[Dict[str, Any]]) -> str:
-    if not isinstance(payload, dict):
-        return ""
-    return str(
-        payload.get("email")
-        or payload.get("user_email")
-        or payload.get("preferred_username")
-        or ""
-    ).strip().lower()
+    return extract_identity_email(payload)
 
 
 def _payload_identity_name(payload: Optional[Dict[str, Any]]) -> str:
-    if not isinstance(payload, dict):
-        return "Usuário autenticado"
-    return str(
-        payload.get("name")
-        or payload.get("full_name")
-        or payload.get("display_name")
-        or payload.get("given_name")
-        or _payload_identity_email(payload)
-        or "Usuário autenticado"
-    ).strip()
+    return extract_identity_name(payload)
 
 
 def _payload_identity_role(payload: Optional[Dict[str, Any]]) -> str:
-    if not isinstance(payload, dict):
-        return "anonymous"
-    role = str(payload.get("role") or "").strip().lower()
-    if role:
-        return role
-    if bool(payload.get("is_admin")) or bool(payload.get("admin")):
-        return "admin"
-    return "user"
+    return extract_identity_role(payload)
 
 
 def _payload_is_admin_master(payload: Optional[Dict[str, Any]]) -> bool:
-    if not isinstance(payload, dict):
-        return False
-    email = _payload_identity_email(payload)
-    role = _payload_identity_role(payload)
-    configured = _admin_master_configured_emails()
-    if email and configured and email in configured:
-        return True
-    # Role-based Admin Master remains valid only for explicit master roles.
-    # Generic admin/owner/creator roles are admin-console roles, not write-approval roles.
-    if role in {"admin_master", "master_admin"}:
-        return True
-    return False
+    return bool(is_admin_master(payload))
 
 
 
 def _github_write_identity(payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    role = _payload_identity_role(payload)
-    email = _payload_identity_email(payload)
-    is_admin_master = _payload_is_admin_master(payload)
-    admin_console_access = bool(
-        is_admin_master
-        or role in {"admin", "owner", "superadmin", "super_admin", "admin_master", "master_admin", "creator"}
-        or (isinstance(payload, dict) and (bool(payload.get("is_admin")) or bool(payload.get("admin"))))
-    )
-    write_approval_authority = bool(is_admin_master)
-    return {
-        "authenticated": isinstance(payload, dict) and bool((payload or {}).get("sub") or email),
-        "name": _payload_identity_name(payload),
-        "email": email or "unknown",
-        "sub": str((payload or {}).get("sub") or "unknown").strip() if isinstance(payload, dict) else "unknown",
-        "role": "admin_master" if is_admin_master else role,
-        "is_admin_master": bool(is_admin_master),
-        "is_admin_like": bool(admin_console_access),
-        "admin_console_access": bool(admin_console_access),
-        "write_approval_authority": bool(write_approval_authority),
-        "write_authority": bool(write_approval_authority),
-        "authority_source": "admin_master_identity" if is_admin_master else ("admin_console_role_without_write_approval" if admin_console_access else "none"),
-        "admin_master_configured": _admin_master_emails_configured(),
-        "approval_model": "tokenized_pending_proposal_scope",
-    }
+    return build_admin_authority_context(payload)
 
 
 
@@ -23587,6 +23538,10 @@ class MeOut(BaseModel):
     role: str
     is_admin: Optional[bool] = False
     admin: Optional[bool] = False
+    is_admin_master: Optional[bool] = False
+    write_approval_authority: Optional[bool] = False
+    admin_console_access: Optional[bool] = False
+    authority_source: Optional[str] = None
     approved_at: Optional[int] = None
     usage_tier: Optional[str] = None
     signup_source: Optional[str] = None
@@ -23613,7 +23568,8 @@ def get_me(user=Depends(get_current_user), db: Session = Depends(get_db)):
     u = db.execute(select(User).where(User.id == uid)).scalar_one_or_none()
     if not u:
         raise HTTPException(status_code=401, detail="Not authenticated")
-    admin_access = _user_has_admin_console_access(u)
+    authority = build_admin_authority_context(u)
+    admin_access = bool(authority.get("admin_console_access"))
     auth_status = _auth_status_for_user(u)
     return MeOut(
         id=u.id,
@@ -23623,6 +23579,10 @@ def get_me(user=Depends(get_current_user), db: Session = Depends(get_db)):
         role=u.role,
         is_admin=admin_access,
         admin=admin_access,
+        is_admin_master=bool(authority.get("is_admin_master")),
+        write_approval_authority=bool(authority.get("write_approval_authority")),
+        admin_console_access=admin_access,
+        authority_source=authority.get("authority_source"),
         approved_at=u.approved_at,
         usage_tier=u.usage_tier,
         signup_source=getattr(u, "signup_source", None),
