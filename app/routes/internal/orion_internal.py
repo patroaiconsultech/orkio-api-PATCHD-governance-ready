@@ -25,8 +25,9 @@ from app.core.orkio_permissions import load_permissions
 from app.services.capability_service import load_runtime_governed_capabilities
 from app.services.governance_service import build_governance_health, evaluate_governance_action
 from app.services.receipt_service import make_governed_receipt
+from app.services.admin_master_identity import require_admin_console_access, require_master_admin_access
 
-router = APIRouter(prefix="/api/internal/orion", tags=["orion_internal"])
+router = APIRouter(prefix="/api/internal/orion", tags=["orion_internal"], dependencies=[Depends(require_admin_console_access)])
 
 PATCH_SENTINEL = "PR_COMPARE_STATUS_SENTINEL_12BN_V1"
 PATCH_FEATURE = "github_pr_compare_status_resolver"
@@ -4248,7 +4249,7 @@ def _looks_like_github_runtime_request(message: str) -> bool:
 
 
 @router.post("/github/execute")
-def github_execute(inp: OrionRuntimeIn) -> Dict[str, Any]:
+def github_execute(inp: OrionRuntimeIn, _access: Dict[str, Any] = Depends(require_master_admin_access)) -> Dict[str, Any]:
     visible_agent = _resolve_visible_agent(inp.message, default="orion")
     message = inp.message or ""
     lowered = message.lower()
