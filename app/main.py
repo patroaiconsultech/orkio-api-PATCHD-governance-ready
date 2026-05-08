@@ -6171,11 +6171,86 @@ def _canonical_dispatch_specialist_slug(name: Any) -> Optional[str]:
     return slug
 
 
+
+
+def _extract_readonly_squad_requested_raw_from_message(message: Any) -> List[str]:
+    """
+    EFATA777 v6:
+    Preserve the explicit squad as typed by the user before any canonicalization.
+    This prevents legacy aliases such as `cto` from disappearing from
+    requested_specialists_raw while still normalizing them for execution policy.
+    """
+    raw = str(message or "")
+    if not raw.strip():
+        return []
+    patterns = [
+        r"(?is)(?:resolva exatamente este squad|resolver este squad|resolver squad|resolve exactly this squad|resolve this squad)\s*:\s*([^\n]+)",
+        r"(?im)^\s*squad\s*:\s*([^\n]+)$",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, raw, flags=re.IGNORECASE)
+        if not match:
+            continue
+        segment = str(match.group(1) or "")
+        segment = re.split(
+            r"\b(?:modo\s+read[- ]?only|modo\s+read\s+only|não\s+execute|nao\s+execute|do\s+not\s+execute|responda\s+apenas|retorne\s+apenas)\b",
+            segment,
+            flags=re.IGNORECASE,
+        )[0]
+        parts = []
+        for part in re.split(r"[,;]", segment):
+            token = str(part or "").strip().strip(". ")
+            token = re.sub(r"^@+", "", token).strip()
+            token = token.lower().replace("-", "_").replace(" ", "_")
+            token = re.sub(r"[^a-z0-9_]+", "", token).strip("_")
+            if token:
+                parts.append(token)
+        if parts:
+            out: List[str] = []
+            seen: set = set()
+            for token in parts:
+                if token not in seen:
+                    out.append(token)
+                    seen.add(token)
+            return out
+    return []
+
+
+def _legacy_aliases_resolved_for_requested_raw(values: Optional[List[Any]]) -> Dict[str, str]:
+    resolved: Dict[str, str] = {}
+    for raw_item in list(values or []):
+        raw_slug = str(raw_item or "").strip().lower().replace("@", "").replace("-", "_").replace(" ", "_")
+        raw_slug = re.sub(r"[^a-z0-9_]+", "", raw_slug).strip("_")
+        canonical = _canonical_dispatch_specialist_slug(raw_item)
+        if raw_slug and canonical and raw_slug != canonical:
+            resolved[raw_slug] = canonical
+    return resolved
+
+
 def _runtime_hard_constraints_from_enrichment(runtime_enrichment: Optional[Dict[str, Any]]) -> Dict[str, Any]:
     if not isinstance(runtime_enrichment, dict):
         return {}
     intent_package = runtime_enrichment.get("intent_package") if isinstance(runtime_enrichment.get("intent_package"), dict) else {}
     runtime_operation = intent_package.get("runtime_operation") if isinstance(intent_package.get("runtime_operation"), dict) else {}
+    source_message = (
+        runtime_enrichment.get("_source_message")
+        or runtime_enrichment.get("source_message")
+        or runtime_enrichment.get("message")
+        or intent_package.get("message")
+        or intent_package.get("source_message")
+        or ""
+    )
+    requested_raw_from_message = _extract_readonly_squad_requested_raw_from_message(source_message)
+    if requested_raw_from_message and _is_readonly_squad_resolution_enrichment(runtime_enrichment):
+        runtime_operation["requested_specialists_raw"] = list(requested_raw_from_message)
+        runtime_operation["requested_specialists"] = list(requested_raw_from_message)
+        runtime_operation["specialists_required"] = list(requested_raw_from_message)
+        runtime_operation["selected_specialists_count_must_be"] = len(requested_raw_from_message)
+        runtime_operation["hard_constraints_present"] = True
+        runtime_operation["legacy_aliases_resolved"] = _legacy_aliases_resolved_for_requested_raw(requested_raw_from_message)
+        intent_package["runtime_operation"] = runtime_operation
+        runtime_enrichment["intent_package"] = intent_package
+
     required_signer = _canonical_dispatch_specialist_slug(runtime_operation.get("required_signer"))
     specialists_required = [
         slug for slug in (_canonical_dispatch_specialist_slug(item) for item in list(runtime_operation.get("specialists_required") or runtime_operation.get("requested_specialists") or []))
@@ -6331,6 +6406,7 @@ def _readonly_dispatch_specialist_slugs() -> set:
     return {
         "orion",
         "auditor",
+        "systems_architect",
         "cto",
         "ux_frontend",
         "backend_engineer",
@@ -6440,12 +6516,19 @@ def _build_readonly_squad_trace_payload(
     capability_name = str(op.get("capability_name") or op.get("kind") or "squad_resolution_trace_readonly").strip()
     template_id = _readonly_squad_template_id(runtime_enrichment)
     requested_raw = list(
-        op.get("requested_specialists")
+        op.get("requested_specialists_raw")
+        or op.get("requested_specialists")
         or constraints.get("specialists_required")
         or requested_names
         or []
     )
     requested_normalized = _canonical_dispatch_specialist_list(requested_raw)
+    legacy_aliases_resolved = dict(
+        op.get("legacy_aliases_resolved")
+        or constraints.get("legacy_aliases_resolved")
+        or _legacy_aliases_resolved_for_requested_raw(requested_raw)
+        or {}
+    )
     selected_before = _canonical_dispatch_specialist_list(
         [getattr(ag, "name", None) for ag in list(target_agents_before or [])]
     )
@@ -6471,6 +6554,7 @@ def _build_readonly_squad_trace_payload(
         "required_signer": constraints.get("required_signer"),
         "requested_specialists_raw": requested_raw,
         "requested_specialists_normalized": requested_normalized,
+        "legacy_aliases_resolved": legacy_aliases_resolved,
         "selected_specialists_before_constraints": selected_before,
         "selected_specialists_after_constraints": selected_after,
         "selected_specialists_before_policy": selected_before,
@@ -6491,6 +6575,7 @@ def _format_readonly_squad_trace_text(trace: Optional[Dict[str, Any]]) -> str:
         "template_id",
         "requested_specialists_raw",
         "requested_specialists_normalized",
+        "legacy_aliases_resolved",
         "selected_specialists_before_constraints",
         "selected_specialists_after_constraints",
         "selected_specialists_before_policy",
@@ -6682,9 +6767,13 @@ def _apply_runtime_hard_constraints_to_targets(
         runtime_operation["specialists_required"] = specialists_required
         runtime_operation["specialists_forbidden"] = list(specialists_forbidden)
         runtime_operation["selected_specialists_count_must_be"] = count_must_be
-        runtime_operation["requested_specialists"] = specialists_required or [
+        existing_requested_raw = list(runtime_operation.get("requested_specialists_raw") or [])
+        runtime_operation["requested_specialists"] = existing_requested_raw or specialists_required or [
             _canonical_dispatch_specialist_slug(getattr(ag, "name", None)) for ag in unique_agents if _canonical_dispatch_specialist_slug(getattr(ag, "name", None))
         ]
+        if existing_requested_raw:
+            runtime_operation["requested_specialists_raw"] = existing_requested_raw
+            runtime_operation["legacy_aliases_resolved"] = _legacy_aliases_resolved_for_requested_raw(existing_requested_raw)
         runtime_operation["hard_constraints_present"] = True
         if required_signer:
             runtime_operation["visible_only_agent"] = required_signer
@@ -14944,6 +15033,8 @@ def chat(
         pass
 
     try:
+        if isinstance(runtime_enrichment, dict):
+            runtime_enrichment["_source_message"] = inp.message
         _constraint_guard = _apply_runtime_hard_constraints_to_targets(
             target_agents=target_agents,
             alias_to_agent=alias_to_agent,
@@ -19452,6 +19543,8 @@ async def chat_stream(
     except Exception:
         pass
     try:
+        if isinstance(runtime_enrichment, dict):
+            runtime_enrichment["_source_message"] = inp.message
         _constraint_guard = _apply_runtime_hard_constraints_to_targets(
             target_agents=target_agents,
             alias_to_agent=alias_to_agent,
