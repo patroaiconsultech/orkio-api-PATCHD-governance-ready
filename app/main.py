@@ -912,9 +912,27 @@ _founder_guidance_state: dict = {}  # {(org, thread_id): {"action": str, "turns_
 _GITHUB_WRITE_APPROVAL_TTL_SECONDS = int(os.getenv("GITHUB_WRITE_APPROVAL_TTL_SECONDS", "3600") or "3600")
 _github_write_lock = _threading.Lock()
 _github_write_approval_state: dict = {}  # {(org, thread_id, user_id): approval_dict}
-
-
+_github_write_pending_approval_state: dict = {}  # {(org, thread_id/userwide, user_id): pending_proposal_dict}
 _github_write_execution_state: dict = {}  # {(org, thread_id, user_id): execution_receipts}
+
+
+def _github_write_bootstrap_state() -> None:
+    global _github_write_lock
+    global _github_write_approval_state
+    global _github_write_pending_approval_state
+    global _github_write_execution_state
+
+    if globals().get("_github_write_lock") is None:
+        _github_write_lock = _threading.Lock()
+
+    if not isinstance(globals().get("_github_write_approval_state"), dict):
+        _github_write_approval_state = {}
+
+    if not isinstance(globals().get("_github_write_pending_approval_state"), dict):
+        _github_write_pending_approval_state = {}
+
+    if not isinstance(globals().get("_github_write_execution_state"), dict):
+        _github_write_execution_state = {}
 
 
 def _github_write_execution_key(org: str, thread_id: Optional[str], payload: Optional[Dict[str, Any]]) -> str:
@@ -923,6 +941,7 @@ def _github_write_execution_key(org: str, thread_id: Optional[str], payload: Opt
 
 
 def _github_write_get_execution_receipts(org: str, thread_id: Optional[str], payload: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    _github_write_bootstrap_state()
     key = _github_write_execution_key(org, thread_id, payload)
     with _github_write_lock:
         item = _github_write_execution_state.get(key)
@@ -930,6 +949,7 @@ def _github_write_get_execution_receipts(org: str, thread_id: Optional[str], pay
 
 
 def _github_write_clear_execution_receipts(org: str, thread_id: Optional[str], payload: Optional[Dict[str, Any]]) -> None:
+    _github_write_bootstrap_state()
     key = _github_write_execution_key(org, thread_id, payload)
     with _github_write_lock:
         _github_write_execution_state.pop(key, None)
@@ -942,6 +962,7 @@ def _github_write_store_execution_receipts(
     payload: Optional[Dict[str, Any]],
     result: Dict[str, Any],
 ) -> Dict[str, Any]:
+    _github_write_bootstrap_state()
     key = _github_write_execution_key(org, thread_id, payload)
     with _github_write_lock:
         current = dict(_github_write_execution_state.get(key) or {})
@@ -7111,6 +7132,7 @@ def _github_write_store_pending_proposal(
     requested_actions: Optional[List[str]] = None,
     requested_paths: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
+    _github_write_bootstrap_state()
     now = now_ts()
     identity = _github_write_identity(payload)
     normalized_patch_id = _github_normalize_patch_id(patch_id)
@@ -7143,6 +7165,7 @@ def _github_write_store_pending_proposal(
 
 
 def _github_write_get_pending_proposal(org: str, thread_id: Optional[str], payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    _github_write_bootstrap_state()
     key = _github_write_pending_key(org, thread_id, payload)
     userwide_key = _github_write_user_approval_key(org, str((payload or {}).get("sub") or "unknown").strip())
     now = now_ts()
@@ -7159,6 +7182,7 @@ def _github_write_get_pending_proposal(org: str, thread_id: Optional[str], paylo
 
 
 def _github_write_clear_pending_proposal(org: str, thread_id: Optional[str], payload: Optional[Dict[str, Any]]) -> None:
+    _github_write_bootstrap_state()
     key = _github_write_pending_key(org, thread_id, payload)
     userwide_key = _github_write_user_approval_key(org, str((payload or {}).get("sub") or "unknown").strip())
     with _github_write_lock:
@@ -7192,6 +7216,7 @@ def _github_write_user_approval_key(org: str, user_id: Optional[str]) -> str:
     return f"{org_key}::userwide::{user_key}"
 
 def _github_write_cleanup_locked() -> None:
+    _github_write_bootstrap_state()
     now = now_ts()
 
     stale_approvals = []
@@ -7218,6 +7243,7 @@ def _github_write_cleanup_locked() -> None:
 
 
 def _github_write_get_active_approval(org: str, thread_id: Optional[str], payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    _github_write_bootstrap_state()
     user_id = str((payload or {}).get("sub") or "").strip()
     thread_key = _github_write_approval_key(org, thread_id, user_id)
     userwide_key = _github_write_user_approval_key(org, user_id)
@@ -7267,6 +7293,7 @@ def _github_write_embed_runtime_approval_message(
         return txt
 
 def _github_write_clear_approval(org: str, thread_id: Optional[str], payload: Optional[Dict[str, Any]]) -> None:
+    _github_write_bootstrap_state()
     user_id = str((payload or {}).get("sub") or "").strip()
     thread_key = _github_write_approval_key(org, thread_id, user_id)
     userwide_key = _github_write_user_approval_key(org, user_id)
@@ -7666,6 +7693,7 @@ def _github_write_policy_snapshot(
     payload: Optional[Dict[str, Any]],
     db: Optional[Session] = None,
 ) -> Dict[str, Any]:
+    _github_write_bootstrap_state()
     capabilities = _build_runtime_capabilities_payload(db=db, org=org)
     github = capabilities.get("github") if isinstance(capabilities.get("github"), dict) else {}
     approval = _github_write_get_active_approval(org, thread_id, payload)
@@ -7849,6 +7877,7 @@ def _github_store_write_approval(
     auth_flags: Dict[str, Any],
     pending: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    _github_write_bootstrap_state()
     pending = dict(pending or {})
     user_id = str((payload or {}).get("sub") or "").strip()
     key = _github_write_approval_key(org, thread_id, user_id)
@@ -25368,38 +25397,3 @@ def admin_reorder_landing_blocks(
         changed += 1
     db.commit()
     return {"ok": True, "changed": changed}
-
-
-# ============================================================
-# EFATA777 — ASGI entrypoint recovery guard
-# Added on top of the uploaded complete snapshot to preserve
-# the canonical export expected by deploy target: app.main:app
-# ============================================================
-try:
-    from fastapi import FastAPI as _EfataFastAPI
-except Exception:
-    _EfataFastAPI = None  # type: ignore
-
-def _efata_recover_asgi_app_export():
-    existing_app = globals().get("app")
-    if _EfataFastAPI is not None and isinstance(existing_app, _EfataFastAPI):
-        return existing_app
-
-    existing_application = globals().get("application")
-    if _EfataFastAPI is not None and isinstance(existing_application, _EfataFastAPI):
-        globals()["app"] = existing_application
-        return existing_application
-
-    factory = globals().get("create_app")
-    if callable(factory):
-        candidate = factory()
-        if _EfataFastAPI is not None and isinstance(candidate, _EfataFastAPI):
-            globals()["app"] = candidate
-            return candidate
-
-    raise RuntimeError(
-        "ASGI_ENTRYPOINT_RECOVERY_FAILED: nenhum objeto FastAPI exportável foi encontrado em app.main"
-    )
-
-# No-op when `app` already exists; recovery only if export is missing.
-app = _efata_recover_asgi_app_export()
