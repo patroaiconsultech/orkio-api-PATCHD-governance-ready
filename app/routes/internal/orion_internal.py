@@ -3853,8 +3853,41 @@ def _extract_known_dispatch_actors_from_text(text: str) -> List[str]:
         if token in padded and slug not in seen:
             out.append(slug)
             seen.add(slug)
+    # Explicit legacy alias support: raw "cto" must be preserved by the raw
+    # extractor and normalized to systems_architect by policy.
+    if re.search(r"(?<![a-z0-9_])cto(?![a-z0-9_])", str(text or ""), flags=re.IGNORECASE):
+        if "systems_architect" not in seen:
+            out.append("systems_architect")
+            seen.add("systems_architect")
     return out
 
+
+
+
+def _extract_requested_specialists_raw_from_message(message: str) -> List[str]:
+    raw = str(message or "")
+    if not raw.strip():
+        return []
+    patterns = [
+        r"(?is)(?:resolva exatamente este squad|resolver este squad|resolver squad|resolve exactly this squad|resolve this squad)\s*:\s*([^\n]+)",
+        r"(?im)^\s*squad\s*:\s*([^\n]+)$",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, raw, flags=re.IGNORECASE)
+        if not match:
+            continue
+        segment = str(match.group(1) or "")
+        # Remove instruction tail without dropping comma-separated actors.
+        segment = re.split(r"\b(?:modo\s+read[- ]?only|não\s+execute|nao\s+execute|do\s+not\s+execute|responda\s+apenas|retorne\s+apenas)\b", segment, flags=re.IGNORECASE)[0]
+        parts = [_strip_constraint_token(p) for p in re.split(r"[,;]", segment)]
+        out = []
+        for part in parts:
+            token = str(part or "").strip().strip(". ")
+            if token:
+                out.append(token)
+        if out:
+            return out
+    return []
 
 def _extract_requested_specialists_from_message(message: str) -> List[str]:
     constraints = _extract_hard_constraints(message or "")
@@ -3936,8 +3969,14 @@ def _resolve_squad_readonly_payload(inp: OrionRuntimeIn, *, trace_mode: bool = F
     message = inp.message or ""
     visible_agent = _resolve_visible_agent(message, default="orion")
     constraints = _extract_hard_constraints(message)
-    requested_raw = _extract_requested_specialists_from_message(message)
+    requested_raw = _extract_requested_specialists_raw_from_message(message) or _extract_requested_specialists_from_message(message)
     requested_normalized = _dedupe_dispatch_actors(requested_raw)
+    legacy_aliases_resolved: Dict[str, str] = {}
+    for raw_item in list(requested_raw or []):
+        raw_slug = _strip_constraint_token(raw_item).strip().lower().replace("@", "").replace("-", "_").replace(" ", "_")
+        canonical = _canonical_dispatch_actor(raw_item)
+        if raw_slug and canonical and raw_slug != canonical:
+            legacy_aliases_resolved[raw_slug] = canonical
     selected_before_policy = [item for item in requested_normalized if item in _dispatch_specialist_registry()]
     selected_after_policy = _apply_specialist_constraints(selected_before_policy, constraints=constraints)
     violations = _validate_dispatch_constraints(
@@ -3961,6 +4000,7 @@ def _resolve_squad_readonly_payload(inp: OrionRuntimeIn, *, trace_mode: bool = F
         "template_id": "squad_resolution_trace_readonly_v1" if trace_mode else "squad_resolve_readonly_v1",
         "requested_specialists_raw": list(requested_raw),
         "requested_specialists_normalized": list(requested_normalized),
+        "legacy_aliases_resolved": dict(legacy_aliases_resolved),
         "selected_specialists_before_policy": list(selected_before_policy),
         "selected_specialists_after_policy": list(selected_after_policy),
         "squad_resolved": list(selected_after_policy),
