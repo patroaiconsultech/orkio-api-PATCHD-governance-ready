@@ -3348,6 +3348,40 @@ def db_ok() -> bool:
 logger = logging.getLogger("orkio")
 
 
+class _OperationalStdoutLogger:
+    """
+    Logger facade for operational self-heal lifecycle events.
+    Railway may classify stderr logger traffic as severity=error even when the
+    message is informational. This facade sends normal lifecycle lines to stdout
+    and preserves real exceptions through the canonical logger.
+    """
+    def _fmt(self, msg: Any, *args: Any) -> str:
+        try:
+            text_msg = str(msg)
+            return text_msg % args if args else text_msg
+        except Exception:
+            return str(msg)
+
+    def info(self, msg: Any, *args: Any, **kwargs: Any) -> None:
+        print(self._fmt(msg, *args), flush=True)
+
+    def warning(self, msg: Any, *args: Any, **kwargs: Any) -> None:
+        print(self._fmt(msg, *args), flush=True)
+
+    def error(self, msg: Any, *args: Any, **kwargs: Any) -> None:
+        # Deliberately stdout: self-heal loop uses error() for normal state
+        # transitions in older code paths.
+        print(self._fmt(msg, *args), flush=True)
+
+    def exception(self, msg: Any, *args: Any, **kwargs: Any) -> None:
+        logger.exception(msg, *args, **kwargs)
+
+
+def _self_heal_operational_logger() -> _OperationalStdoutLogger:
+    return _OperationalStdoutLogger()
+
+
+
 def _capability_execution_result_from_exception(exc: Exception, *, context: str = "") -> Dict[str, Any]:
     status_code = getattr(exc, "status_code", None)
     detail = getattr(exc, "detail", None)
@@ -4389,7 +4423,7 @@ async def _startup():
 
             await start_evolution_loop(
                 db_factory=lambda: SessionLocal(),
-                logger=logger,
+                logger=_self_heal_operational_logger(),
             )
     except Exception as exc:
         try:
@@ -5444,6 +5478,7 @@ def _openai_answer(
     system_prompt: Optional[str] = None,
     model_override: Optional[str] = None,
     temperature: Optional[float] = None,
+    fallback_model_override: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Answer using OpenAI Chat Completions, with optional thread history.
 
@@ -5573,12 +5608,17 @@ def _openai_answer(
             kwargs["temperature"] = temperature
 
         fallback_model = (
-            _clean_env(os.getenv("OPENAI_FALLBACK_MODEL", ""), default="").strip()
+            _clean_env(fallback_model_override, default="").strip()
+            or _clean_env(os.getenv("OPENAI_FALLBACK_MODEL", ""), default="").strip()
             or "gpt-4o-mini"
         )
         last_exc = None
         used_model = model
-        for attempt_model in [model, fallback_model]:
+        attempt_models = []
+        for candidate in [model, fallback_model]:
+            if candidate and candidate not in attempt_models:
+                attempt_models.append(candidate)
+        for attempt_model in attempt_models:
             try:
                 used_model = attempt_model
                 kwargs["model"] = attempt_model
@@ -5592,6 +5632,11 @@ def _openai_answer(
                     "text": answer_text,
                     "usage": getattr(r, "usage", None),
                     "model": used_model,
+                    "provider": "openai",
+                    "model_configured": model,
+                    "fallback_model": fallback_model,
+                    "fallback_used": bool(used_model != model),
+                    "fallback_reason": "primary_model_failed" if used_model != model else "",
                 }
             except Exception as inner:
                 last_exc = inner
@@ -5622,6 +5667,11 @@ def _openai_answer(
             "text": "",
             "usage": None,
             "model": model,
+            "provider": "openai",
+            "model_configured": model,
+            "fallback_model": fallback_model if "fallback_model" in locals() else None,
+            "fallback_used": False,
+            "fallback_reason": "",
         }
 
 
@@ -18499,6 +18549,277 @@ def admin_put_agent_links(agent_id: str, inp: AgentToAgentLinkIn, _admin=Depends
     db.commit()
     return {"ok": True, "count": count}
 
+
+
+# EFATA777 v4 — Admin LLM model catalog.
+# The catalog is intentionally env-overridable so production can expose only
+# models/providers that are enabled by keys, billing, compliance and runtime adapters.
+def _csv_env_values(name: str, default: str = "") -> List[str]:
+    raw = _clean_env(os.getenv(name, default), default=default)
+    out: List[str] = []
+    for item in re.split(r"[,;\n]", raw or ""):
+        value = str(item or "").strip()
+        if value and value not in out:
+            out.append(value)
+    return out
+
+
+
+def _env_value_present(*names: str) -> bool:
+    for name in names:
+        if _clean_env(os.getenv(name, ""), default=""):
+            return True
+    return False
+
+
+def _env_bool_enabled(name: str, default: bool = False) -> bool:
+    raw = _clean_env(os.getenv(name, ""), default="")
+    if not raw:
+        return bool(default)
+    return str(raw).strip().lower() in {"1", "true", "yes", "on", "enabled"}
+
+
+def _provider_catalog_entry(
+    provider_id: str,
+    label: str,
+    models: List[str],
+    *,
+    configured: bool,
+    runtime_available: bool,
+    reason: str,
+) -> Dict[str, Any]:
+    selectable = bool(configured and runtime_available and models)
+    disabled_reason = "" if selectable else reason
+    return {
+        "id": provider_id,
+        "label": label,
+        "enabled": selectable,
+        "configured": bool(configured),
+        "runtime_available": bool(runtime_available),
+        "selectable": selectable,
+        "models": models,
+        "reason": disabled_reason,
+        "disabled_reason": disabled_reason,
+    }
+
+
+def _llm_model_catalog_payload() -> Dict[str, Any]:
+    raw = _clean_env(os.getenv("ORKIO_LLM_MODEL_CATALOG_JSON", ""), default="")
+    if raw:
+        try:
+            parsed = json.loads(raw)
+            if isinstance(parsed, dict):
+                parsed.setdefault("source", "env_json")
+                parsed.setdefault("notes", [])
+                # Normalize provider availability flags without mutating custom fields.
+                providers = []
+                for item in list(parsed.get("providers") or []):
+                    if isinstance(item, dict):
+                        provider_id = str(item.get("id") or "").strip().lower()
+                        configured = bool(item.get("configured", item.get("enabled", False)))
+                        runtime_available = bool(item.get("runtime_available", item.get("enabled", False)))
+                        models = list(item.get("models") or [])
+                        selectable = bool(item.get("selectable", configured and runtime_available and models))
+                        item = dict(item)
+                        item["configured"] = configured
+                        item["runtime_available"] = runtime_available
+                        item["selectable"] = selectable
+                        item["enabled"] = selectable
+                        if not selectable and not item.get("reason"):
+                            item["reason"] = "Provider configured in JSON but not marked runtime_available/selectable."
+                        providers.append(item)
+                if providers:
+                    parsed["providers"] = providers
+                return parsed
+        except Exception:
+            try:
+                logger.exception("LLM_MODEL_CATALOG_JSON_PARSE_FAILED")
+            except Exception:
+                pass
+
+    openai_chat = _csv_env_values(
+        "OPENAI_CHAT_MODELS",
+        "gpt-4o-mini,gpt-4o,gpt-4.1-mini,gpt-4.1,gpt-5-mini,gpt-5",
+    )
+    anthropic_chat = _csv_env_values("ANTHROPIC_CHAT_MODELS", "")
+    google_chat = _csv_env_values("GOOGLE_CHAT_MODELS", "")
+    local_chat = _csv_env_values("LOCAL_CHAT_MODELS", "")
+    openrouter_chat = _csv_env_values("OPENROUTER_CHAT_MODELS", "")
+    custom_chat = _csv_env_values("CUSTOM_CHAT_MODELS", "")
+
+    provider_models = {
+        "openai": openai_chat,
+        "anthropic": anthropic_chat,
+        "google": google_chat,
+        "local": local_chat,
+        "openrouter": openrouter_chat,
+        "custom": custom_chat,
+    }
+
+    providers = [
+        _provider_catalog_entry(
+            "openai",
+            "OpenAI",
+            openai_chat,
+            configured=_env_value_present("OPENAI_API_KEY"),
+            runtime_available=True,
+            reason="OPENAI_API_KEY ausente." if not _env_value_present("OPENAI_API_KEY") else "No OpenAI models configured.",
+        ),
+        _provider_catalog_entry(
+            "anthropic",
+            "Anthropic",
+            anthropic_chat,
+            configured=_env_value_present("ANTHROPIC_API_KEY"),
+            runtime_available=_env_bool_enabled("ENABLE_ANTHROPIC_RUNTIME_ADAPTER", False),
+            reason="ANTHROPIC_API_KEY ausente ou adapter Anthropic não habilitado.",
+        ),
+        _provider_catalog_entry(
+            "google",
+            "Google Gemini",
+            google_chat,
+            configured=_env_value_present("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+            runtime_available=_env_bool_enabled("ENABLE_GOOGLE_RUNTIME_ADAPTER", False),
+            reason="GOOGLE_API_KEY/GEMINI_API_KEY ausente ou adapter Google não habilitado.",
+        ),
+        _provider_catalog_entry(
+            "local",
+            "Local / self-hosted",
+            local_chat,
+            configured=_env_value_present("LOCAL_LLM_BASE_URL", "OLLAMA_BASE_URL"),
+            runtime_available=_env_bool_enabled("ENABLE_LOCAL_LLM_RUNTIME_ADAPTER", False),
+            reason="LOCAL_LLM_BASE_URL/OLLAMA_BASE_URL ausente ou adapter local não habilitado.",
+        ),
+        _provider_catalog_entry(
+            "openrouter",
+            "OpenRouter",
+            openrouter_chat,
+            configured=_env_value_present("OPENROUTER_API_KEY"),
+            runtime_available=_env_bool_enabled("ENABLE_OPENROUTER_RUNTIME_ADAPTER", False),
+            reason="OPENROUTER_API_KEY ausente ou adapter OpenRouter não habilitado.",
+        ),
+        _provider_catalog_entry(
+            "custom",
+            "Custom",
+            custom_chat,
+            configured=_env_bool_enabled("ORKIO_ALLOW_CUSTOM_LLM_PROVIDER", False),
+            runtime_available=_env_bool_enabled("ENABLE_CUSTOM_LLM_RUNTIME_ADAPTER", False),
+            reason="Custom provider não habilitado por ORKIO_ALLOW_CUSTOM_LLM_PROVIDER/ENABLE_CUSTOM_LLM_RUNTIME_ADAPTER.",
+        ),
+    ]
+
+    all_chat_models: List[str] = []
+    for values in provider_models.values():
+        for model in values:
+            if model and model not in all_chat_models:
+                all_chat_models.append(model)
+
+    if not all_chat_models:
+        all_chat_models = ["gpt-4o-mini", "gpt-4o"]
+
+    return {
+        "source": "env_defaults_with_runtime_gating",
+        "providers": providers,
+        "provider_models": provider_models,
+        "chat_models": all_chat_models,
+        "fallback_models": _csv_env_values("LLM_FALLBACK_MODELS", ",".join(openai_chat[:2] or all_chat_models[:2])),
+        "embedding_models": _csv_env_values("LLM_EMBEDDING_MODELS", "text-embedding-3-small,text-embedding-3-large"),
+        "reasoning_profiles": _csv_env_values(
+            "LLM_REASONING_PROFILES",
+            "general_purpose,premium_reasoning_cto,deep_architecture,forensic_audit,ux_multimodal,lightweight_router",
+        ),
+        "tool_policies": _csv_env_values(
+            "LLM_TOOL_POLICIES",
+            "standard,governed_runtime,proposal_first,read_only,restricted_tools,no_tools",
+        ),
+        "defaults_by_agent": {
+            "orion": _agent_role_defaults("orion"),
+            "systems_architect": _agent_role_defaults("systems_architect"),
+            "auditor": _agent_role_defaults("auditor"),
+            "ux_frontend": _agent_role_defaults("ux_frontend"),
+        },
+        "notes": [
+            "Catalog is configurable through ORKIO_LLM_MODEL_CATALOG_JSON or provider-specific env vars.",
+            "Provider selection is blocked unless credential and runtime adapter are both available.",
+            "Only OpenAI runtime is active by default in this backend; other providers require explicit adapter enablement.",
+        ],
+    }
+
+
+def _llm_provider_entry(catalog: Dict[str, Any], provider: str) -> Dict[str, Any]:
+    provider_id = str(provider or "openai").strip().lower()
+    for item in list((catalog or {}).get("providers") or []):
+        if isinstance(item, dict) and str(item.get("id") or "").strip().lower() == provider_id:
+            return dict(item)
+    return {}
+
+
+def _validate_agent_llm_config_or_raise(inp: AgentIn, *, slug: Optional[str] = None) -> None:
+    defaults = _agent_role_defaults(slug or getattr(inp, "name", None) or "")
+    provider = str(inp.provider or defaults.get("provider") or "openai").strip().lower()
+    catalog = _llm_model_catalog_payload()
+    provider_models = dict(catalog.get("provider_models") or {})
+    entry = _llm_provider_entry(catalog, provider)
+    if not entry and provider not in provider_models:
+        raise HTTPException(status_code=400, detail=f"LLM provider not recognized: {provider}")
+
+    if entry and not bool(entry.get("selectable", entry.get("enabled", False))):
+        reason = str(entry.get("reason") or entry.get("disabled_reason") or "provider not configured for runtime")
+        raise HTTPException(status_code=400, detail=f"LLM provider unavailable: {provider}. {reason}")
+
+    allowed_models = [str(x) for x in list(provider_models.get(provider) or []) if str(x).strip()]
+    selected_model = str(inp.model or defaults.get("model") or "").strip()
+    if selected_model and allowed_models and selected_model not in allowed_models:
+        raise HTTPException(status_code=400, detail=f"Model '{selected_model}' is not available for provider '{provider}'.")
+
+    fallback_model = str(inp.fallback_model or "").strip()
+    if fallback_model:
+        fallback_allowed = set([str(x) for x in list(catalog.get("fallback_models") or []) + list(catalog.get("chat_models") or []) + allowed_models if str(x).strip()])
+        if fallback_allowed and fallback_model not in fallback_allowed:
+            raise HTTPException(status_code=400, detail=f"Fallback model '{fallback_model}' is not available in the LLM catalog.")
+
+    embedding_model = str(inp.embedding_model or "").strip()
+    if embedding_model:
+        embedding_allowed = set([str(x) for x in list(catalog.get("embedding_models") or []) if str(x).strip()])
+        if embedding_allowed and embedding_model not in embedding_allowed:
+            raise HTTPException(status_code=400, detail=f"Embedding model '{embedding_model}' is not available in the LLM catalog.")
+
+
+def _agent_llm_runtime_resolution(agent: Any, *, used_model: Optional[str] = None, fallback_reason: str = "") -> Dict[str, Any]:
+    provider_configured = str(_agent_attr(agent, "provider", "openai") or "openai").strip().lower()
+    model_configured = str(_agent_attr(agent, "model", "") or "").strip()
+    fallback_model = str(_agent_attr(agent, "fallback_model", "") or "").strip()
+    catalog = _llm_model_catalog_payload()
+    entry = _llm_provider_entry(catalog, provider_configured)
+    provider_available = bool(entry.get("selectable", entry.get("enabled", False))) if entry else provider_configured == "openai"
+    provider_used = provider_configured if provider_configured == "openai" and provider_available else "openai"
+    if provider_used != provider_configured and not fallback_reason:
+        fallback_reason = "provider_runtime_unavailable"
+    if not model_configured:
+        model_configured = str(_agent_role_defaults(_canonical_agent_admin_slug(_agent_attr(agent, "name", ""))).get("model") or os.getenv("DEFAULT_CHAT_MODEL", "gpt-4o-mini"))
+    model_used = str(used_model or model_configured or os.getenv("DEFAULT_CHAT_MODEL", "gpt-4o-mini")).strip()
+    fallback_used = bool(model_used and model_configured and model_used != model_configured)
+    return {
+        "agent": _agent_attr(agent, "name", None),
+        "agent_id": _agent_attr(agent, "id", None),
+        "provider_configured": provider_configured,
+        "model_configured": model_configured,
+        "fallback_model_configured": fallback_model,
+        "provider_available": provider_available,
+        "provider_used": provider_used,
+        "model_used": model_used,
+        "fallback_used": fallback_used,
+        "fallback_reason": fallback_reason or ("primary_model_failed" if fallback_used else ""),
+        "reasoning_profile": _agent_attr(agent, "reasoning_profile", None),
+        "tool_policy": _agent_attr(agent, "tool_policy", None),
+        "strict_mode": bool(_agent_attr(agent, "strict_mode", False)),
+    }
+
+
+@app.get("/api/admin/llm-models")
+def admin_llm_models(_admin=Depends(require_admin_access), x_org_slug: Optional[str] = Header(default=None)):
+    return _llm_model_catalog_payload()
+
+
 @app.get("/api/admin/agents")
 def admin_agents(_admin=Depends(require_admin_access), x_org_slug: Optional[str] = Header(default=None), db: Session = Depends(get_db)):
     org = get_org(x_org_slug)
@@ -18513,6 +18834,7 @@ def admin_create_agent(inp: AgentIn, _admin=Depends(require_admin_access), x_org
     ensure_core_agents(db, org)
     now = now_ts()
     slug = _canonical_agent_admin_slug(inp.name)
+    _validate_agent_llm_config_or_raise(inp, slug=slug)
     if inp.is_default:
         db.execute(text("UPDATE agents SET is_default=0 WHERE org_slug=:org"), {"org": org})
     a = Agent(
@@ -18542,6 +18864,7 @@ def admin_update_agent(agent_id: str, inp: AgentIn, _admin=Depends(require_admin
     lookup_id = str(agent_id or "").strip()
     a = None if lookup_id.startswith("roster::") else db.execute(select(Agent).where(Agent.org_slug == org, Agent.id == lookup_id)).scalar_one_or_none()
     slug = _canonical_agent_admin_slug(inp.name or lookup_id.replace("roster::", ""))
+    _validate_agent_llm_config_or_raise(inp, slug=slug)
     if not a:
         return admin_create_agent(inp=inp, _admin=_admin, x_org_slug=x_org_slug, db=db)
     if inp.is_default and not a.is_default:
@@ -18992,8 +19315,15 @@ async def chat_stream(
             "name": ag.name,
             "description": getattr(ag, "description", None),
             "system_prompt": getattr(ag, "system_prompt", None),
+            "provider": getattr(ag, "provider", None),
             "model": getattr(ag, "model", None),
+            "fallback_model": getattr(ag, "fallback_model", None),
+            "embedding_model": getattr(ag, "embedding_model", None),
             "temperature": getattr(ag, "temperature", None),
+            "reasoning_profile": getattr(ag, "reasoning_profile", None),
+            "tool_policy": getattr(ag, "tool_policy", None),
+            "max_cost_per_run": getattr(ag, "max_cost_per_run", None),
+            "strict_mode": getattr(ag, "strict_mode", None),
             "rag_enabled": getattr(ag, "rag_enabled", None),
             "rag_top_k": getattr(ag, "rag_top_k", None),
             "voice_id": resolve_agent_voice(ag),
@@ -19564,6 +19894,7 @@ async def chat_stream(
                 final_signer_avatar_url = _agent_attr(final_signer_agent, "avatar_url", ag_avatar_url)
                 ag_system_prompt = str(_agent_attr(ag, "system_prompt", "") or "").strip()
                 ag_model = _agent_attr(ag, "model", None)
+                ag_fallback_model = _agent_attr(ag, "fallback_model", None)
                 ag_temperature_raw = _agent_attr(ag, "temperature", None)
                 _ag_rag_enabled_raw = _agent_attr(ag, "rag_enabled", None)
                 ag_rag_enabled = bool(_ag_rag_enabled_raw) if _ag_rag_enabled_raw is not None else True
@@ -19673,7 +20004,9 @@ async def chat_stream(
                 if active_founder_guidance:
                     system_prompt = (system_prompt + "\n\nFounder guidance (temporary, internal):\n" + active_founder_guidance).strip()
                 user_msg = _build_agent_prompt(type("StreamAgentProxy", (), {"name": ag_name})(), message if blocked_reply is None else message, has_team, mention_tokens)
-                model_override = ag_model
+                model_resolution = _agent_llm_runtime_resolution(ag)
+                model_override = model_resolution.get("model_used") or ag_model
+                fallback_model_override = ag_fallback_model
                 temperature = float(ag_temperature_raw if ag_temperature_raw not in (None, "") else 0.2) or 0.2
 
                 # Stable streaming history: never depend on ORM Message instances after commit/rollback
@@ -19968,6 +20301,7 @@ async def chat_stream(
                                 started_monotonic=agent_started_monotonic,
                                 detail=f"Modelo {model_override or 'default'} em execução.",
                                 model=(model_override or None),
+                                model_resolution=model_resolution,
                             )
                         except Exception:
                             return
@@ -19980,6 +20314,7 @@ async def chat_stream(
                             system_prompt,
                             model_override,
                             temperature,
+                            fallback_model_override,
                         )
                     )
 
@@ -20215,6 +20550,7 @@ async def chat_stream(
                     "contract_inherited_from_thread": route_debug_payload.get("contract_inherited_from_thread"),
                     "sticky_delivery_contract": route_debug_payload.get("sticky_delivery_contract"),
                     "sticky_dispatch_event": route_debug_payload.get("sticky_dispatch_event"),
+                    "model_resolution": model_resolution,
                 }
                 try:
                     logger.info(
@@ -20363,7 +20699,7 @@ async def chat_stream(
                             thread_id=tid,
                             message_id=m_ass_id,
                             agent_id=final_signer_agent_id,
-                            usage_meta={"trace_id": trace_id, "client_message_id": client_message_id, "streaming": True, "final_signer_agent_name": final_signer_agent_name},
+                            usage_meta={"trace_id": trace_id, "client_message_id": client_message_id, "streaming": True, "final_signer_agent_name": final_signer_agent_name, "model_resolution": model_resolution},
                         )
                         try:
                             yield sse_execution(
