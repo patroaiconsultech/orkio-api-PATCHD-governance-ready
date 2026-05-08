@@ -39,7 +39,7 @@ from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 from fastapi.responses import Response, JSONResponse
 
 from .db import get_db, ENGINE, SessionLocal
-from .models import User, Thread, Message, File, FileText, FileChunk, AuditLog, Agent, AgentKnowledge, AgentLink, CostEvent, FileRequest, PricingSnapshot, Lead, ThreadMember, RealtimeSession, RealtimeEvent, SignupCode, OtpCode, UserSession, UsageEvent, FeatureFlag, ContactRequest, MarketingConsent, TermsAcceptance, PasswordResetToken, FounderEscalation, RuntimeMemory, TrialState, TrialEvent, NumerologyProfile, ValuationConfig, BillingTransaction, BillingCheckout, BillingWebhookEvent, BillingEntitlement, BillingWallet, BillingWalletLedger, SocialProofItem, LandingContentBlock, ContinuousAuditArtifact, ContinuousAuditJob, ContinuousAuditReceipt
+from .models import User, Thread, Message, File, FileText, FileChunk, AuditLog, Agent, AgentKnowledge, AgentLink, CostEvent, FileRequest, PricingSnapshot, Lead, ThreadMember, RealtimeSession, RealtimeEvent, SignupCode, OtpCode, UserSession, UsageEvent, FeatureFlag, ContactRequest, MarketingConsent, TermsAcceptance, PasswordResetToken, FounderEscalation, RuntimeMemory, TrialState, TrialEvent, NumerologyProfile, ValuationConfig, BillingTransaction, BillingCheckout, BillingWebhookEvent, BillingEntitlement, BillingWallet, BillingWalletLedger, SocialProofItem, LandingContentBlock, ContinuousAuditArtifact, ContinuousAuditJob, ContinuousAuditReceipt, TrademarkMatter, TrademarkEvent
 from .realtime_punctuate import punctuate_realtime_events
 from .pricing_registry import calculate_cost as calc_cost_v2, normalize_model_name, PRICING_VERSION
 from .security import require_secret, new_salt, pbkdf2_hash, verify_password, mint_token, decode_token
@@ -2005,6 +2005,7 @@ def resolve_agent_voice(agent: Optional[Agent]) -> str:
 
 def ensure_core_agents(db: Session, org: str) -> None:
     """Ensure the core board + audit specialists exist for the org (Summit boardroom edition)."""
+    _reconcile_agent_phase2_schema_best_effort()
     rows = list(db.execute(select(Agent).where(Agent.org_slug == org).order_by(Agent.created_at.asc())).scalars().all())
     by_key = {(a.name or "").strip().lower(): a for a in rows}
 
@@ -2020,12 +2021,26 @@ def ensure_core_agents(db: Session, org: str) -> None:
     def upsert(canonical_name: str, aliases: List[str], description: str, system_prompt: str, voice_id: str, is_default: bool = False):
         a = resolve_existing(canonical_name, *aliases)
         if a:
-            # Conservative mode: do NOT overwrite identity/prompt/voice/default on existing agents
-            # Only backfill structural fields if missing.
+            # Conservative mode: do NOT overwrite identity/prompt/voice/default on existing agents.
+            # Only backfill structural model-governance fields if missing.
+            slug = _canonical_agent_admin_slug(canonical_name)
+            defaults = _agent_role_defaults(slug)
+            if not getattr(a, "provider", None):
+                a.provider = defaults["provider"]
             if not getattr(a, "model", None):
-                a.model = os.getenv("DEFAULT_CHAT_MODEL", "gpt-4o-mini")
+                a.model = defaults["model"]
+            if not getattr(a, "fallback_model", None):
+                a.fallback_model = defaults["fallback_model"]
             if not getattr(a, "temperature", None):
-                a.temperature = str(os.getenv("DEFAULT_TEMPERATURE", "0.45"))
+                a.temperature = str(defaults["temperature"])
+            if not getattr(a, "reasoning_profile", None):
+                a.reasoning_profile = defaults["reasoning_profile"]
+            if not getattr(a, "tool_policy", None):
+                a.tool_policy = defaults["tool_policy"]
+            if getattr(a, "max_cost_per_run", None) is None:
+                a.max_cost_per_run = defaults["max_cost_per_run"]
+            if getattr(a, "strict_mode", None) is None:
+                a.strict_mode = bool(defaults["strict_mode"])
             if getattr(a, "rag_enabled", None) is None:
                 a.rag_enabled = True
             if not getattr(a, "rag_top_k", None):
@@ -2037,14 +2052,23 @@ def ensure_core_agents(db: Session, org: str) -> None:
             db.commit()
             return
 
+        slug = _canonical_agent_admin_slug(canonical_name)
+        defaults = _agent_role_defaults(slug)
         a = Agent(
             id=new_id(),
             org_slug=org,
             name=canonical_name,
             description=description,
             system_prompt=system_prompt,
-            model=os.getenv("DEFAULT_CHAT_MODEL", "gpt-4o-mini"),
-            temperature=str(os.getenv("DEFAULT_TEMPERATURE", "0.45")),
+            provider=defaults["provider"],
+            model=defaults["model"],
+            fallback_model=defaults["fallback_model"],
+            embedding_model=None,
+            temperature=str(defaults["temperature"]),
+            reasoning_profile=defaults["reasoning_profile"],
+            tool_policy=defaults["tool_policy"],
+            max_cost_per_run=defaults["max_cost_per_run"],
+            strict_mode=bool(defaults["strict_mode"]),
             rag_enabled=True,
             rag_top_k=6,
             is_default=False,
@@ -2223,8 +2247,8 @@ Typical response length: 2–4 short paragraphs or a structured technical analys
         is_default=False,
     )
     upsert(
-        canonical_name="CTO",
-        aliases=["Systems Architect", "CTO (Systems Architect)"],
+        canonical_name="Systems Architect",
+        aliases=["CTO", "Systems Architect", "CTO (Systems Architect)"],
         description="Systems architect specialist. Dispatch architecture, routing, and execution depth.",
         system_prompt=cto_delegate_prompt,
         voice_id="echo",
@@ -4227,6 +4251,56 @@ async def request_id_mw(request: Request, call_next):
             pass
     return resp
 
+
+
+# EFATA777 v2 — production-safe Agent Phase 2 schema reconcile.
+# This is additive only. It exists to prevent ORM SELECT failures when the code
+# references new Agent columns before a formal migration has been applied.
+_AGENT_PHASE2_SCHEMA_COLUMNS = [
+    ("provider", "VARCHAR"),
+    ("fallback_model", "VARCHAR"),
+    ("reasoning_profile", "VARCHAR"),
+    ("tool_policy", "VARCHAR"),
+    ("max_cost_per_run", "NUMERIC(10, 4)"),
+    ("strict_mode", "BOOLEAN NOT NULL DEFAULT FALSE"),
+]
+
+def _reconcile_agent_phase2_schema_best_effort() -> Dict[str, Any]:
+    result: Dict[str, Any] = {"ok": True, "applied": [], "failed": []}
+    try:
+        if ENGINE is None:
+            result["ok"] = False
+            result["reason"] = "engine_unavailable"
+            return result
+        for column, ddl_type in _AGENT_PHASE2_SCHEMA_COLUMNS:
+            sql = f"ALTER TABLE IF EXISTS agents ADD COLUMN IF NOT EXISTS {column} {ddl_type}"
+            try:
+                with ENGINE.begin() as conn:
+                    conn.execute(text(sql))
+                result["applied"].append(column)
+            except Exception as exc:
+                result["ok"] = False
+                result["failed"].append({"column": column, "error": str(exc)})
+        try:
+            if result.get("failed"):
+                logger.warning("AGENT_PHASE2_SCHEMA_RECONCILE_PARTIAL result=%s", result)
+            else:
+                logger.info("AGENT_PHASE2_SCHEMA_RECONCILE_OK columns=%s", result.get("applied"))
+        except Exception:
+            pass
+        return result
+    except Exception as exc:
+        try:
+            logger.exception("AGENT_PHASE2_SCHEMA_RECONCILE_FAILED error=%s", exc)
+        except Exception:
+            pass
+        return {"ok": False, "applied": [], "failed": [{"error": str(exc)}]}
+
+@app.on_event("startup")
+def _startup_agent_phase2_schema_reconcile():
+    _reconcile_agent_phase2_schema_best_effort()
+
+
 @app.on_event("startup")
 async def _startup():
     # Hard safety gate: JWT secret must exist.
@@ -6027,7 +6101,9 @@ def _canonical_dispatch_specialist_slug(name: Any) -> Optional[str]:
         "orion_cto": "orion",
         "cto_runtime": "orion",
         "technical_auditor": "auditor",
-        "systems_architect": "cto",
+        "systems_architect": "systems_architect",
+        "chief_architect": "systems_architect",
+        "cto": "systems_architect",
     }
     slug = aliases.get(raw, raw)
     if slug.startswith("orion"):
@@ -6038,8 +6114,8 @@ def _canonical_dispatch_specialist_slug(name: Any) -> Optional[str]:
         return "chris"
     if slug.startswith("auditor") or "auditor" in slug:
         return "auditor"
-    if slug.startswith("cto"):
-        return "cto"
+    if slug.startswith("systems_architect") or slug.startswith("cto"):
+        return "systems_architect"
     if slug in {"architect", "devops", "security", "memory_ops", "stage_manager", "ux_frontend"}:
         return slug
     return slug
@@ -18017,15 +18093,214 @@ class AgentIn(BaseModel):
     name: str = Field(min_length=1, max_length=80)
     description: Optional[str] = Field(default=None, max_length=400)
     system_prompt: str = Field(default="", max_length=20000)
+    provider: Optional[str] = Field(default=None, max_length=40)
     model: Optional[str] = Field(default=None, max_length=80)
+    fallback_model: Optional[str] = Field(default=None, max_length=80)
     embedding_model: Optional[str] = Field(default=None, max_length=80)
     temperature: Optional[float] = Field(default=None, ge=0, le=2)
+    reasoning_profile: Optional[str] = Field(default=None, max_length=80)
+    tool_policy: Optional[str] = Field(default=None, max_length=80)
+    max_cost_per_run: Optional[float] = Field(default=None, ge=0)
+    strict_mode: bool = False
     rag_enabled: bool = True
     rag_top_k: int = Field(default=6, ge=1, le=20)
     is_default: bool = False
     # PATCH0100_14 (Pilar D)
     voice_id: Optional[str] = Field(default=None, max_length=40)  # alloy|echo|fable|onyx|nova|shimmer
     avatar_url: Optional[str] = Field(default=None, max_length=1000)
+
+_AGENT_PROFILE_DEFAULTS: Dict[str, Dict[str, Any]] = {
+    "orion": {
+        "provider": "openai",
+        "model": os.getenv("ORION_MODEL", os.getenv("DEFAULT_CHAT_MODEL", "gpt-4o")),
+        "fallback_model": os.getenv("ORION_FALLBACK_MODEL", "gpt-4o-mini"),
+        "reasoning_profile": "premium_reasoning_cto",
+        "tool_policy": "governed_runtime",
+        "max_cost_per_run": float(os.getenv("ORION_MAX_COST_PER_RUN", "2.50") or "2.50"),
+        "strict_mode": True,
+        "temperature": float(os.getenv("ORION_TEMPERATURE", "0.35") or "0.35"),
+    },
+    "systems_architect": {
+        "provider": "openai",
+        "model": os.getenv("SYSTEMS_ARCHITECT_MODEL", os.getenv("DEFAULT_CHAT_MODEL", "gpt-4o")),
+        "fallback_model": os.getenv("SYSTEMS_ARCHITECT_FALLBACK_MODEL", "gpt-4o-mini"),
+        "reasoning_profile": "deep_architecture",
+        "tool_policy": "proposal_first",
+        "max_cost_per_run": float(os.getenv("SYSTEMS_ARCHITECT_MAX_COST_PER_RUN", "1.75") or "1.75"),
+        "strict_mode": True,
+        "temperature": float(os.getenv("SYSTEMS_ARCHITECT_TEMPERATURE", "0.25") or "0.25"),
+    },
+    "auditor": {
+        "provider": "openai",
+        "model": os.getenv("AUDITOR_MODEL", os.getenv("DEFAULT_CHAT_MODEL", "gpt-4o")),
+        "fallback_model": os.getenv("AUDITOR_FALLBACK_MODEL", "gpt-4o-mini"),
+        "reasoning_profile": "forensic_audit",
+        "tool_policy": "read_only_evidence",
+        "max_cost_per_run": float(os.getenv("AUDITOR_MAX_COST_PER_RUN", "1.25") or "1.25"),
+        "strict_mode": True,
+        "temperature": float(os.getenv("AUDITOR_TEMPERATURE", "0.20") or "0.20"),
+    },
+    "ux_frontend": {
+        "provider": "openai",
+        "model": os.getenv("UX_FRONTEND_MODEL", os.getenv("DEFAULT_CHAT_MODEL", "gpt-4o-mini")),
+        "fallback_model": os.getenv("UX_FRONTEND_FALLBACK_MODEL", "gpt-4o-mini"),
+        "reasoning_profile": "ux_multimodal",
+        "tool_policy": "ui_review",
+        "max_cost_per_run": float(os.getenv("UX_FRONTEND_MAX_COST_PER_RUN", "0.85") or "0.85"),
+        "strict_mode": False,
+        "temperature": float(os.getenv("UX_FRONTEND_TEMPERATURE", "0.40") or "0.40"),
+    },
+}
+
+def _canonical_agent_admin_slug(value: Any) -> str:
+    raw = str(value or "").strip().lower().replace("@", "")
+    raw = raw.replace("/", "_").replace("-", "_").replace(" ", "_")
+    raw = re.sub(r"_+", "_", raw).strip("_")
+    aliases = {
+        "orion_cto": "orion",
+        "cto_runtime": "orion",
+        "technical_auditor": "auditor",
+        "auditor_technical": "auditor",
+        "ux_front": "ux_frontend",
+        "frontend_ux": "ux_frontend",
+        "ui_ux": "ux_frontend",
+        "systems_architect": "systems_architect",
+        "chief_architect": "systems_architect",
+        "architect": "systems_architect",
+        "cto": "systems_architect",
+    }
+    return aliases.get(raw, raw)
+
+def _agent_display_name_from_slug(slug: str, fallback: Optional[str] = None) -> str:
+    slug = _canonical_agent_admin_slug(slug)
+    labels = {
+        "orkio": "Orkio",
+        "orion": "Orion",
+        "auditor": "Auditor",
+        "systems_architect": "Systems Architect",
+        "ux_frontend": "UX Frontend",
+    }
+    if slug in labels:
+        return labels[slug]
+    if fallback:
+        return str(fallback)
+    return " ".join(part.capitalize() for part in str(slug or "").split("_") if part).strip() or "Agent"
+
+def _agent_role_defaults(slug: str) -> Dict[str, Any]:
+    base = {
+        "provider": "openai",
+        "model": os.getenv("DEFAULT_CHAT_MODEL", "gpt-4o-mini"),
+        "fallback_model": os.getenv("DEFAULT_FALLBACK_CHAT_MODEL", "gpt-4o-mini"),
+        "reasoning_profile": "general_purpose",
+        "tool_policy": "standard",
+        "max_cost_per_run": float(os.getenv("DEFAULT_AGENT_MAX_COST_PER_RUN", "0.50") or "0.50"),
+        "strict_mode": False,
+        "temperature": float(os.getenv("DEFAULT_TEMPERATURE", "0.45") or "0.45"),
+    }
+    base.update({k: v for k, v in dict(_AGENT_PROFILE_DEFAULTS.get(_canonical_agent_admin_slug(slug), {}) or {}).items() if v is not None})
+    return base
+
+def _serialize_agent_record(a: Agent, *, slug: Optional[str] = None, roster_meta: Optional[Dict[str, Any]] = None, persisted: bool = True, source_status: str = "persisted") -> Dict[str, Any]:
+    role_slug = _canonical_agent_admin_slug(slug or getattr(a, "name", None) or getattr(a, "id", None))
+    defaults = _agent_role_defaults(role_slug)
+    return {
+        "id": getattr(a, "id", None),
+        "agent_key": role_slug,
+        "org_slug": getattr(a, "org_slug", None),
+        "name": _agent_display_name_from_slug(role_slug, fallback=getattr(a, "name", None)),
+        "legacy_name": getattr(a, "name", None),
+        "description": getattr(a, "description", None),
+        "system_prompt": getattr(a, "system_prompt", None),
+        "provider": getattr(a, "provider", None) or defaults["provider"],
+        "model": getattr(a, "model", None) or defaults["model"],
+        "fallback_model": getattr(a, "fallback_model", None) or defaults["fallback_model"],
+        "embedding_model": getattr(a, "embedding_model", None),
+        "temperature": getattr(a, "temperature", None) if getattr(a, "temperature", None) is not None else defaults["temperature"],
+        "reasoning_profile": getattr(a, "reasoning_profile", None) or defaults["reasoning_profile"],
+        "tool_policy": getattr(a, "tool_policy", None) or defaults["tool_policy"],
+        "max_cost_per_run": float(getattr(a, "max_cost_per_run", None) or defaults["max_cost_per_run"]),
+        "strict_mode": bool(getattr(a, "strict_mode", False) if getattr(a, "strict_mode", None) is not None else defaults["strict_mode"]),
+        "rag_enabled": bool(getattr(a, "rag_enabled", True)),
+        "rag_top_k": getattr(a, "rag_top_k", 6),
+        "is_default": bool(getattr(a, "is_default", False)),
+        "voice_id": resolve_agent_voice(a),
+        "avatar_url": getattr(a, "avatar_url", None),
+        "role": (roster_meta or {}).get("role"),
+        "team": (roster_meta or {}).get("team"),
+        "persisted": bool(persisted),
+        "source_status": source_status,
+        "created_at": getattr(a, "created_at", None),
+        "updated_at": getattr(a, "updated_at", None),
+    }
+
+def _build_roster_only_agent_payload(org: str, slug: str, roster_meta: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+    defaults = _agent_role_defaults(slug)
+    return {
+        "id": f"roster::{slug}",
+        "agent_key": slug,
+        "org_slug": org,
+        "name": _agent_display_name_from_slug(slug),
+        "legacy_name": None,
+        "description": f"Runtime roster agent ({(roster_meta or {}).get('role') or slug}).",
+        "system_prompt": "",
+        "provider": defaults["provider"],
+        "model": defaults["model"],
+        "fallback_model": defaults["fallback_model"],
+        "embedding_model": None,
+        "temperature": defaults["temperature"],
+        "reasoning_profile": defaults["reasoning_profile"],
+        "tool_policy": defaults["tool_policy"],
+        "max_cost_per_run": float(defaults["max_cost_per_run"]),
+        "strict_mode": bool(defaults["strict_mode"]),
+        "rag_enabled": True,
+        "rag_top_k": 6,
+        "is_default": False,
+        "voice_id": "nova",
+        "avatar_url": None,
+        "role": (roster_meta or {}).get("role"),
+        "team": (roster_meta or {}).get("team"),
+        "persisted": False,
+        "source_status": "roster_only",
+        "created_at": None,
+        "updated_at": None,
+    }
+
+def _list_admin_agents_merged(db: Session, org: str) -> List[Dict[str, Any]]:
+    rows = db.execute(select(Agent).where(Agent.org_slug == org).order_by(Agent.updated_at.desc()).limit(500)).scalars().all()
+    roster = get_agent_roster()
+    full_roster = list(get_full_agent_roster() or list(roster.keys()))
+    persisted_by_slug: Dict[str, Agent] = {}
+    orphans: List[Agent] = []
+    for row in rows:
+        slug = _canonical_agent_admin_slug(getattr(row, "name", None) or getattr(row, "id", None))
+        if slug in roster and slug not in persisted_by_slug:
+            persisted_by_slug[slug] = row
+        else:
+            orphans.append(row)
+    items: List[Dict[str, Any]] = []
+    for slug in full_roster:
+        meta = dict(roster.get(slug) or {})
+        row = persisted_by_slug.get(slug)
+        if row is not None:
+            items.append(_serialize_agent_record(row, slug=slug, roster_meta=meta, persisted=True, source_status="persisted"))
+        else:
+            items.append(_build_roster_only_agent_payload(org, slug, meta))
+    for row in orphans:
+        items.append(_serialize_agent_record(row, slug=_canonical_agent_admin_slug(getattr(row, "name", None)), roster_meta={}, persisted=True, source_status="persisted_orphan"))
+    return items
+
+def _apply_agent_phase2_fields(agent: Agent, inp: AgentIn, *, slug: Optional[str] = None) -> Agent:
+    defaults = _agent_role_defaults(slug or getattr(agent, "name", None) or getattr(agent, "id", None))
+    agent.provider = inp.provider or defaults["provider"]
+    agent.model = inp.model or defaults["model"]
+    agent.fallback_model = inp.fallback_model or defaults["fallback_model"]
+    agent.embedding_model = inp.embedding_model
+    agent.temperature = str(inp.temperature) if inp.temperature is not None else str(defaults["temperature"])
+    agent.reasoning_profile = inp.reasoning_profile or defaults["reasoning_profile"]
+    agent.tool_policy = inp.tool_policy or defaults["tool_policy"]
+    agent.max_cost_per_run = inp.max_cost_per_run if inp.max_cost_per_run is not None else defaults["max_cost_per_run"]
+    agent.strict_mode = bool(inp.strict_mode if inp.strict_mode is not None else defaults["strict_mode"])
+    return agent
 
 class AgentLinkIn(BaseModel):
     file_id: str
@@ -18113,7 +18388,17 @@ def list_agents(x_org_slug: Optional[str] = Header(default=None), user=Depends(g
     org = get_request_org(user, x_org_slug)
     ensure_core_agents(db, org)
     rows = db.execute(select(Agent).where(Agent.org_slug == org).order_by(Agent.updated_at.desc())).scalars().all()
-    return [{"id": a.id, "name": a.name, "description": a.description, "rag_enabled": a.rag_enabled, "rag_top_k": a.rag_top_k, "model": a.model, "temperature": a.temperature, "is_default": a.is_default, "voice_id": resolve_agent_voice(a), "avatar_url": getattr(a, 'avatar_url', None), "updated_at": a.updated_at} for a in rows]
+    roster = get_agent_roster()
+    return [
+        _serialize_agent_record(
+            a,
+            slug=_canonical_agent_admin_slug(getattr(a, "name", None) or getattr(a, "id", None)),
+            roster_meta=roster.get(_canonical_agent_admin_slug(getattr(a, "name", None) or getattr(a, "id", None)), {}),
+            persisted=True,
+            source_status="persisted",
+        )
+        for a in rows
+    ]
 
 
 @app.get("/api/agents/runtime-catalog")
@@ -18216,17 +18501,18 @@ def admin_put_agent_links(agent_id: str, inp: AgentToAgentLinkIn, _admin=Depends
 
 @app.get("/api/admin/agents")
 def admin_agents(_admin=Depends(require_admin_access), x_org_slug: Optional[str] = Header(default=None), db: Session = Depends(get_db)):
-    # Admin can list per-org (from header) or all if header omitted in single-tenant mode
     org = get_org(x_org_slug)
-    rows = db.execute(select(Agent).where(Agent.org_slug == org).order_by(Agent.updated_at.desc()).limit(200)).scalars().all()
-    return [{"id": a.id, "org_slug": a.org_slug, "name": a.name, "description": a.description, "system_prompt": a.system_prompt, "rag_enabled": a.rag_enabled, "rag_top_k": a.rag_top_k, "model": a.model, "embedding_model": a.embedding_model, "temperature": a.temperature, "is_default": a.is_default, "voice_id": resolve_agent_voice(a), "avatar_url": getattr(a, 'avatar_url', None), "created_at": a.created_at, "updated_at": a.updated_at} for a in rows]
+    _reconcile_agent_phase2_schema_best_effort()
+    ensure_core_agents(db, org)
+    return _list_admin_agents_merged(db, org)
 
 @app.post("/api/admin/agents")
 def admin_create_agent(inp: AgentIn, _admin=Depends(require_admin_access), x_org_slug: Optional[str] = Header(default=None), db: Session = Depends(get_db)):
     org = get_org(x_org_slug)
+    _reconcile_agent_phase2_schema_best_effort()
     ensure_core_agents(db, org)
     now = now_ts()
-    # If setting as default, unset other defaults first
+    slug = _canonical_agent_admin_slug(inp.name)
     if inp.is_default:
         db.execute(text("UPDATE agents SET is_default=0 WHERE org_slug=:org"), {"org": org})
     a = Agent(
@@ -18235,9 +18521,6 @@ def admin_create_agent(inp: AgentIn, _admin=Depends(require_admin_access), x_org
         name=inp.name.strip(),
         description=inp.description,
         system_prompt=inp.system_prompt,
-        model=inp.model,
-        embedding_model=inp.embedding_model,
-        temperature=str(inp.temperature) if inp.temperature is not None else None,
         rag_enabled=bool(inp.rag_enabled),
         rag_top_k=inp.rag_top_k,
         is_default=bool(inp.is_default),
@@ -18246,34 +18529,36 @@ def admin_create_agent(inp: AgentIn, _admin=Depends(require_admin_access), x_org
         created_at=now,
         updated_at=now,
     )
+    a = _apply_agent_phase2_fields(a, inp, slug=slug)
     db.add(a)
     db.commit()
-    return {"id": a.id}
+    db.refresh(a)
+    return {"id": a.id, "agent_key": slug, "persisted": True}
 
 @app.put("/api/admin/agents/{agent_id}")
 def admin_update_agent(agent_id: str, inp: AgentIn, _admin=Depends(require_admin_access), x_org_slug: Optional[str] = Header(default=None), db: Session = Depends(get_db)):
     org = get_org(x_org_slug)
-    a = db.execute(select(Agent).where(Agent.org_slug == org, Agent.id == agent_id)).scalar_one_or_none()
+    _reconcile_agent_phase2_schema_best_effort()
+    lookup_id = str(agent_id or "").strip()
+    a = None if lookup_id.startswith("roster::") else db.execute(select(Agent).where(Agent.org_slug == org, Agent.id == lookup_id)).scalar_one_or_none()
+    slug = _canonical_agent_admin_slug(inp.name or lookup_id.replace("roster::", ""))
     if not a:
-        raise HTTPException(status_code=404, detail="Agent not found")
-    # If setting as default, unset other defaults first
+        return admin_create_agent(inp=inp, _admin=_admin, x_org_slug=x_org_slug, db=db)
     if inp.is_default and not a.is_default:
         db.execute(text("UPDATE agents SET is_default=0 WHERE org_slug=:org"), {"org": org})
     a.name = inp.name.strip()
     a.description = inp.description
     a.system_prompt = inp.system_prompt
-    a.model = inp.model
-    a.embedding_model = inp.embedding_model
-    a.temperature = str(inp.temperature) if inp.temperature is not None else None
     a.rag_enabled = bool(inp.rag_enabled)
     a.rag_top_k = inp.rag_top_k
     a.is_default = bool(inp.is_default)
     a.voice_id = inp.voice_id or getattr(a, 'voice_id', None) or "nova"
     a.avatar_url = inp.avatar_url if inp.avatar_url is not None else getattr(a, 'avatar_url', None)
+    a = _apply_agent_phase2_fields(a, inp, slug=slug)
     a.updated_at = now_ts()
     db.add(a)
     db.commit()
-    return {"ok": True}
+    return {"ok": True, "id": a.id, "agent_key": slug, "persisted": True}
 
 @app.delete("/api/admin/agents/{agent_id}")
 def admin_delete_agent(agent_id: str, _admin=Depends(require_admin_access), x_org_slug: Optional[str] = Header(default=None), db: Session = Depends(get_db)):
