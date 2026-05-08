@@ -1349,6 +1349,7 @@ _RUNTIME_CAPABILITY_MODELS = {
     "war_room_readonly_architecture_plan",
     "team_roster_answer",
     "presence_status_answer",
+    "model_resolution_answer",
     "analytical_final_readonly",
 }
 
@@ -9556,6 +9557,7 @@ def _build_presence_status_answer_text(user_text: str = "") -> str:
 _READONLY_RECEIPT_INTENTS = {
     "presence_status_answer",
     "team_roster_answer",
+    "model_resolution_answer",
     "governance_capability_answer",
     "analytical_final_readonly",
     "war_room_readonly_architecture_plan",
@@ -9611,6 +9613,8 @@ def _runtime_readonly_receipt_intent(
     try:
         if is_presence_status_question_text(text):
             return "presence_status_answer"
+        if _is_model_resolution_question_request(text):
+            return "model_resolution_answer"
         if is_team_roster_question_text(text):
             return "team_roster_answer"
         if is_war_room_readonly_architecture_plan_text(text):
@@ -10189,6 +10193,66 @@ def _build_team_roster_answer_text(user_text: str = "") -> str:
             f"Temos {len(core)} especialistas no squad operacional padrão:",
             *[f"- {name}" for name in core],
         ])
+
+
+def _is_model_resolution_question_request(user_text: str) -> bool:
+    """
+    EFATA777 v7:
+    Detecta perguntas read-only sobre o modelo/provider/LLM realmente configurado
+    para o agente visível. Deve preceder team_roster_answer para evitar que
+    perguntas contendo "runtime" caiam no roster.
+    """
+    txt = (user_text or "").strip().lower()
+    if not txt:
+        return False
+    has_model_terms = bool(re.search(
+        r"\b(modelo|model|llm|provider|runtime|model_used|fallback|gpt|openai|anthropic|gemini|openrouter)\b",
+        txt,
+        flags=re.IGNORECASE,
+    ))
+    has_question_terms = bool(re.search(
+        r"(qual|quais|usando|usar|utilizando|configurado|configurada|ativo|ativa|agora|receipts?|trace|runtime)",
+        txt,
+        flags=re.IGNORECASE,
+    ))
+    return bool(has_model_terms and has_question_terms)
+
+
+def _build_model_resolution_answer_text(agent: Any, user_text: str = "") -> str:
+    try:
+        resolution = _agent_llm_runtime_resolution(agent)
+    except Exception as exc:
+        resolution = {
+            "agent": _agent_attr(agent, "name", "Orion") if agent is not None else "Orion",
+            "provider_configured": "",
+            "model_configured": "",
+            "provider_used": "",
+            "model_used": "",
+            "fallback_used": False,
+            "fallback_reason": f"resolution_error:{exc}",
+        }
+
+    def _v(key: str, default: str = "") -> str:
+        val = resolution.get(key, default) if isinstance(resolution, dict) else default
+        if isinstance(val, bool):
+            return "true" if val else "false"
+        return str(val if val is not None else default)
+
+    return "\n".join([
+        "model_resolution:",
+        f"  agent: {_v('agent')}",
+        f"  provider_configured: {_v('provider_configured')}",
+        f"  model_configured: {_v('model_configured')}",
+        f"  fallback_model_configured: {_v('fallback_model_configured')}",
+        f"  provider_available: {_v('provider_available')}",
+        f"  provider_used: {_v('provider_used')}",
+        f"  model_used: {_v('model_used')}",
+        f"  fallback_used: {_v('fallback_used')}",
+        f"  fallback_reason: {_v('fallback_reason')}",
+        f"  reasoning_profile: {_v('reasoning_profile')}",
+        f"  tool_policy: {_v('tool_policy')}",
+        f"  strict_mode: {_v('strict_mode')}",
+    ])
 
 
 def _build_governance_capability_answer_text(
@@ -13218,6 +13282,7 @@ def _should_execute_runtime_from_enrichment(runtime_enrichment: Optional[Dict[st
         "governance_capability_answer",
         "team_roster_answer",
         "presence_status_answer",
+        "model_resolution_answer",
         "war_room_readonly_architecture_plan",
         "readonly_implementation_plan",
     }:
@@ -13699,6 +13764,7 @@ def _execute_capability_if_authorized(
         "governance_capability_answer",
         "team_roster_answer",
         "presence_status_answer",
+        "model_resolution_answer",
         "war_room_readonly_architecture_plan",
         "readonly_implementation_plan",
     }:
@@ -15303,6 +15369,8 @@ def chat(
                 intent_name_live_sync = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
                 if intent_name_live_sync == "presence_status_answer" or _is_presence_status_question_request(inp.message):
                     capability_inventory_answer = _build_presence_status_answer_text(inp.message)
+                elif intent_name_live_sync == "model_resolution_answer" or _is_model_resolution_question_request(inp.message):
+                    capability_inventory_answer = _build_model_resolution_answer_text(final_signer_agent or agent, inp.message)
                 elif intent_name_live_sync == "team_roster_answer" or _is_team_roster_question_request(inp.message):
                     capability_inventory_answer = _build_team_roster_answer_text(inp.message)
                 elif intent_name_live_sync == "governance_capability_answer" or _is_governance_capability_question_request(inp.message):
@@ -20215,6 +20283,8 @@ async def chat_stream(
                         intent_name_live_stream = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
                         if intent_name_live_stream == "presence_status_answer" or _is_presence_status_question_request(message):
                             capability_inventory_answer = _build_presence_status_answer_text(message)
+                        elif intent_name_live_stream == "model_resolution_answer" or _is_model_resolution_question_request(message):
+                            capability_inventory_answer = _build_model_resolution_answer_text(final_signer_agent or agent, message)
                         elif intent_name_live_stream == "team_roster_answer" or _is_team_roster_question_request(message):
                             capability_inventory_answer = _build_team_roster_answer_text(message)
                         elif intent_name_live_stream == "governance_capability_answer" or _is_governance_capability_question_request(message):
@@ -20458,7 +20528,8 @@ async def chat_stream(
                     await asyncio.sleep(LLM_WAIT_POLL)
 
                 if capability_inventory_answer is not None:
-                    ans_obj = {"text": capability_inventory_answer, "usage": None, "model": "runtime_capability_inventory"}
+                    _cap_model = "model_resolution_answer" if _is_model_resolution_question_request(message) else "runtime_capability_inventory"
+                    ans_obj = {"text": capability_inventory_answer, "usage": None, "model": _cap_model}
                 elif execution_result and execution_result.get("handled"):
                     _execution_model = "runtime_capability_execution" if str(execution_result.get("provider") or "").strip().lower() == "platform" else "github_capability"
                     ans_obj = {"text": _build_execution_result_payload(execution_result), "usage": None, "model": _execution_model}
