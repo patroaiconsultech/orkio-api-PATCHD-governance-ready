@@ -243,7 +243,7 @@ def _continuous_audit_selected_specialists(message: str, include_frontend: bool 
     effective_include_frontend = bool(effective.get("include_frontend"))
     constraints = _extract_hard_constraints(effective_message)
     required = list(constraints.get("specialists_required") or [])
-    default_selected = ["orion", "auditor", "cto"]
+    default_selected = ["orion", "auditor", "systems_architect"]
     needs_frontend = (
         effective_include_frontend
         or ("ux_frontend" in required)
@@ -797,7 +797,7 @@ def _allowed_write_agents() -> List[str]:
 def _allowed_read_agents() -> List[str]:
     raw = _clean_env(
         "GITHUB_READ_ALLOWED_AGENTS",
-        "orkio,orion,chris,auditor,cto,ux_frontend,backend_engineer,frontend_engineer,devops_sre,security_guardian,data_db_architect,qa_release_engineer,realtime_voice_engineer",
+        "orkio,orion,chris,auditor,systems_architect,ux_frontend,backend_engineer,frontend_engineer,devops_sre,security_guardian,data_db_architect,qa_release_engineer,realtime_voice_engineer",
     )
     return [x.strip().lower() for x in raw.split(",") if x.strip()]
 
@@ -852,6 +852,10 @@ def _canonical_dispatch_actor(value: Any) -> str:
         "ui_ux": "ux_frontend",
         "orion_cto": "orion",
         "cto_runtime": "orion",
+        "cto": "systems_architect",
+        "chief_architect": "systems_architect",
+        "system_architect": "systems_architect",
+        "systems_architect": "systems_architect",
         "backend": "backend_engineer",
         "backend_dev": "backend_engineer",
         "backend_engineer": "backend_engineer",
@@ -864,6 +868,7 @@ def _canonical_dispatch_actor(value: Any) -> str:
         "db_architect": "data_db_architect",
         "database_architect": "data_db_architect",
         "data_db_architect": "data_db_architect",
+        "architect": "systems_architect",
         "qa": "qa_release_engineer",
         "qa_release": "qa_release_engineer",
         "qa_release_engineer": "qa_release_engineer",
@@ -1058,7 +1063,7 @@ def _is_team_technical_audit_request(message: str) -> bool:
         return False
     has_team = bool(re.search(r"@team\b|\bteam\b|\bequipe\b|\bsquad\b|\bespecialistas\b|\bwar room\b", raw, flags=re.IGNORECASE))
     has_explicit_specialists = sum(
-        1 for handle in ("@orion", "@auditor", "@cto", "@ux_frontend", "@ux/frontend")
+        1 for handle in ("@orion", "@auditor", "@systems_architect", "@cto", "@ux_frontend", "@ux/frontend")
         if handle in raw
     ) >= 2
     has_audit = bool(re.search(r"auditoria|auditar|audit|diagn[óo]stico|diagnostico|scan|varredura|an[áa]lise t[ée]cnica|analise tecnica|an[áa]lise arquitetural|analise arquitetural|an[áa]lise detalhada|analise detalhada|melhorias priorizadas|recomendac[aã]o consolidada", raw, flags=re.IGNORECASE))
@@ -1112,8 +1117,8 @@ def _resolve_visible_agent(message: str, default: str = "orion") -> str:
     if "orkio" in handles:
         return "orkio"
     if handles:
-        return handles[0]
-    return default
+        return _canonical_dispatch_actor(handles[0]) or handles[0]
+    return _canonical_dispatch_actor(default) or default
 
 
 def _suggested_squad() -> List[Dict[str, str]]:
@@ -1121,7 +1126,7 @@ def _suggested_squad() -> List[Dict[str, str]]:
         {"id": "orkio", "role": "orchestrator", "scope": "coordenação e síntese"},
         {"id": "orion", "role": "cto", "scope": "execução técnica e GitHub runtime"},
         {"id": "auditor", "role": "technical_auditor", "scope": "auditoria arquitetural e riscos"},
-        {"id": "cto", "role": "systems_architect", "scope": "plano técnico e desenho de patch"},
+        {"id": "systems_architect", "role": "systems_architect", "scope": "plano técnico e desenho de patch"},
         {"id": "ux_frontend", "role": "ux_frontend", "scope": "renderização, estado local e experiência operacional"},
         {"id": "chris", "role": "commercial_strategist", "scope": "impacto funcional e leitura de produto"},
         {"id": "saint_germain", "role": "refiner", "scope": "maturidade e refinamento incremental"},
