@@ -1488,6 +1488,13 @@ def cors_origin_regex() -> Optional[str]:
     # Allow Railway split deploys (web/api on different *.up.railway.app subdomains) only when explicitly enabled.
     if os.getenv("ALLOW_RAILWAY_ORIGIN_REGEX", "false").strip().lower() in ("1", "true", "yes"):
         return r"https://[a-z0-9-]+\.up\.railway\.app"
+    # Safe production fallback for Railway split deploys when explicit env was omitted.
+    railway_hint = any(
+        _clean_env(os.getenv(name, ""), default="").strip()
+        for name in ("RAILWAY_PUBLIC_DOMAIN", "RAILWAY_STATIC_URL", "RAILWAY_ENVIRONMENT", "RAILWAY_PROJECT_ID")
+    )
+    if railway_hint:
+        return r"https://[a-z0-9-]+\.up\.railway\.app"
     return None
 
 def tenant_mode() -> str:
@@ -4210,6 +4217,14 @@ app.add_middleware(
     allow_headers=["*"],
     allow_origin_regex=cors_origin_regex(),
 )
+
+
+@app.options("/{full_path:path}")
+async def cors_preflight_passthrough(full_path: str):
+    # Keep CORS preflight from hanging behind auth/proxy mismatches.
+    # CORSMiddleware will append the appropriate headers when origin is allowed.
+    return Response(status_code=204)
+
 
 
 def rag_fallback_recent_chunks(db: Session, org: str, file_ids: List[str], top_k: int = 6) -> List[Dict[str, Any]]:
@@ -18830,6 +18845,7 @@ def get_runtime_catalog(include_hidden: bool = False, x_org_slug: Optional[str] 
 
 
 @app.get("/api/agents/capabilities")
+@app.get("/api/capabilities")
 def get_agent_capabilities(include_hidden: bool = False, x_org_slug: Optional[str] = Header(default=None), user=Depends(get_current_user), db: Session = Depends(get_db)):
     org = get_request_org(user, x_org_slug)
     ensure_core_agents(db, org)
