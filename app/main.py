@@ -10744,6 +10744,7 @@ def _build_execution_result_payload(result: Dict[str, Any]) -> str:
     path = (result.get("path") or "").strip()
     commit_sha = (result.get("commit_sha") or "").strip()
     event = (result.get("event") or "").strip()
+    report_format = str(result.get("report_format") or result.get("format") or "").strip()
     mode = (result.get("mode") or "").strip()
     base_branch = (result.get("base_branch") or "").strip()
     resolution = str(result.get("resolution") or "").strip()
