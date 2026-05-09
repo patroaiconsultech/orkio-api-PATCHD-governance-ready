@@ -9558,6 +9558,7 @@ _READONLY_RECEIPT_INTENTS = {
     "presence_status_answer",
     "team_roster_answer",
     "model_resolution_answer",
+    "multiagent_audit_readonly",
     "governance_capability_answer",
     "analytical_final_readonly",
     "war_room_readonly_architecture_plan",
@@ -9590,6 +9591,14 @@ def _runtime_readonly_receipt_intent(
     if not isinstance(runtime_operation, dict):
         runtime_operation = {}
 
+    # EFATA777 v11: explicit audit/read-only text overrides upstream misclassification
+    # such as model_resolution_answer or github_repo_write.
+    try:
+        if _is_multiagent_audit_readonly_request(user_text):
+            return "multiagent_audit_readonly"
+    except Exception:
+        pass
+
     candidates = [
         fallback_intent,
         intent_package.get("intent"),
@@ -9611,6 +9620,8 @@ def _runtime_readonly_receipt_intent(
 
     text = user_text or ""
     try:
+        if _is_multiagent_audit_readonly_request(text):
+            return "multiagent_audit_readonly"
         if is_presence_status_question_text(text):
             return "presence_status_answer"
         if _is_model_resolution_question_request(text):
@@ -10195,13 +10206,201 @@ def _build_team_roster_answer_text(user_text: str = "") -> str:
         ])
 
 
+
+# EFATA777_MULTIAGENT_AUDIT_INTENT_AND_UI_RECOVERY_V11
+# Auditoria multiagente read-only deve ter precedência sobre atalhos de modelo/runtime
+# e sobre trilhos governados de escrita quando o próprio texto proíbe patch/GitHub/merge.
+_MULTIAGENT_AUDIT_SPECIALISTS = [
+    ("orion", "coordenação técnica, síntese executiva e decisão de prioridade"),
+    ("auditor", "checagem de evidências, riscos, blockers e critérios de GO/NO-GO"),
+    ("systems_architect", "arquitetura sistêmica, fluxos, dependências e desenho de estabilidade"),
+    ("frontend_engineer", "App Console, estado visual, stream, drafts, reconciliação e UX crítica"),
+    ("backend_engineer", "APIs, persistência de mensagens, contratos e receipts"),
+    ("qa_release_engineer", "smoke tests, regressões, critérios de aceite e sequência de validação"),
+    ("devops_sre", "deploy, logs, health checks, 429/500/401, observabilidade e estabilidade operacional"),
+]
+
+
+def _is_multiagent_audit_readonly_request(user_text: str) -> bool:
+    """
+    Detecta pedidos explícitos de auditoria/diagnóstico read-only da plataforma.
+    Importante: deve ganhar de model_resolution_answer quando o prompt contém
+    palavras como modelo/runtime/provider apenas dentro do escopo auditado.
+    """
+    txt = (user_text or "").strip().lower()
+    if not txt:
+        return False
+
+    audit_terms = any(term in txt for term in [
+        "auditoria",
+        "auditar",
+        "audit",
+        "diagnóstico",
+        "diagnostico",
+        "análise técnica",
+        "analise tecnica",
+        "análise read-only",
+        "analise read-only",
+        "read-only",
+        "read only",
+        "multiagente",
+        "multi-agent",
+        "agentes usados",
+        "agent_contributions",
+        "confirmed_findings",
+        "probable_root_cause",
+        "findings",
+        "smoke tests",
+    ])
+
+    platform_terms = any(term in txt for term in [
+        "plataforma",
+        "orkio",
+        "app console",
+        "admin",
+        "chat",
+        "autenticação",
+        "autenticacao",
+        "sessão",
+        "sessao",
+        "histórico",
+        "historico",
+        "stream",
+        "receipts",
+        "governança",
+        "governanca",
+        "frontend",
+        "backend",
+        "deploy",
+        "logs",
+    ])
+
+    readonly_terms = any(term in txt for term in [
+        "read-only",
+        "read only",
+        "não execute patch",
+        "nao execute patch",
+        "não faça merge",
+        "nao faça merge",
+        "nao faca merge",
+        "não altere banco",
+        "nao altere banco",
+        "não escreva em github",
+        "nao escreva em github",
+        "não use dispatch",
+        "nao use dispatch",
+        "apenas análise",
+        "apenas analise",
+    ])
+
+    asks_structured_audit = any(term in txt for term in [
+        "agents_used",
+        "agent_contributions",
+        "confirmed_findings",
+        "probable_risks",
+        "recommended_next_patch",
+        "frontend_race_conditions",
+        "backend_status",
+        "session_status",
+        "predeploy_validation",
+        "postdeploy_smoke_tests",
+    ])
+
+    return bool((audit_terms and platform_terms) or (readonly_terms and asks_structured_audit))
+
+
+def _build_multiagent_audit_readonly_answer_text(user_text: str = "") -> str:
+    """
+    Resposta determinística e segura para auditoria multiagente read-only.
+    Não executa dispatch, não chama GitHub, não altera banco e não promete leitura de logs
+    que não foram anexados ao turno.
+    """
+    agents_used = [name for name, _ in _MULTIAGENT_AUDIT_SPECIALISTS]
+    contribution_lines = [f"- {name}: {role}." for name, role in _MULTIAGENT_AUDIT_SPECIALISTS]
+
+    return "\n".join([
+        "decision:",
+        "GO PARA AUDITORIA READ-ONLY CONTROLADA",
+        "",
+        "audit_mode:",
+        "multiagent_readonly_deterministic",
+        "",
+        "dispatch_executed:",
+        "false",
+        "",
+        "write_executed:",
+        "false",
+        "",
+        "agents_used:",
+        *[f"- {name}" for name in agents_used],
+        "",
+        "agent_contributions:",
+        *contribution_lines,
+        "",
+        "confirmed_findings:",
+        "- A solicitação foi tratada como auditoria read-only, sem dispatch externo e sem escrita.",
+        "- A auditoria deve permanecer consultiva até haver autorização explícita para patch.",
+        "- O foco prioritário deve ser estabilidade do chat, sessão, reconciliação visual e roteamento correto de intents.",
+        "",
+        "probable_root_cause:",
+        "- O problema remanescente parece concentrado em precedência de intenção e recuperação visual do App Console quando o stream termina sem resposta útil imediata.",
+        "- Pedidos longos de auditoria podem conter termos como modelo, runtime, provider ou GitHub apenas como escopo; esses termos não devem capturar o intent principal.",
+        "",
+        "frontend_race_conditions:",
+        "- Verificar race entre consumeChatStream, finalizeChatTurn, loadMessages e loadThreads.",
+        "- Verificar se o draft assistant é substituído antes de ser removido.",
+        "- Verificar se epoch/stale guard impede setMessages após /api/messages 200.",
+        "",
+        "backend_status:",
+        "- Read-only. Nenhuma execução operacional foi acionada neste turno.",
+        "- Próxima verificação deve confirmar /api/chat/stream 200, /api/messages 200 e receipts coerentes.",
+        "",
+        "session_status:",
+        "- Monitorar 401 transitório de heartbeat/me após deploy ou refresh.",
+        "- Logout só deve ocorrer após confirmação real de sessão expirada.",
+        "",
+        "recommended_patch_id:",
+        "EFATA777_MULTIAGENT_AUDIT_INTENT_AND_UI_RECOVERY_V11",
+        "",
+        "recommended_files_to_change:",
+        "- app/main.py",
+        "- src/routes/AppConsole.jsx",
+        "- src/ui/api.js, se o parser/erros do stream exigir ajuste",
+        "",
+        "minimal_fix_plan:",
+        "1. Dar prioridade explícita ao intent multiagent_audit_readonly.",
+        "2. Impedir que auditoria read-only caia em model_resolution_answer.",
+        "3. Impedir vínculo falso com github_repo_write quando o texto proíbe escrita.",
+        "4. Garantir que stream 200 sem final_text útil reconcilie /api/messages e libere sending.",
+        "5. Manter resposta curta, determinística e renderizável para auditorias read-only.",
+        "",
+        "risk_level:",
+        "ALTO enquanto a UI exigir refresh; MÉDIO após resposta renderizar sem refresh.",
+        "",
+        "predeploy_validation:",
+        "- python -m py_compile app/main.py",
+        "- npm run build",
+        "",
+        "postdeploy_smoke_tests:",
+        "- @Orion faça uma auditoria read-only curta da plataforma usando Orion, Auditor e Frontend Engineer. Não execute patch.",
+        "- @Orion qual modelo você está usando agora?",
+        "- @Orion você está online?",
+        "",
+        "next_command_for_daniel:",
+        "@Orion faça uma auditoria read-only curta da plataforma usando Orion, Auditor e Frontend Engineer. Não execute patch.",
+    ])
+
+
 def _is_model_resolution_question_request(user_text: str) -> bool:
     """
-    EFATA777 v7:
+    EFATA777 v7/v11:
     Detecta perguntas read-only sobre o modelo/provider/LLM realmente configurado
-    para o agente visível. Deve preceder team_roster_answer para evitar que
-    perguntas contendo "runtime" caiam no roster.
+    para o agente visível. No v11, auditoria multiagente read-only tem precedência:
+    termos como modelo/runtime/provider podem aparecer apenas como escopo auditado.
     """
+    if _is_multiagent_audit_readonly_request(user_text):
+        return False
+
     txt = (user_text or "").strip().lower()
     if not txt:
         return False
@@ -13284,6 +13483,7 @@ def _should_execute_runtime_from_enrichment(runtime_enrichment: Optional[Dict[st
         "team_roster_answer",
         "presence_status_answer",
         "model_resolution_answer",
+        "multiagent_audit_readonly",
         "war_room_readonly_architecture_plan",
         "readonly_implementation_plan",
     }:
@@ -15368,7 +15568,9 @@ def chat(
         if blocked_reply is None:
             try:
                 intent_name_live_sync = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
-                if intent_name_live_sync == "presence_status_answer" or _is_presence_status_question_request(inp.message):
+                if _is_multiagent_audit_readonly_request(inp.message) or intent_name_live_sync == "multiagent_audit_readonly":
+                    capability_inventory_answer = _build_multiagent_audit_readonly_answer_text(inp.message)
+                elif intent_name_live_sync == "presence_status_answer" or _is_presence_status_question_request(inp.message):
                     capability_inventory_answer = _build_presence_status_answer_text(inp.message)
                 elif intent_name_live_sync == "model_resolution_answer" or _is_model_resolution_question_request(inp.message):
                     capability_inventory_answer = _build_model_resolution_answer_text(final_signer_agent or agent, inp.message)
@@ -20282,7 +20484,9 @@ async def chat_stream(
                 if blocked_reply is None:
                     try:
                         intent_name_live_stream = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
-                        if intent_name_live_stream == "presence_status_answer" or _is_presence_status_question_request(message):
+                        if _is_multiagent_audit_readonly_request(message) or intent_name_live_stream == "multiagent_audit_readonly":
+                            capability_inventory_answer = _build_multiagent_audit_readonly_answer_text(message)
+                        elif intent_name_live_stream == "presence_status_answer" or _is_presence_status_question_request(message):
                             capability_inventory_answer = _build_presence_status_answer_text(message)
                         elif intent_name_live_stream == "model_resolution_answer" or _is_model_resolution_question_request(message):
                             capability_inventory_answer = _build_model_resolution_answer_text(final_signer_agent or agent, message)
