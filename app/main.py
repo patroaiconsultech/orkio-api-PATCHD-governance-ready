@@ -3505,9 +3505,102 @@ def _client_ip(request: Request) -> str:
     xff = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip()
     return xff or (request.client.host if request.client else "unknown")
 
-async def _stream_acquire(request: Request) -> None:
+def _chat_stream_retry_after_seconds() -> int:
+    try:
+        value = int(os.getenv("CHAT_STREAM_RETRY_AFTER_SECONDS", "15") or "15")
+        return max(1, value)
+    except Exception:
+        return 15
+
+def _chat_stream_rate_limit_payload(
+    *,
+    request: Request,
+    scope: str,
+    retry_after: Optional[int] = None,
+    org: Optional[str] = None,
+    user_id: Optional[str] = None,
+    trace_id: Optional[str] = None,
+    thread_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    provider_error_code: Optional[str] = None,
+    provider_error_type: Optional[str] = None,
+    active_streams: Optional[int] = None,
+    active_streams_for_ip: Optional[int] = None,
+    max_global: Optional[int] = None,
+    max_ip: Optional[int] = None,
+) -> Dict[str, Any]:
+    return {
+        "code": "CHAT_STREAM_RATE_LIMITED",
+        "message": "Estamos operando no limite seguro da plataforma. Tente novamente em instantes.",
+        "rate_limit_scope": scope or "unknown",
+        "retry_after": retry_after,
+        "provider_error_code": provider_error_code,
+        "provider_error_type": provider_error_type,
+        "provider": provider or "openai",
+        "org": org,
+        "user_id": user_id,
+        "trace_id": trace_id,
+        "thread_id": thread_id,
+        "agent_id": agent_id,
+        "model": model,
+        "active_streams": active_streams,
+        "active_streams_for_ip": active_streams_for_ip,
+        "max_streams_global": max_global,
+        "max_streams_per_ip": max_ip,
+        "path": str(getattr(request, "url", "")) if request is not None else "/api/chat/stream",
+        "ip": _client_ip(request) if request is not None else "unknown",
+    }
+
+def _raise_chat_stream_rate_limited(
+    *,
+    request: Request,
+    scope: str,
+    retry_after: Optional[int] = None,
+    org: Optional[str] = None,
+    user_id: Optional[str] = None,
+    trace_id: Optional[str] = None,
+    thread_id: Optional[str] = None,
+    agent_id: Optional[str] = None,
+    model: Optional[str] = None,
+    provider: Optional[str] = None,
+    provider_error_code: Optional[str] = None,
+    provider_error_type: Optional[str] = None,
+    active_streams: Optional[int] = None,
+    active_streams_for_ip: Optional[int] = None,
+    max_global: Optional[int] = None,
+    max_ip: Optional[int] = None,
+) -> None:
+    payload = _chat_stream_rate_limit_payload(
+        request=request,
+        scope=scope,
+        retry_after=retry_after,
+        org=org,
+        user_id=user_id,
+        trace_id=trace_id,
+        thread_id=thread_id,
+        agent_id=agent_id,
+        model=model,
+        provider=provider,
+        provider_error_code=provider_error_code,
+        provider_error_type=provider_error_type,
+        active_streams=active_streams,
+        active_streams_for_ip=active_streams_for_ip,
+        max_global=max_global,
+        max_ip=max_ip,
+    )
+    try:
+        stream_logger.warning("CHAT_STREAM_RATE_LIMITED %s", json.dumps(payload, ensure_ascii=False, sort_keys=True))
+    except Exception:
+        pass
+    headers = {"Retry-After": str(int(retry_after or _chat_stream_retry_after_seconds()))}
+    raise HTTPException(status_code=429, detail=payload, headers=headers)
+
+async def _stream_acquire(request: Request, *, meta: Optional[Dict[str, Any]] = None) -> None:
     global _active_streams
     ip = _client_ip(request)
+    meta = dict(meta or {})
     try:
         max_global = int((os.getenv("MAX_STREAMS_PER_REPLICA") or os.getenv("MAX_STREAMS_GLOBAL", "200") or "200"))
     except Exception:
@@ -3516,16 +3609,48 @@ async def _stream_acquire(request: Request) -> None:
         max_ip = int(os.getenv("MAX_STREAMS_PER_IP", "10") or "10")
     except Exception:
         max_ip = 10
+    retry_after = _chat_stream_retry_after_seconds()
 
     async with _stream_lock:
+        ip_active = int(_streams_per_ip[ip] or 0)
         if max_global > 0 and _active_streams >= max_global:
-            raise HTTPException(status_code=429, detail="STREAM_LIMIT")
-        if max_ip > 0 and _streams_per_ip[ip] >= max_ip:
-            raise HTTPException(status_code=429, detail="STREAM_LIMIT")
+            _raise_chat_stream_rate_limited(
+                request=request,
+                scope="global",
+                retry_after=retry_after,
+                org=meta.get("org"),
+                user_id=meta.get("user_id"),
+                trace_id=meta.get("trace_id"),
+                thread_id=meta.get("thread_id"),
+                agent_id=meta.get("agent_id"),
+                model=meta.get("model"),
+                provider=meta.get("provider") or "openai",
+                active_streams=_active_streams,
+                active_streams_for_ip=ip_active,
+                max_global=max_global,
+                max_ip=max_ip,
+            )
+        if max_ip > 0 and ip_active >= max_ip:
+            _raise_chat_stream_rate_limited(
+                request=request,
+                scope="ip",
+                retry_after=retry_after,
+                org=meta.get("org"),
+                user_id=meta.get("user_id"),
+                trace_id=meta.get("trace_id"),
+                thread_id=meta.get("thread_id"),
+                agent_id=meta.get("agent_id"),
+                model=meta.get("model"),
+                provider=meta.get("provider") or "openai",
+                active_streams=_active_streams,
+                active_streams_for_ip=ip_active,
+                max_global=max_global,
+                max_ip=max_ip,
+            )
         _active_streams += 1
         _streams_per_ip[ip] += 1
         try:
-            stream_logger.info(json.dumps({"event":"stream_start","active_streams":_active_streams,"ip":ip}))
+            stream_logger.info(json.dumps({"event":"stream_start","active_streams":_active_streams,"active_streams_for_ip":_streams_per_ip[ip],"ip":ip,"org":meta.get("org"),"user_id":meta.get("user_id"),"trace_id":meta.get("trace_id")}))
         except Exception:
             pass
 
@@ -21450,7 +21575,18 @@ async def chat_stream(
 
 
 
-    await _stream_acquire(request)
+    await _stream_acquire(
+        request,
+        meta={
+            "org": org,
+            "user_id": uid,
+            "trace_id": trace_id,
+            "thread_id": tid,
+            "agent_id": agent_id,
+            "model": _clean_env(os.getenv("OPENAI_MODEL", "gpt-4o-mini"), default="gpt-4o-mini"),
+            "provider": "openai",
+        },
+    )
     return StreamingResponse(
         gen(),
         media_type="text/event-stream",
