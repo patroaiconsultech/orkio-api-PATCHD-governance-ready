@@ -491,24 +491,46 @@ def _extract_direct_agent_target(text: str) -> str:
     txt = _normalize(raw)
     if not txt:
         return ""
-    if _looks_like_team_roster_question(raw):
-        return ""
-    if _contains_any(txt, [
+
+    explicit_roster_only = _contains_any(txt, [
         "quem está no time",
         "quem esta no time",
         "quais agentes",
         "quantos agentes",
         "lista de agentes",
+        "team roster",
         "roster",
-    ]):
+    ])
+    if explicit_roster_only:
         return ""
 
-    handles = [_canonical_dispatch_actor(item) for item in re.findall(r"@([A-Za-z0-9_\-]+)", raw, flags=re.IGNORECASE)]
-    handles = _dedupe_preserve([item for item in handles if item and item not in {"team", "time", "equipe", "board", "conselho"}])
+    host_tokens = {"team", "time", "equipe", "board", "conselho", "orion", "orkio", "chris"}
 
-    # Menção direta a especialista deve ganhar precedência sobre roster/presença.
-    if len(handles) == 1 and handles[0] not in {"orion", "orkio", "chris"}:
-        return handles[0]
+    # Captura handles com até 3 tokens para casos como "@UX Frontend".
+    raw_handles = re.findall(
+        r"@([A-Za-z0-9_\-/]+(?:\s+[A-Za-z0-9_\-/]+){0,2})",
+        raw,
+        flags=re.IGNORECASE,
+    )
+    handle_targets = _dedupe_preserve([
+        _canonical_dispatch_actor(item)
+        for item in raw_handles
+        if _canonical_dispatch_actor(item) and _canonical_dispatch_actor(item) not in host_tokens
+    ])
+
+    known_targets = _dedupe_preserve([
+        item
+        for item in _extract_known_roster_agents_from_text(raw)
+        if item and item not in host_tokens
+    ])
+
+    preferred = handle_targets or known_targets
+    if not preferred:
+        return ""
+
+    # Caso clássico: "@Team @UX Frontend estás online?" deve cair em direct agent.
+    if len(preferred) == 1:
+        return preferred[0]
 
     return ""
 
@@ -519,6 +541,8 @@ def _looks_like_orchestrator_dispatch_readonly_request(text: str) -> bool:
     if not txt:
         return False
     if _looks_like_team_roster_question(raw):
+        return False
+    if _extract_direct_agent_target(raw):
         return False
 
     has_dispatch_verb = _contains_any(txt, [
