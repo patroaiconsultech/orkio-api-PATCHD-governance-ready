@@ -117,6 +117,67 @@ def _dedupe_preserve(items: list[str]) -> list[str]:
     return out
 
 
+def _context_list(context: Dict[str, Any], key: str) -> list[str]:
+    value = context.get(key)
+    if value is None:
+        return []
+    items = value if isinstance(value, list) else [value]
+    return _dedupe_preserve([str(item or "") for item in items if str(item or "").strip()])
+
+
+def _payload_target_agent_from_context(context: Dict[str, Any]) -> str:
+    for key in ("target_agent_from_payload", "target_agent_frozen", "target_agent_slug"):
+        target = _canonical_dispatch_actor(context.get(key) or "")
+        if target:
+            return target
+    visible = _canonical_dispatch_actor(context.get("visible_agent") or "")
+    return visible
+
+
+def _payload_target_agents_from_context(context: Dict[str, Any]) -> list[str]:
+    candidates: list[str] = []
+    for key in ("target_agents_from_payload", "target_agents_frozen", "requested_agent_names"):
+        candidates.extend(_context_list(context, key))
+    single = _payload_target_agent_from_context(context)
+    if single:
+        candidates.insert(0, single)
+    host_tokens = {"team", "time", "equipe", "board", "conselho", "orion", "orkio", "chris"}
+    return [x for x in _dedupe_preserve(candidates) if x not in host_tokens]
+
+
+def _payload_dest_mode(context: Dict[str, Any]) -> str:
+    raw = str(context.get("dest_mode") or "").strip().lower()
+    return raw if raw in {"team", "single", "multi"} else ""
+
+
+def _payload_operational_dispatch_request(text: str) -> bool:
+    txt = _normalize(text)
+    if not txt:
+        return False
+    return _contains_any(txt, [
+        "peça",
+        "peca",
+        "acione",
+        "orquestre",
+        "orquestrar",
+        "solicite",
+        "pergunte",
+        "mande",
+        "façam",
+        "facam",
+        "faça",
+        "faca",
+        "análise",
+        "analise",
+        "auditoria",
+        "audit",
+        "status",
+        "estás online",
+        "estas online",
+        "online",
+    ])
+
+
 def _extract_constraint_scalar(text: str, keys: list[str]) -> str:
     raw = text or ""
     for key in keys:
@@ -598,7 +659,9 @@ def _build_direct_agent_message_payload(
         "dispatch_receipt_id": None,
         "fallback_used": False,
         "fallback_reason": "",
+        "block_roster_fallback": True,
         "target_agent": target_agent,
+        "target_agent_frozen": target_agent,
         "requested_specialists": [target_agent],
         "expected_specialist_reports": [],
     }
@@ -610,6 +673,8 @@ def _build_direct_agent_message_payload(
         "runtime_operation": runtime_op,
         "requires_runtime_execution": False,
         "target_agent": target_agent,
+        "target_agent_frozen": target_agent,
+        "block_roster_fallback": True,
         "delivery_contract": "direct_agent_message_v1",
         "template_id": "direct_agent_message_v1",
         "structured_output": False,
@@ -640,7 +705,7 @@ def _build_orchestrator_dispatch_readonly_payload(
         context=context,
         safe_mode=bool(context.get("safe_mode", False)),
     )
-    requested = _extract_requested_specialists_from_text(effective_user_input or raw_user_input or "")
+    requested = _payload_target_agents_from_context(context) or _extract_requested_specialists_from_text(effective_user_input or raw_user_input or "")
     runtime_op = {
         "kind": "orchestrator_dispatch_readonly",
         "action_scope": "read",
@@ -656,7 +721,9 @@ def _build_orchestrator_dispatch_readonly_payload(
         "dispatch_receipt_id": None,
         "fallback_used": False,
         "fallback_reason": "",
+        "block_roster_fallback": True,
         "target_agent": "orion",
+        "target_agents_frozen": list(requested or []),
         "requested_specialists": list(requested or []),
         "expected_specialist_reports": list(requested or []),
     }
@@ -668,6 +735,8 @@ def _build_orchestrator_dispatch_readonly_payload(
         "runtime_operation": runtime_op,
         "requires_runtime_execution": False,
         "target_agent": "orion",
+        "target_agents_frozen": list(requested or []),
+        "block_roster_fallback": True,
         "delivery_contract": "orchestrator_dispatch_readonly_v1",
         "template_id": "orchestrator_dispatch_readonly_v1",
         "structured_output": True,
@@ -1686,6 +1755,31 @@ def build_intent_package(
     context = dict(context or {})
     context["message"] = effective_user_input
     context["raw_message"] = raw_user_input
+
+    # EFATA777_DESTINATION_CONTRACT_V1:
+    # Explicit frontend destination contract has precedence over textual roster
+    # detection. This prevents @Team/@UX ambiguity from winning over target freeze.
+    payload_target = _payload_target_agent_from_context(context)
+    payload_targets = _payload_target_agents_from_context(context)
+    payload_mode = _payload_dest_mode(context)
+    payload_has_destination = bool(context.get("destination_contract_used") or payload_target or payload_targets or payload_mode)
+
+    if payload_target:
+        return _build_direct_agent_message_payload(
+            raw_user_input=raw_user_input,
+            effective_user_input=effective_user_input,
+            context=context,
+            target_agent=payload_target,
+        )
+
+    if payload_has_destination and payload_mode in {"multi", "team"} and (
+        len(payload_targets) >= 1 or _payload_operational_dispatch_request(effective_user_input or raw_user_input or "")
+    ):
+        return _build_orchestrator_dispatch_readonly_payload(
+            raw_user_input=raw_user_input,
+            effective_user_input=effective_user_input,
+            context=context,
+        )
 
     session_is_admin_master = bool(context.get("session_is_admin_master"))
     session_write_approval_authority = bool(context.get("session_write_approval_authority"))
