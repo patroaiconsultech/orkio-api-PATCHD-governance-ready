@@ -506,29 +506,30 @@ def _extract_direct_agent_target(text: str) -> str:
 
     host_tokens = {"team", "time", "equipe", "board", "conselho", "orion", "orkio", "chris"}
 
-    # Captura handles com até 3 tokens para casos como "@UX Frontend".
+    known_targets = _dedupe_preserve([
+        item
+        for item in _extract_known_roster_agents_from_text(raw)
+        if item and item not in host_tokens
+    ])
+    if len(known_targets) == 1:
+        return known_targets[0]
+
     raw_handles = re.findall(
-        r"@([A-Za-z0-9_\-/]+(?:\s+[A-Za-z0-9_\-/]+){0,2})",
+        r"@([A-Za-z0-9_\-/]+(?:\s+[A-Za-z0-9_\-/]+){0,2})(?=(?:\s*[,.:;!?])|(?:\s+@)|$)",
         raw,
         flags=re.IGNORECASE,
     )
+
     handle_targets = _dedupe_preserve([
         _canonical_dispatch_actor(item)
         for item in raw_handles
         if _canonical_dispatch_actor(item) and _canonical_dispatch_actor(item) not in host_tokens
     ])
 
-    known_targets = _dedupe_preserve([
-        item
-        for item in _extract_known_roster_agents_from_text(raw)
-        if item and item not in host_tokens
-    ])
+    if len(handle_targets) == 1:
+        return handle_targets[0]
 
-    preferred = handle_targets or known_targets
-    if not preferred:
-        return ""
-
-    # Caso clássico: "@Team @UX Frontend estás online?" deve cair em direct agent.
+    preferred = _dedupe_preserve(known_targets + handle_targets)
     if len(preferred) == 1:
         return preferred[0]
 
