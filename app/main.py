@@ -16291,11 +16291,17 @@ def chat(
             try:
                 intent_name_live_sync = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
                 if intent_name_live_sync == "direct_agent_message" or bool(dispatch_routing_receipt.get("direct_agent_message")):
-                    capability_inventory_answer = _build_direct_agent_message_answer_text(
-                        inp.message,
-                        target_agent=str(dispatch_routing_receipt.get("target_agent") or ""),
-                        visible_agent=str(dispatch_routing_receipt.get("visible_agent") or ""),
-                    )
+                    direct_target = str(
+                        dispatch_routing_receipt.get("target_agent")
+                        or dispatch_routing_receipt.get("visible_agent")
+                        or ""
+                    ).strip()
+                    if direct_target:
+                        dispatch_routing_receipt["final_speaker"] = direct_target
+                        dispatch_routing_receipt["visible_agent"] = direct_target
+                        dispatch_routing_receipt["target_agent"] = direct_target
+                        dispatch_routing_receipt["target_agents"] = [direct_target]
+                    capability_inventory_answer = None
                 elif intent_name_live_sync == "orchestrator_dispatch_readonly" or bool(dispatch_routing_receipt.get("orchestrator_dispatch")):
                     delegated_target = _orchestrator_single_target_agent(dispatch_routing_receipt)
                     if delegated_target:
@@ -16307,11 +16313,7 @@ def chat(
                         dispatch_routing_receipt["target_agent"] = delegated_target
                         dispatch_routing_receipt["target_agents"] = [delegated_target]
                         dispatch_routing_receipt["mediated_single_target_delegation"] = True
-                        capability_inventory_answer = _build_direct_agent_message_answer_text(
-                            inp.message,
-                            target_agent=delegated_target,
-                            visible_agent=delegated_target,
-                        )
+                        capability_inventory_answer = None
                     else:
                         capability_inventory_answer = _build_orchestrator_dispatch_readonly_answer_text(
                             inp.message,
@@ -21342,11 +21344,17 @@ async def chat_stream(
                     try:
                         intent_name_live_stream = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
                         if intent_name_live_stream == "direct_agent_message" or bool(dispatch_routing_receipt_stream.get("direct_agent_message")):
-                            capability_inventory_answer = _build_direct_agent_message_answer_text(
-                                message,
-                                target_agent=str(dispatch_routing_receipt_stream.get("target_agent") or ""),
-                                visible_agent=str(dispatch_routing_receipt_stream.get("visible_agent") or ""),
-                            )
+                            direct_target = str(
+                                dispatch_routing_receipt_stream.get("target_agent")
+                                or dispatch_routing_receipt_stream.get("visible_agent")
+                                or ""
+                            ).strip()
+                            if direct_target:
+                                dispatch_routing_receipt_stream["final_speaker"] = direct_target
+                                dispatch_routing_receipt_stream["visible_agent"] = direct_target
+                                dispatch_routing_receipt_stream["target_agent"] = direct_target
+                                dispatch_routing_receipt_stream["target_agents"] = [direct_target]
+                            capability_inventory_answer = None
                         elif intent_name_live_stream == "orchestrator_dispatch_readonly" or bool(dispatch_routing_receipt_stream.get("orchestrator_dispatch")):
                             delegated_target = _orchestrator_single_target_agent(dispatch_routing_receipt_stream)
                             if delegated_target:
@@ -21358,11 +21366,7 @@ async def chat_stream(
                                 dispatch_routing_receipt_stream["target_agent"] = delegated_target
                                 dispatch_routing_receipt_stream["target_agents"] = [delegated_target]
                                 dispatch_routing_receipt_stream["mediated_single_target_delegation"] = True
-                                capability_inventory_answer = _build_direct_agent_message_answer_text(
-                                    message,
-                                    target_agent=delegated_target,
-                                    visible_agent=delegated_target,
-                                )
+                                capability_inventory_answer = None
                             else:
                                 capability_inventory_answer = _build_orchestrator_dispatch_readonly_answer_text(
                                     message,
