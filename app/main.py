@@ -2487,6 +2487,14 @@ class ChatIn(BaseModel):
     tenant: str = Field(default_tenant(), min_length=1)
     thread_id: Optional[str] = None
     agent_id: Optional[str] = None
+    # EFATA777_DESTINATION_CONTRACT_V1:
+    # The AppConsole sends a canonical destination contract. The backend must
+    # model these fields explicitly instead of relying only on textual @mentions.
+    agent_ids: Optional[List[str]] = None
+    dest_mode: Optional[str] = None
+    visible_agent: Optional[str] = None
+    target_agent_slug: Optional[str] = None
+    requested_agent_names: Optional[List[str]] = None
     message: str = Field(min_length=1)
     client_message_id: Optional[str] = None  # idempotency key (frontend-generated UUID)
     top_k: int = 6
@@ -9726,6 +9734,8 @@ def _build_presence_status_answer_text(user_text: str = "") -> str:
 _READONLY_RECEIPT_INTENTS = {
     "presence_status_answer",
     "team_roster_answer",
+    "direct_agent_message",
+    "orchestrator_dispatch_readonly",
     "model_resolution_answer",
     "multiagent_audit_readonly",
     "governance_capability_answer",
@@ -10585,6 +10595,168 @@ def _merge_dispatch_routing_receipt(
     for key, value in dict(receipt or {}).items():
         merged[key] = value
     return merged
+
+
+def _efata777_clean_list(value: Any) -> List[str]:
+    if value is None:
+        return []
+    raw_items = value if isinstance(value, list) else [value]
+    out: List[str] = []
+    seen: set = set()
+    for item in raw_items:
+        text = str(item or "").strip()
+        if not text:
+            continue
+        key = text.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append(text)
+    return out
+
+
+def _efata777_slug(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if not raw:
+        return ""
+    raw = raw.replace("@", " ")
+    raw = raw.replace("/", "_").replace("-", "_").replace(" ", "_")
+    raw = re.sub(r"_+", "_", raw).strip("_")
+    aliases = {
+        "ux": "ux_frontend",
+        "ux_front": "ux_frontend",
+        "ux_frontend": "ux_frontend",
+        "ux_front_end": "ux_frontend",
+        "frontend": "frontend_engineer",
+        "front_end": "frontend_engineer",
+        "backend": "backend_engineer",
+        "qa": "qa_release_engineer",
+        "qa_release": "qa_release_engineer",
+        "cto": "systems_architect",
+        "architect": "systems_architect",
+        "systems_architect": "systems_architect",
+        "devops": "devops_sre",
+        "sre": "devops_sre",
+    }
+    return aliases.get(raw, raw)
+
+
+def _efata777_resolve_agent_token(
+    token: Any,
+    *,
+    alias_to_agent: Dict[str, Any],
+    all_agents: Optional[List[Any]] = None,
+) -> Any:
+    raw = str(token or "").strip()
+    if not raw:
+        return None
+    lowered = raw.lower()
+    slug = _efata777_slug(raw)
+    for ag in list(all_agents or []):
+        if str(getattr(ag, "id", "") or "") == raw:
+            return ag
+    for key in [raw, lowered, slug, slug.replace("_", " "), raw.replace("_", " ").lower(), raw.replace("-", " ").lower()]:
+        ag = alias_to_agent.get(str(key or "").strip().lower())
+        if ag is not None:
+            return ag
+    for ag in list(all_agents or []):
+        name = str(getattr(ag, "name", "") or "").strip()
+        ag_slug = _efata777_slug(name)
+        if name.lower() == lowered or ag_slug == slug:
+            return ag
+    return None
+
+
+def _efata777_destination_contract_from_input(
+    inp: Any,
+    *,
+    alias_to_agent: Dict[str, Any],
+    all_agents: Optional[List[Any]] = None,
+) -> Dict[str, Any]:
+    dest_mode = str(getattr(inp, "dest_mode", "") or "").strip().lower()
+    if dest_mode not in {"team", "single", "multi"}:
+        dest_mode = ""
+    agent_ids = _efata777_clean_list(getattr(inp, "agent_ids", None))
+    requested_agent_names = _efata777_clean_list(getattr(inp, "requested_agent_names", None))
+    visible_agent = str(getattr(inp, "visible_agent", "") or "").strip()
+    target_agent_slug = str(getattr(inp, "target_agent_slug", "") or "").strip()
+
+    resolved: List[Any] = []
+    def _append(candidate: Any) -> None:
+        if candidate is None:
+            return
+        cid = str(getattr(candidate, "id", "") or "")
+        if cid and any(str(getattr(x, "id", "") or "") == cid for x in resolved):
+            return
+        resolved.append(candidate)
+
+    if dest_mode == "single":
+        for token in [target_agent_slug, getattr(inp, "agent_id", None), visible_agent] + requested_agent_names:
+            _append(_efata777_resolve_agent_token(token, alias_to_agent=alias_to_agent, all_agents=all_agents))
+            if resolved:
+                break
+    elif dest_mode == "multi":
+        for token in agent_ids + requested_agent_names:
+            _append(_efata777_resolve_agent_token(token, alias_to_agent=alias_to_agent, all_agents=all_agents))
+    elif dest_mode == "team":
+        for token in agent_ids + requested_agent_names:
+            _append(_efata777_resolve_agent_token(token, alias_to_agent=alias_to_agent, all_agents=all_agents))
+
+    frozen_names = [str(getattr(a, "name", "") or "").strip() for a in resolved if str(getattr(a, "name", "") or "").strip()]
+    frozen_slugs = [_efata777_slug(name) for name in frozen_names]
+    target_agent_frozen = frozen_slugs[0] if len(frozen_slugs) == 1 else ""
+
+    return {
+        "destination_contract_used": bool(dest_mode or agent_ids or visible_agent or target_agent_slug or requested_agent_names),
+        "dest_mode": dest_mode,
+        "agent_ids": agent_ids,
+        "visible_agent": visible_agent,
+        "target_agent_slug": target_agent_slug,
+        "requested_agent_names": requested_agent_names,
+        "target_agents_rows": resolved,
+        "target_agent_frozen": target_agent_frozen,
+        "target_agents_frozen": frozen_slugs,
+        "target_agent_names_frozen": frozen_names,
+    }
+
+
+def _efata777_contract_for_intent_context(contract: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    c = dict(contract or {})
+    return {
+        "destination_contract_used": bool(c.get("destination_contract_used")),
+        "dest_mode": c.get("dest_mode") or "",
+        "target_agent_from_payload": c.get("target_agent_frozen") or "",
+        "target_agent_frozen": c.get("target_agent_frozen") or "",
+        "target_agents_from_payload": list(c.get("target_agents_frozen") or []),
+        "target_agents_frozen": list(c.get("target_agents_frozen") or []),
+        "visible_agent": c.get("visible_agent") or "",
+        "requested_agent_names": list(c.get("requested_agent_names") or []),
+    }
+
+
+def _efata777_apply_destination_receipt(
+    receipt: Dict[str, Any],
+    contract: Optional[Dict[str, Any]],
+    *,
+    block_roster: bool = False,
+) -> Dict[str, Any]:
+    c = dict(contract or {})
+    receipt["destination_contract_used"] = bool(c.get("destination_contract_used"))
+    receipt["dest_mode"] = c.get("dest_mode") or ""
+    receipt["target_agent_frozen"] = c.get("target_agent_frozen") or ""
+    receipt["target_agents_frozen"] = list(c.get("target_agents_frozen") or [])
+    receipt["target_agent_names_frozen"] = list(c.get("target_agent_names_frozen") or [])
+    if c.get("visible_agent"):
+        receipt["visible_agent"] = c.get("visible_agent")
+    if c.get("target_agent_frozen") and not receipt.get("target_agent"):
+        receipt["target_agent"] = c.get("target_agent_frozen")
+    if c.get("target_agents_frozen"):
+        receipt["target_agents"] = list(c.get("target_agents_frozen") or [])
+    if bool(block_roster or c.get("target_agent_frozen") or c.get("target_agents_frozen")):
+        receipt["dispatch_attempted"] = True
+        receipt["fallback_used"] = False
+        receipt["fallback_reason"] = ""
+    return receipt
 
 
 def _build_direct_agent_message_answer_text(
@@ -15559,9 +15731,12 @@ def chat(
         blocked_reply = None
     active_founder_guidance = _get_founder_guidance(org, tid, inp.message)
 
-    # Parse @mentions
+    # Parse @mentions + canonical destination contract from AppConsole.
     mention_tokens: List[str] = []
     requested_names = _detect_requested_agent_names(inp.message or "")
+    payload_requested_names = _efata777_clean_list(getattr(inp, "requested_agent_names", None))
+    if payload_requested_names:
+        requested_names = list(dict.fromkeys(list(requested_names or []) + payload_requested_names))
     try:
         mention_tokens = re.findall(
             r"@([A-Za-z0-9_\-/]+(?:\s+[A-Za-z0-9_\-/]+){0,2})(?=(?:\s*[,.:;!?])|(?:\s+@)|$)",
@@ -15594,6 +15769,21 @@ def chat(
             pass
     all_agents = db.execute(select(Agent).where(Agent.org_slug == org)).scalars().all()
     alias_to_agent = _build_dispatch_alias_map(list(all_agents or []))
+    destination_contract = _efata777_destination_contract_from_input(
+        inp,
+        alias_to_agent=alias_to_agent,
+        all_agents=list(all_agents or []),
+    )
+    if destination_contract.get("requested_agent_names"):
+        requested_names = list(dict.fromkeys(list(requested_names or []) + list(destination_contract.get("requested_agent_names") or [])))
+    if destination_contract.get("target_agent_names_frozen"):
+        for _name in list(destination_contract.get("target_agent_names_frozen") or []):
+            if _name:
+                mention_tokens.append(_name)
+        seen_contract_mentions: set = set()
+        mention_tokens = [m for m in mention_tokens if not (str(m).lower() in seen_contract_mentions or seen_contract_mentions.add(str(m).lower()))]
+    if destination_contract.get("dest_mode") == "multi" and destination_contract.get("target_agents_rows"):
+        has_team = True
 
     # PATCH27_12AY — Orion self-knowledge hard gate BEFORE any fan-out
     forced_orion_agent = None
@@ -15617,9 +15807,14 @@ def chat(
         mention_tokens = ["orion"]
         has_team = False
 
-    # STAB: select_target_agents — determinístico, nunca sobrescrito
+    # STAB: select_target_agents — determinístico, nunca sobrescrito.
+    # EFATA777_DESTINATION_CONTRACT_V1: explicit payload destination wins over
+    # textual prefix parsing, unless a hard Orion-only safety gate is active.
+    contract_targets = list(destination_contract.get("target_agents_rows") or [])
     if forced_orion_agent is not None:
         target_agents = [forced_orion_agent]
+    elif contract_targets:
+        target_agents = contract_targets
     else:
         target_agents = _select_target_agents(db, org, inp, alias_to_agent, mention_tokens, has_team)
         target_agents = _apply_explicit_agent_request(db, org, target_agents, requested_names)
@@ -15639,12 +15834,23 @@ def chat(
         mention_tokens=mention_tokens,
         has_team=has_team,
         target_agents=target_agents,
+        visible_agent=str(destination_contract.get("visible_agent") or ""),
     )
     block_roster_fallback = _should_block_roster_fallback(
         inp.message,
         requested_names=requested_names,
         mention_tokens=mention_tokens,
         has_team=has_team,
+    )
+    block_roster_fallback = bool(
+        block_roster_fallback
+        or destination_contract.get("target_agent_frozen")
+        or destination_contract.get("target_agents_frozen")
+    )
+    dispatch_routing_receipt = _efata777_apply_destination_receipt(
+        dispatch_routing_receipt,
+        destination_contract,
+        block_roster=block_roster_fallback,
     )
     if block_roster_fallback:
         dispatch_routing_receipt["dispatch_attempted"] = True
@@ -15749,6 +15955,7 @@ def chat(
             inp.message,
             prev,
             available_agents=[getattr(a, "name", None) for a in target_agents],
+            destination_contract=destination_contract,
         )
     except Exception:
         try:
@@ -15759,6 +15966,8 @@ def chat(
 
     try:
         receipt_intent = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
+        if block_roster_fallback and receipt_intent == "team_roster_answer":
+            receipt_intent = "direct_agent_message" if dispatch_routing_receipt.get("target_agent_frozen") else "orchestrator_dispatch_readonly"
         dispatch_routing_receipt["intent"] = receipt_intent or str(dispatch_routing_receipt.get("intent") or "")
         if isinstance(runtime_enrichment, dict):
             runtime_hints_live = runtime_enrichment.get("runtime_hints") if isinstance(runtime_enrichment.get("runtime_hints"), dict) else {}
@@ -16656,6 +16865,7 @@ def _build_runtime_enrichment(
     message: str,
     prev_messages: Optional[List[Any]] = None,
     available_agents: Optional[List[str]] = None,
+    destination_contract: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     prev_messages = prev_messages or []
     memories = _load_recent_runtime_memories(db, org, uid)
@@ -16666,6 +16876,11 @@ def _build_runtime_enrichment(
     ]
     thread_dispatch_contract = _last_structured_dispatch_from_history(prev_serialized)
     context = {"summary": f"{len(prev_messages)} previous messages"} if prev_messages else {}
+    if destination_contract:
+        try:
+            context.update(_efata777_contract_for_intent_context(destination_contract))
+        except Exception:
+            pass
     if thread_dispatch_contract:
         context.update({
             "sticky_dispatch_active": bool(thread_dispatch_contract.get("active")),
@@ -20119,8 +20334,16 @@ async def chat_stream(
     # Resolve target agents (align /api/chat/stream with /api/chat)
     mention_tokens: List[str] = []
     requested_names = _detect_requested_agent_names(message or "")
+    payload_requested_names = _efata777_clean_list(getattr(inp, "requested_agent_names", None))
+    if payload_requested_names:
+        requested_names = list(dict.fromkeys(list(requested_names or []) + payload_requested_names))
     try:
-        mention_tokens = re.findall(r"@([A-Za-z0-9_\-]{2,64})", message or "")
+        mention_tokens = re.findall(
+            r"@([A-Za-z0-9_\-/]+(?:\s+[A-Za-z0-9_\-/]+){0,2})(?=(?:\s*[,.:;!?])|(?:\s+@)|$)",
+            message or "",
+            flags=re.IGNORECASE,
+        )
+        mention_tokens = [str(x or "").strip() for x in mention_tokens if str(x or "").strip()]
         for req in requested_names:
             if req:
                 mention_tokens.append(req)
@@ -20140,6 +20363,21 @@ async def chat_stream(
             pass
     all_agents_rows = db.execute(select(Agent).where(Agent.org_slug == org)).scalars().all()
     alias_to_agent = _build_dispatch_alias_map(list(all_agents_rows or []))
+    destination_contract_stream = _efata777_destination_contract_from_input(
+        inp,
+        alias_to_agent=alias_to_agent,
+        all_agents=list(all_agents_rows or []),
+    )
+    if destination_contract_stream.get("requested_agent_names"):
+        requested_names = list(dict.fromkeys(list(requested_names or []) + list(destination_contract_stream.get("requested_agent_names") or [])))
+    if destination_contract_stream.get("target_agent_names_frozen"):
+        for _name in list(destination_contract_stream.get("target_agent_names_frozen") or []):
+            if _name:
+                mention_tokens.append(_name)
+        seen_contract_mentions: set = set()
+        mention_tokens = [m for m in mention_tokens if not (str(m).lower() in seen_contract_mentions or seen_contract_mentions.add(str(m).lower()))]
+    if destination_contract_stream.get("dest_mode") == "multi" and destination_contract_stream.get("target_agents_rows"):
+        has_team = True
 
     # PATCH27_12AY — Orion self-knowledge hard gate BEFORE any fan-out
     forced_orion_row = None
@@ -20153,8 +20391,11 @@ async def chat_stream(
             mention_tokens = ["orion"]
             has_team = False
 
+    contract_targets_stream = list(destination_contract_stream.get("target_agents_rows") or [])
     if forced_orion_row is not None:
         target_agents_rows = [forced_orion_row]
+    elif contract_targets_stream:
+        target_agents_rows = contract_targets_stream
     else:
         target_agents_rows = _select_target_agents(db, org, inp, alias_to_agent, mention_tokens, has_team)
         target_agents_rows = _apply_explicit_agent_request(db, org, target_agents_rows, requested_names)
@@ -20174,12 +20415,23 @@ async def chat_stream(
         mention_tokens=mention_tokens,
         has_team=has_team,
         target_agents=target_agents_rows,
+        visible_agent=str(destination_contract_stream.get("visible_agent") or ""),
     )
     block_roster_fallback_stream = _should_block_roster_fallback(
         message,
         requested_names=requested_names,
         mention_tokens=mention_tokens,
         has_team=has_team,
+    )
+    block_roster_fallback_stream = bool(
+        block_roster_fallback_stream
+        or destination_contract_stream.get("target_agent_frozen")
+        or destination_contract_stream.get("target_agents_frozen")
+    )
+    dispatch_routing_receipt_stream = _efata777_apply_destination_receipt(
+        dispatch_routing_receipt_stream,
+        destination_contract_stream,
+        block_roster=block_roster_fallback_stream,
     )
 
     if not target_agents_rows:
@@ -20271,6 +20523,7 @@ async def chat_stream(
             message,
             prev[-24:],
             available_agents=[getattr(a, "name", None) for a in target_agents_rows],
+            destination_contract=destination_contract_stream,
         )
     except Exception:
         try:
@@ -20281,6 +20534,8 @@ async def chat_stream(
 
     try:
         receipt_intent_stream = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
+        if block_roster_fallback_stream and receipt_intent_stream == "team_roster_answer":
+            receipt_intent_stream = "direct_agent_message" if dispatch_routing_receipt_stream.get("target_agent_frozen") else "orchestrator_dispatch_readonly"
         dispatch_routing_receipt_stream["intent"] = receipt_intent_stream or str(dispatch_routing_receipt_stream.get("intent") or "")
         if isinstance(runtime_enrichment, dict):
             runtime_hints_live = runtime_enrichment.get("runtime_hints") if isinstance(runtime_enrichment.get("runtime_hints"), dict) else {}
