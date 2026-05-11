@@ -814,8 +814,16 @@ def _allowed_read_agents() -> List[str]:
 
 
 def _extract_agent_handles(message: str) -> List[str]:
-    found = re.findall(r"@([A-Za-z0-9_]+)", message or "")
-    return [x.strip().lower() for x in found if x.strip()]
+    found = re.findall(r"@([A-Za-z0-9_\-/]+(?:\s+[A-Za-z0-9_\-/]+){0,2})", message or "", flags=re.IGNORECASE)
+    normalized = [_canonical_dispatch_actor(x) for x in found]
+    return [x.strip().lower() for x in normalized if x.strip()]
+
+
+def _extract_dispatch_specialists(message: str) -> List[str]:
+    host_tokens = {"team", "time", "equipe", "board", "conselho", "orion", "orkio"}
+    handles = [x for x in _extract_agent_handles(message) if x not in host_tokens]
+    known = [x for x in _dedupe_dispatch_actors(_extract_known_roster_agents_from_text(message)) if x not in host_tokens]
+    return _dedupe_dispatch_actors(handles or known)
 
 
 
@@ -1135,6 +1143,9 @@ def _resolve_visible_agent(message: str, default: str = "orion") -> str:
     required_signer = _canonical_dispatch_actor(constraints.get("required_signer") or "")
     if required_signer:
         return required_signer
+    specialists = _extract_dispatch_specialists(message)
+    if len(specialists) == 1:
+        return specialists[0]
     handles = _extract_agent_handles(message)
     if _is_orion_only_request(message):
         return "orion"
@@ -1159,10 +1170,11 @@ def _looks_like_direct_agent_message_request(message: str) -> bool:
     txt = str(message or "").strip().lower()
     if not txt:
         return False
-    if _looks_like_team_roster_question(message):
+    explicit_roster = bool(re.search(r"quem\s+est[aá]\s+no\s+time|quais\s+agentes|quantos\s+agentes|team\s+roster|roster|lista\s+de\s+agentes", txt, flags=re.IGNORECASE))
+    if explicit_roster:
         return False
-    handles = _extract_agent_handles(message)
-    if len(handles) != 1:
+    specialists = _extract_dispatch_specialists(message)
+    if len(specialists) != 1:
         return False
     has_operational_verb = any(term in txt for term in _ORCHESTRATION_OPERATIONAL_VERBS) or _looks_like_presence_status_question(message)
     return bool(has_operational_verb)
@@ -1174,12 +1186,15 @@ def _looks_like_orchestrator_dispatch_request(message: str) -> bool:
         return False
     if _looks_like_team_roster_question(message):
         return False
+    if _looks_like_direct_agent_message_request(message):
+        return False
     handles = _extract_agent_handles(message)
     has_operational_verb = any(term in txt for term in _ORCHESTRATION_OPERATIONAL_VERBS)
     has_host = any(handle in {"orion", "orkio", "team"} for handle in handles)
     hard = _extract_hard_constraints(message)
     requested = list(hard.get("specialists_required") or [])
-    return bool(has_operational_verb and (has_host or len(handles) > 1 or len(requested) > 1))
+    specialists = _extract_dispatch_specialists(message)
+    return bool(has_operational_verb and (has_host or len(specialists) > 1 or len(requested) > 1))
 
 
 def _build_dispatch_receipt_payload(
@@ -1192,11 +1207,13 @@ def _build_dispatch_receipt_payload(
     fallback_reason: str = "",
 ) -> Dict[str, Any]:
     selected = _dedupe_dispatch_actors(list(selected_specialists or []))
-    target_agent = selected[0] if len(selected) == 1 else ""
+    inferred = _extract_dispatch_specialists(message)
+    target_agent = selected[0] if len(selected) == 1 else (inferred[0] if len(inferred) == 1 else "")
     dispatch_attempted = bool(
         _looks_like_direct_agent_message_request(message)
         or _looks_like_orchestrator_dispatch_request(message)
         or selected
+        or inferred
     )
     return {
         "intent": (
