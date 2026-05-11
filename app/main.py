@@ -9734,6 +9734,8 @@ def _build_presence_status_answer_text(user_text: str = "") -> str:
 _READONLY_RECEIPT_INTENTS = {
     "presence_status_answer",
     "team_roster_answer",
+    "direct_agent_message",
+    "orchestrator_dispatch_readonly",
     "model_resolution_answer",
     "multiagent_audit_readonly",
     "governance_capability_answer",
@@ -9802,6 +9804,8 @@ def _runtime_readonly_receipt_intent(
             or _runtime_receipt_extract_field(runtime_enrichment, "capability_name")
             or _runtime_receipt_extract_field(runtime_enrichment, "delivery_contract")
         ).lower()
+        if routing_intent in {"direct_agent_message", "orchestrator_dispatch_readonly"}:
+            return routing_intent
 
         direct_hint = bool(_runtime_receipt_extract_field(runtime_enrichment, "direct_agent_message"))
         orchestrator_hint = bool(
@@ -9811,9 +9815,9 @@ def _runtime_readonly_receipt_intent(
         target_hint = _runtime_receipt_clean(_runtime_receipt_extract_field(runtime_enrichment, "target_agent"))
         target_list_hint = _runtime_receipt_list(_runtime_receipt_extract_field(runtime_enrichment, "target_agents"))
         if direct_hint or target_hint:
-            return ""
-        if orchestrator_hint and target_list_hint:
-            return ""
+            return "direct_agent_message"
+        if orchestrator_hint and len(target_list_hint) > 1:
+            return "orchestrator_dispatch_readonly"
 
         if _is_multiagent_audit_readonly_request(text):
             return "multiagent_audit_readonly"
@@ -16256,9 +16260,16 @@ def chat(
             try:
                 intent_name_live_sync = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
                 if intent_name_live_sync == "direct_agent_message" or bool(dispatch_routing_receipt.get("direct_agent_message")):
-                    capability_inventory_answer = None
+                    capability_inventory_answer = _build_direct_agent_message_answer_text(
+                        inp.message,
+                        target_agent=str(dispatch_routing_receipt.get("target_agent") or ""),
+                        visible_agent=str(dispatch_routing_receipt.get("visible_agent") or ""),
+                    )
                 elif intent_name_live_sync == "orchestrator_dispatch_readonly" or bool(dispatch_routing_receipt.get("orchestrator_dispatch")):
-                    capability_inventory_answer = None
+                    capability_inventory_answer = _build_orchestrator_dispatch_readonly_answer_text(
+                        inp.message,
+                        target_agents=list(dispatch_routing_receipt.get("target_agents") or []),
+                    )
                 elif _is_multiagent_audit_readonly_request(inp.message) or intent_name_live_sync == "multiagent_audit_readonly":
                     capability_inventory_answer = _build_multiagent_audit_readonly_answer_text(inp.message)
                 elif intent_name_live_sync == "presence_status_answer" or (_is_presence_status_question_request(inp.message) and not bool(dispatch_routing_receipt.get("direct_agent_message"))):
@@ -20183,15 +20194,29 @@ def _build_execution_planner_adjustment(review: Dict[str, Any]) -> Dict[str, Any
 def _apply_explicit_agent_request(db: Session, org: str, target_agents: List[Any], requested_names: Optional[List[str]]) -> List[Any]:
     """Force explicit specialist execution for chat/chat_stream.
     - If the user explicitly asks for Orion/Chris/Orkio, prefer those agents.
-    - When multiple specialists are requested, do not keep host-only fallback.
-    - Preserve the explicit order requested by the user.
+    - When a host/orchestrator is mentioned together with one or more specialists,
+      execute the specialists rather than keeping the host as the first responder.
+    - Preserve the explicit order requested by the user after host filtering.
     """
     requested_names = [str(x).strip() for x in (requested_names or []) if str(x).strip()]
     if not requested_names:
         return target_agents
 
-    requested_norm = [x.lower() for x in requested_names]
-    requested_set = set(requested_norm)
+    host_slugs = {"orion", "orkio", "team", "time", "equipe", "board", "conselho"}
+    canonical_pairs: List[tuple[str, str]] = []
+    for raw_name in requested_names:
+        canonical = _canonical_dispatch_specialist_slug(raw_name) or raw_name.strip().lower()
+        canonical_pairs.append((raw_name, canonical))
+
+    non_host_requested = [raw_name for raw_name, canonical in canonical_pairs if canonical and canonical not in host_slugs]
+    if non_host_requested and any(canonical in {"orion", "orkio"} for _, canonical in canonical_pairs):
+        requested_names = non_host_requested
+        canonical_pairs = [
+            (raw_name, _canonical_dispatch_specialist_slug(raw_name) or raw_name.strip().lower())
+            for raw_name in requested_names
+        ]
+
+    requested_norm = [raw_name.lower() for raw_name in requested_names]
 
     def _agent_name(ag: Any) -> str:
         if isinstance(ag, dict):
@@ -20199,20 +20224,24 @@ def _apply_explicit_agent_request(db: Session, org: str, target_agents: List[Any
         return str(getattr(ag, "name", "") or "").strip()
 
     by_name: Dict[str, Any] = {}
+    by_slug: Dict[str, Any] = {}
     for ag in target_agents or []:
         name = _agent_name(ag)
         if not name:
             continue
         full = name.lower()
         first = full.split()[0] if full.split() else full
+        canonical = _canonical_dispatch_specialist_slug(name)
         by_name.setdefault(full, ag)
         by_name.setdefault(first, ag)
+        if canonical:
+            by_slug.setdefault(canonical, ag)
 
     ordered: List[Any] = []
     seen_ids: set = set()
 
-    for req in requested_norm:
-        ag = by_name.get(req)
+    for raw_name, canonical in canonical_pairs:
+        ag = by_name.get(raw_name.lower()) or (by_slug.get(canonical) if canonical else None)
         if ag is None:
             continue
         agid = ag.get("id") if isinstance(ag, dict) else getattr(ag, "id", None)
@@ -20221,14 +20250,26 @@ def _apply_explicit_agent_request(db: Session, org: str, target_agents: List[Any
             seen_ids.add(agid)
 
     if len(ordered) != len(requested_names):
+        fallback_names = list(dict.fromkeys([str(raw_name).strip().lower() for raw_name, _ in canonical_pairs if str(raw_name).strip()]))
         fallback_agents = list(
             db.execute(
                 select(Agent).where(
                     Agent.org_slug == org,
-                    func.lower(Agent.name).in_(requested_norm),
+                    func.lower(Agent.name).in_(fallback_names),
                 )
             ).scalars().all()
         )
+        if not fallback_agents:
+            fallback_agents = list(
+                db.execute(
+                    select(Agent).where(
+                        Agent.org_slug == org,
+                        func.lower(Agent.slug).in_(
+                            [canonical for _, canonical in canonical_pairs if canonical]
+                        ),
+                    )
+                ).scalars().all()
+            )
         for ag in fallback_agents:
             agid = getattr(ag, "id", None)
             if agid not in seen_ids:
@@ -21255,9 +21296,16 @@ async def chat_stream(
                     try:
                         intent_name_live_stream = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
                         if intent_name_live_stream == "direct_agent_message" or bool(dispatch_routing_receipt_stream.get("direct_agent_message")):
-                            capability_inventory_answer = None
+                            capability_inventory_answer = _build_direct_agent_message_answer_text(
+                                message,
+                                target_agent=str(dispatch_routing_receipt_stream.get("target_agent") or ""),
+                                visible_agent=str(dispatch_routing_receipt_stream.get("visible_agent") or ""),
+                            )
                         elif intent_name_live_stream == "orchestrator_dispatch_readonly" or bool(dispatch_routing_receipt_stream.get("orchestrator_dispatch")):
-                            capability_inventory_answer = None
+                            capability_inventory_answer = _build_orchestrator_dispatch_readonly_answer_text(
+                                message,
+                                target_agents=list(dispatch_routing_receipt_stream.get("target_agents") or []),
+                            )
                         elif _is_multiagent_audit_readonly_request(message) or intent_name_live_stream == "multiagent_audit_readonly":
                             capability_inventory_answer = _build_multiagent_audit_readonly_answer_text(message)
                         elif intent_name_live_stream == "presence_status_answer" or (_is_presence_status_question_request(message) and not bool(dispatch_routing_receipt_stream.get("direct_agent_message"))):
