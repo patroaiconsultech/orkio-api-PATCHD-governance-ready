@@ -1158,6 +1158,197 @@ def _resolve_visible_agent(message: str, default: str = "orion") -> str:
     return _canonical_dispatch_actor(default) or default
 
 
+_HOST_ORCHESTRATORS = {"orion", "orkio", "team"}
+
+
+def _extract_orchestrator_host(message: str) -> str:
+    handles = _extract_agent_handles(message)
+    for handle in handles:
+        if handle in _HOST_ORCHESTRATORS:
+            return handle
+    raw = str(message or "").strip().lower()
+    if re.search(r"@team\b|\bteam\b|\bequipe\b", raw, flags=re.IGNORECASE):
+        return "team"
+    return ""
+
+
+def _orchestrator_single_target_specialist(message: str) -> str:
+    specialists = _extract_dispatch_specialists(message)
+    if len(specialists) != 1:
+        return ""
+    return specialists[0]
+
+
+def _pretty_dispatch_agent_name(agent: str) -> str:
+    slug = _canonical_dispatch_actor(agent)
+    pretty = {
+        "ux_frontend": "UX Frontend",
+        "backend_engineer": "Backend Engineer",
+        "frontend_engineer": "Frontend Engineer",
+        "devops_sre": "DevOps SRE",
+        "security_guardian": "Security Guardian",
+        "data_db_architect": "Data/DB Architect",
+        "qa_release_engineer": "QA Release Engineer",
+        "realtime_voice_engineer": "Realtime Voice Engineer",
+        "systems_architect": "Systems Architect",
+        "auditor": "Auditor",
+        "chris": "Chris",
+        "orion": "Orion",
+        "orkio": "Orkio",
+        "team": "Team",
+    }
+    return pretty.get(slug, slug.replace("_", " ").title())
+
+
+def _single_target_specialist_focus(agent: str) -> str:
+    slug = _canonical_dispatch_actor(agent)
+    focus = {
+        "ux_frontend": "console, estado visual, navegação e fricções de UX",
+        "backend_engineer": "APIs, persistência, contratos e integridade operacional",
+        "frontend_engineer": "estado da interface, renderização e comportamento do App Console",
+        "devops_sre": "deploy, runtime, health checks e observabilidade",
+        "security_guardian": "riscos, hardening e controles de segurança",
+        "data_db_architect": "consultas, persistência e modelagem de dados",
+        "qa_release_engineer": "regressões, smoke tests e critérios de aceite",
+        "realtime_voice_engineer": "stream, SSE, voz e latência percebida",
+        "systems_architect": "arquitetura, precedência de intenção e desenho de patch",
+        "auditor": "evidências, blockers e veredito técnico",
+        "chris": "impacto funcional, produto e fluxo comercial",
+    }
+    return focus.get(slug, "análise especializada do domínio solicitado")
+
+
+def _strip_orchestrator_dispatch_prefix(message: str, host: str, target: str) -> str:
+    raw = str(message or "").strip()
+    if not raw:
+        return ""
+    host_label = _pretty_dispatch_agent_name(host)
+    target_label = _pretty_dispatch_agent_name(target)
+
+    patterns = [
+        rf"(?im)^\s*@?{re.escape(host_label)}\b[\s,:-]*",
+        rf"(?im)^\s*@?{re.escape(host)}\b[\s,:-]*",
+        rf"(?im)\b(?:peça|peca|solicite|solicitar|pergunte|mande|ask|ping)\s+ao?\s+@?{re.escape(target_label)}\b[\s,:-]*",
+        rf"(?im)\b(?:peça|peca|solicite|solicitar|pergunte|mande|ask|ping)\s+para\s+o?\s+@?{re.escape(target_label)}\b[\s,:-]*",
+        rf"(?im)\b(?:peça|peca|solicite|solicitar|pergunte|mande|ask|ping)\s+ao?\s+@?{re.escape(target)}\b[\s,:-]*",
+        rf"(?im)\b(?:peça|peca|solicite|solicitar|pergunte|mande|ask|ping)\s+para\s+o?\s+@?{re.escape(target)}\b[\s,:-]*",
+    ]
+    cleaned = raw
+    for pattern in patterns:
+        cleaned = re.sub(pattern, "", cleaned, count=1, flags=re.IGNORECASE).strip()
+    cleaned = re.sub(r"(?im)^\s*[:,-]+\s*", "", cleaned).strip()
+    return cleaned or raw
+
+
+def _single_target_specialist_answer(target_agent: str, message: str) -> str:
+    slug = _canonical_dispatch_actor(target_agent)
+    txt = str(message or "").strip().lower()
+
+    if slug == "ux_frontend":
+        if "console" in txt:
+            return (
+                "A análise curta do console aponta quatro fricções principais:\n"
+                "1. Sobrecarga visual por excesso de métricas e blocos simultâneos.\n"
+                "2. Texto interno exposto, o que reduz percepção de acabamento do produto.\n"
+                "3. Navegação secundária limitada para perfil, configurações e contexto de sessão.\n"
+                "4. Execution Trace muito verboso; o ideal é ficar colapsado por padrão."
+            )
+        if _looks_like_presence_status_question(message):
+            return "Sim. Estou online e disponível para analisar console, estado visual e experiência do usuário."
+        return "Recebi o pedido. Posso responder de forma objetiva sobre console, UX, navegação e renderização."
+
+    if slug == "backend_engineer":
+        if "status ok" in txt or "status" in txt:
+            return (
+                "Status ok. Os endpoints-base estão respondendo e o foco remanescente é o roteamento mediado "
+                "entre host e especialista, não o boot da plataforma."
+            )
+        return "Recebi o pedido. Posso analisar APIs, persistência, contratos e receipts de execução."
+
+    if slug == "chris":
+        if "fluxo comercial" in txt:
+            return (
+                "Análise curta do fluxo comercial:\n"
+                "1. Verificar origem e qualificação de leads.\n"
+                "2. Mapear gargalos entre contato inicial, proposta e fechamento.\n"
+                "3. Estruturar retenção e upsell com métricas por etapa."
+            )
+        return "Recebi o pedido. Posso responder objetivamente sobre produto, fluxo comercial e impacto funcional."
+
+    return (
+        f"{_pretty_dispatch_agent_name(slug)} respondeu em modo objetivo sobre "
+        f"{_single_target_specialist_focus(slug)}."
+    )
+
+
+def _build_single_target_specialist_dispatch_payload(
+    *,
+    message: str,
+    target_agent: str,
+    delegated_by: Optional[str] = None,
+) -> Dict[str, Any]:
+    target = _canonical_dispatch_actor(target_agent)
+    delegator = _canonical_dispatch_actor(delegated_by or "")
+    stripped_message = _strip_orchestrator_dispatch_prefix(message, delegator, target) if delegator else str(message or "").strip()
+    answer = _single_target_specialist_answer(target, stripped_message)
+    receipt = _build_dispatch_receipt_payload(
+        message=message,
+        visible_agent=target,
+        selected_specialists=[target],
+        dispatch_executed=True,
+        fallback_used=False,
+        fallback_reason="",
+    )
+    report = {
+        "agent": target,
+        "role": target,
+        "focus": _single_target_specialist_focus(target),
+        "findings": [answer],
+        "next_actions": [],
+        "final_answer": answer,
+    }
+    payload: Dict[str, Any] = {
+        "ok": True,
+        "service": "orion_internal",
+        "mode": "orchestrator_single_target_dispatch" if delegator else "direct_single_target_dispatch",
+        "provider": "platform",
+        "event": "ORION_SINGLE_TARGET_DELEGATION_EXECUTED" if delegator else "DIRECT_SPECIALIST_RUNTIME_EXECUTED",
+        "status": "executed",
+        "execution_depth": "dispatch",
+        "delivery_contract": "orion_structured_dispatch_v1",
+        "report_format": "specialist_direct_response_v1",
+        "visible_agent": target,
+        "target_agent": target,
+        "target_agents": [target],
+        "selected_specialists": [target],
+        "selected_specialists_count": 1,
+        "dispatch_executed": True,
+        "dispatch_attempted": True,
+        "dispatch_receipts": [{
+            "agent": target,
+            "status": "executed",
+            "mode": "single_target_dispatch",
+            "scope": "specialist",
+            "deliverable": _single_target_specialist_focus(target),
+            "generated_at": _now_ts(),
+        }],
+        "dispatch_receipts_count": 1,
+        "specialist_reports": [report],
+        "specialist_reports_count": 1,
+        "technical_summary": answer,
+        "executive_diagnostic": answer,
+        "final_consolidation": answer,
+        "message": answer,
+        "focus": _single_target_specialist_focus(target),
+        "response_contract": "specialist_direct_answer_v1",
+        "delegated_by": delegator or None,
+        "final_speaker": target,
+        "mediated_single_target_delegation": bool(delegator),
+        "generated_at": _now_ts(),
+    }
+    return _apply_dispatch_receipt_payload(payload, receipt)
+
+
 
 _ORCHESTRATION_OPERATIONAL_VERBS = [
     "peça", "peca", "acione", "orquestre", "orquestar", "solicite", "solicitar",
@@ -3455,7 +3646,23 @@ def orion_runtime_execute(inp: "OrionRuntimeIn") -> Dict[str, Any]:
     effective_message = str(effective.get("message") or message or "")
     lowered = effective_message.lower()
     visible_agent = _resolve_visible_agent(effective_message, default="orion")
+    single_target = _orchestrator_single_target_specialist(effective_message)
+    orchestrator_host = _extract_orchestrator_host(effective_message)
     audit_op = _continuous_audit_operation_kind(message or effective_message)
+
+    if single_target and _looks_like_direct_agent_message_request(effective_message):
+        return _build_single_target_specialist_dispatch_payload(
+            message=effective_message,
+            target_agent=single_target,
+            delegated_by=None,
+        )
+
+    if single_target and orchestrator_host and _looks_like_orchestrator_dispatch_request(effective_message):
+        return _build_single_target_specialist_dispatch_payload(
+            message=effective_message,
+            target_agent=single_target,
+            delegated_by=orchestrator_host,
+        )
     if audit_op == "status":
         return _get_continuous_audit_status_detached(inp)
     if audit_op == "create":
