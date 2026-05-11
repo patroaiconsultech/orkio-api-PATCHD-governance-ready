@@ -486,6 +486,180 @@ def _looks_like_presence_status_question(text: str) -> bool:
     return bool(is_presence_status_question_text(text))
 
 
+def _extract_direct_agent_target(text: str) -> str:
+    raw = str(text or "")
+    txt = _normalize(raw)
+    if not txt:
+        return ""
+    if _looks_like_team_roster_question(raw):
+        return ""
+    if _contains_any(txt, [
+        "quem está no time",
+        "quem esta no time",
+        "quais agentes",
+        "quantos agentes",
+        "lista de agentes",
+        "roster",
+    ]):
+        return ""
+
+    handles = [_canonical_dispatch_actor(item) for item in re.findall(r"@([A-Za-z0-9_\-]+)", raw, flags=re.IGNORECASE)]
+    handles = _dedupe_preserve([item for item in handles if item and item not in {"team", "time", "equipe", "board", "conselho"}])
+
+    # Menção direta a especialista deve ganhar precedência sobre roster/presença.
+    if len(handles) == 1 and handles[0] not in {"orion", "orkio", "chris"}:
+        return handles[0]
+
+    return ""
+
+
+def _looks_like_orchestrator_dispatch_readonly_request(text: str) -> bool:
+    raw = str(text or "")
+    txt = _normalize(raw)
+    if not txt:
+        return False
+    if _looks_like_team_roster_question(raw):
+        return False
+
+    has_dispatch_verb = _contains_any(txt, [
+        "peça",
+        "peca",
+        "acione",
+        "orquestre",
+        "orquestre os agentes",
+        "orquestre os especialistas",
+        "solicite",
+        "pergunte",
+        "mande",
+        "teste se eles respondem",
+        "teste se tu tens acesso",
+        "teste se eles conseguem receber",
+    ])
+    requested = _extract_requested_specialists_from_text(raw)
+    known = _extract_known_roster_agents_from_text(raw)
+    mentions_team = bool(re.search(r"@team\b|\bteam\b|\bequipe\b|\bsquad\b", raw, flags=re.IGNORECASE))
+    mentions_orchestrator = bool(re.search(r"@orion\b|@orkio\b|\borion\b|\borkio\b", raw, flags=re.IGNORECASE))
+    distinct_agents = _dedupe_preserve(list(requested or []) + list(known or []))
+
+    return bool(has_dispatch_verb and (mentions_team or mentions_orchestrator or len(distinct_agents) >= 2))
+
+
+def _build_direct_agent_message_payload(
+    *,
+    raw_user_input: str,
+    effective_user_input: str,
+    context: Dict[str, Any],
+    target_agent: str,
+) -> Dict[str, Any]:
+    governance_decision = evaluate_governance_action(
+        action_scope="read",
+        capability_name="direct_agent_message",
+        target_scope="platform",
+        context=context,
+        safe_mode=bool(context.get("safe_mode", False)),
+    )
+    runtime_op = {
+        "kind": "direct_agent_message",
+        "action_scope": "read",
+        "target_scope": "platform",
+        "capability_name": "direct_agent_message",
+        "template_id": "direct_agent_message_v1",
+        "admin_access_mode": "standard",
+        "requires_write_approval": False,
+        "execution_mode": "direct_agent_message",
+        "force_dispatch": False,
+        "dispatch_attempted": False,
+        "dispatch_executed": False,
+        "dispatch_receipt_id": None,
+        "fallback_used": False,
+        "fallback_reason": "",
+        "target_agent": target_agent,
+        "requested_specialists": [target_agent],
+        "expected_specialist_reports": [],
+    }
+    return {
+        "intent": "direct_agent_message",
+        "confidence": 0.995,
+        "recommended_agents": [target_agent],
+        "advisor_agents": [target_agent],
+        "runtime_operation": runtime_op,
+        "requires_runtime_execution": False,
+        "target_agent": target_agent,
+        "delivery_contract": "direct_agent_message_v1",
+        "template_id": "direct_agent_message_v1",
+        "structured_output": False,
+        "first_win_goal": "route_direct_agent_message",
+        "action_scope": "read",
+        "target_scope": "platform",
+        "capability_name": "direct_agent_message",
+        "governance_decision": governance_decision,
+        "allowed": bool(governance_decision.get("allowed")),
+        "requires_human_authorization": False,
+        "admin_access_mode": "standard",
+        "requires_write_approval": False,
+        "hard_constraints": _extract_hard_constraints(effective_user_input or raw_user_input or ""),
+        "requested_job_id": None,
+    }
+
+
+def _build_orchestrator_dispatch_readonly_payload(
+    *,
+    raw_user_input: str,
+    effective_user_input: str,
+    context: Dict[str, Any],
+) -> Dict[str, Any]:
+    governance_decision = evaluate_governance_action(
+        action_scope="read",
+        capability_name="orchestrator_dispatch_readonly",
+        target_scope="platform",
+        context=context,
+        safe_mode=bool(context.get("safe_mode", False)),
+    )
+    requested = _extract_requested_specialists_from_text(effective_user_input or raw_user_input or "")
+    runtime_op = {
+        "kind": "orchestrator_dispatch_readonly",
+        "action_scope": "read",
+        "target_scope": "platform",
+        "capability_name": "orchestrator_dispatch_readonly",
+        "template_id": "orchestrator_dispatch_readonly_v1",
+        "admin_access_mode": "standard",
+        "requires_write_approval": False,
+        "execution_mode": "orchestrator_dispatch_readonly",
+        "force_dispatch": False,
+        "dispatch_attempted": False,
+        "dispatch_executed": False,
+        "dispatch_receipt_id": None,
+        "fallback_used": False,
+        "fallback_reason": "",
+        "target_agent": "orion",
+        "requested_specialists": list(requested or []),
+        "expected_specialist_reports": list(requested or []),
+    }
+    return {
+        "intent": "orchestrator_dispatch_readonly",
+        "confidence": 0.995,
+        "recommended_agents": ["orion"],
+        "advisor_agents": _dedupe_preserve(["orion"] + list(requested or [])),
+        "runtime_operation": runtime_op,
+        "requires_runtime_execution": False,
+        "target_agent": "orion",
+        "delivery_contract": "orchestrator_dispatch_readonly_v1",
+        "template_id": "orchestrator_dispatch_readonly_v1",
+        "structured_output": True,
+        "first_win_goal": "route_orchestrator_dispatch_readonly",
+        "action_scope": "read",
+        "target_scope": "platform",
+        "capability_name": "orchestrator_dispatch_readonly",
+        "governance_decision": governance_decision,
+        "allowed": bool(governance_decision.get("allowed")),
+        "requires_human_authorization": False,
+        "admin_access_mode": "standard",
+        "requires_write_approval": False,
+        "hard_constraints": _extract_hard_constraints(effective_user_input or raw_user_input or ""),
+        "requested_job_id": None,
+    }
+
+
 def _looks_like_war_room_readonly_architecture_plan(text: str) -> bool:
     """
     EFATA777_WAR_ROOM_READONLY_PLAN_INTENT_PATCH:
@@ -1506,6 +1680,22 @@ def build_intent_package(
 
     if (not final_readonly_analysis_request) and _looks_like_war_room_readonly_architecture_plan(effective_user_input or raw_user_input or ""):
         return _build_war_room_readonly_architecture_plan_payload(
+            raw_user_input=raw_user_input,
+            effective_user_input=effective_user_input,
+            context=context,
+        )
+
+    direct_agent_target = _extract_direct_agent_target(effective_user_input or raw_user_input or "")
+    if direct_agent_target:
+        return _build_direct_agent_message_payload(
+            raw_user_input=raw_user_input,
+            effective_user_input=effective_user_input,
+            context=context,
+            target_agent=direct_agent_target,
+        )
+
+    if _looks_like_orchestrator_dispatch_readonly_request(effective_user_input or raw_user_input or ""):
+        return _build_orchestrator_dispatch_readonly_payload(
             raw_user_input=raw_user_input,
             effective_user_input=effective_user_input,
             context=context,
