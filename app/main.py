@@ -1985,12 +1985,18 @@ def _normalize_voice_id(raw: Optional[str], *, default: str = "cedar") -> str:
         return voice
     return (default or "cedar").strip().lower() or "cedar"
 
-def resolve_agent_voice(agent: Optional[Agent]) -> str:
+def resolve_agent_voice(agent: Optional[Any]) -> str:
     """
     Voice resolution priority:
     1) agent.voice_id from admin/database
     2) env fallback by canonical agent name
     3) global default realtime/tts voice
+
+    Important:
+    Agent rows may cross runtime/finalizer boundaries after the owning SQLAlchemy
+    session has already committed or been torn down. In that case, touching ORM
+    attributes directly can raise DetachedInstanceError. Always read through
+    _agent_attr(), which fail-opens for detached rows and also supports dict snapshots.
     """
     default_voice = _normalize_voice_id(
         (os.getenv("OPENAI_REALTIME_VOICE_DEFAULT", "") or os.getenv("OPENAI_TTS_VOICE_DEFAULT", "cedar")),
@@ -2000,14 +2006,14 @@ def resolve_agent_voice(agent: Optional[Agent]) -> str:
     if not agent:
         return default_voice
 
-    agent_name = ((getattr(agent, "name", None) or "")).strip().lower()
+    agent_name = str(_agent_attr(agent, "name", "") or "").strip().lower()
     env_map = {
         "orkio": os.getenv("ORKIO_VOICE_ID", "").strip(),
         "chris": os.getenv("CHRIS_VOICE_ID", "").strip(),
         "orion": os.getenv("ORION_VOICE_ID", "").strip(),
     }
 
-    db_voice = (getattr(agent, "voice_id", None) or "").strip()
+    db_voice = str(_agent_attr(agent, "voice_id", "") or "").strip()
     env_voice = env_map.get(agent_name, "")
     return _normalize_voice_id(db_voice or env_voice or default_voice, default=default_voice)
 
