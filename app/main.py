@@ -10791,6 +10791,22 @@ def _build_orchestrator_dispatch_readonly_answer_text(
     ])
 
 
+def _orchestrator_single_target_agent(
+    receipt: Optional[Dict[str, Any]],
+) -> str:
+    r = dict(receipt or {})
+    targets = [str(x or "").strip() for x in list(r.get("target_agents") or []) if str(x or "").strip()]
+    if len(targets) == 1:
+        return targets[0]
+    target = str(r.get("target_agent") or "").strip()
+    if target and target.lower() not in {"orion", "orkio", "team", "time"}:
+        return target
+    final_speaker = str(r.get("final_speaker") or "").strip()
+    if final_speaker and final_speaker.lower() not in {"orion", "orkio", "team", "time"}:
+        return final_speaker
+    return ""
+
+
 def _should_block_roster_fallback(
     user_text: str,
     *,
@@ -15548,6 +15564,29 @@ def _build_analytical_final_readonly_prompt(
     )
 
 
+def _match_runtime_target_agent(
+    target_agents: List[Any],
+    candidate: Optional[str],
+) -> Optional[Any]:
+    lookup = str(candidate or "").strip().lower()
+    if not lookup:
+        return None
+
+    def _agent_name(ag: Any) -> str:
+        if isinstance(ag, dict):
+            return str(ag.get("name") or "").strip().lower()
+        return str(getattr(ag, "name", "") or "").strip().lower()
+
+    for ag in target_agents or []:
+        name = _agent_name(ag)
+        first = name.split()[0] if name else ""
+        canonical = _canonical_dispatch_specialist_slug(name) or ""
+        lookup_slug = _canonical_dispatch_specialist_slug(lookup) or lookup
+        if lookup == name or lookup == first or lookup_slug == canonical:
+            return ag
+    return None
+
+
 def _pick_runtime_primary_agent(
     target_agents: List[Any],
     requested_names: Optional[List[str]] = None,
@@ -15559,6 +15598,7 @@ def _pick_runtime_primary_agent(
     requested_norm = [str(x).strip().lower() for x in (requested_names or []) if str(x).strip()]
     hard_constraints = _runtime_hard_constraints_from_enrichment(runtime_enrichment)
     required_signer = str(hard_constraints.get("required_signer") or "").strip().lower()
+    host_aliases = {"orion", "orkio", "chris", "team", "time"}
 
     def _agent_name(ag: Any) -> str:
         if isinstance(ag, dict):
@@ -15573,14 +15613,24 @@ def _pick_runtime_primary_agent(
         return candidate == name or candidate == first or candidate_slug == canonical
 
     if required_signer:
-        for ag in target_agents:
-            if _matches(ag, required_signer):
-                return ag
+        matched_required = _match_runtime_target_agent(target_agents, required_signer)
+        if matched_required is not None:
+            return matched_required
+
+    non_host_requested = [
+        req for req in requested_norm
+        if (_canonical_dispatch_specialist_slug(req) or req) not in host_aliases
+    ]
+    if non_host_requested and any((_canonical_dispatch_specialist_slug(req) or req) in host_aliases for req in requested_norm):
+        for req in non_host_requested:
+            matched = _match_runtime_target_agent(target_agents, req)
+            if matched is not None:
+                return matched
 
     for req in requested_norm:
-        for ag in target_agents:
-            if _matches(ag, req):
-                return ag
+        matched = _match_runtime_target_agent(target_agents, req)
+        if matched is not None:
+            return matched
 
     preferred = ("orion", "orkio", "chris")
     for pref in preferred:
@@ -15589,7 +15639,6 @@ def _pick_runtime_primary_agent(
                 return ag
 
     return target_agents[0]
-
 
 def _agent_attr(ag: Any, field: str, default: Any = None) -> Any:
     if ag is None:
@@ -15793,6 +15842,17 @@ def chat(
             mention_tokens = ["orion"]
             has_team = False
 
+    mediated_specialists = _dispatch_request_specialists(
+        requested_names=requested_names,
+        mention_tokens=mention_tokens,
+    )
+    mediated_specialists_present = bool(mediated_specialists)
+    if mediated_specialists_present:
+        try:
+            orion_only_flags["requested"] = False
+        except Exception:
+            pass
+
     if orion_only_flags.get("requested") and not team_technical_audit:
         forced_orion_agent = (
             forced_orion_agent
@@ -15870,7 +15930,12 @@ def chat(
             requested_names = ["orion", "auditor", "cto"]
             mention_tokens = ["orion", "team"]
             has_team = True
-    if orion_only_flags.get("requested") and forced_orion_agent is not None and not team_technical_audit:
+    if (
+        orion_only_flags.get("requested")
+        and forced_orion_agent is not None
+        and not team_technical_audit
+        and not mediated_specialists_present
+    ):
         target_agents = [forced_orion_agent]
         requested_names = ["orion"]
         mention_tokens = ["orion"]
@@ -16258,7 +16323,44 @@ def chat(
                 if intent_name_live_sync == "direct_agent_message" or bool(dispatch_routing_receipt.get("direct_agent_message")):
                     capability_inventory_answer = None
                 elif intent_name_live_sync == "orchestrator_dispatch_readonly" or bool(dispatch_routing_receipt.get("orchestrator_dispatch")):
-                    capability_inventory_answer = None
+                    delegated_target = _orchestrator_single_target_agent(dispatch_routing_receipt)
+                    if delegated_target:
+                        delegated_agent = _match_runtime_target_agent(target_agents, delegated_target)
+                        if delegated_agent is not None:
+                            runtime_primary_agent = delegated_agent
+                            final_signer_agent = delegated_agent
+                            final_signer_agent_id = _agent_attr(delegated_agent, "id", None)
+                            final_signer_agent_name = _agent_attr(delegated_agent, "name", None) or delegated_target
+                            final_signer_voice_id = resolve_agent_voice(final_signer_agent) if final_signer_agent else final_signer_voice_id
+                            final_signer_avatar_url = _agent_attr(final_signer_agent, "avatar_url", None)
+                            try:
+                                if isinstance(runtime_enrichment, dict):
+                                    dag_snapshot_live = dict((runtime_enrichment.get("dag_snapshot") or {}))
+                                    dag_snapshot_live["runtime_primary_agent_id"] = final_signer_agent_id
+                                    dag_snapshot_live["runtime_primary_agent_name"] = final_signer_agent_name
+                                    dag_snapshot_live["final_signer_agent_id"] = final_signer_agent_id
+                                    dag_snapshot_live["final_signer_agent_name"] = final_signer_agent_name
+                                    runtime_enrichment["dag_snapshot"] = dag_snapshot_live
+                            except Exception:
+                                pass
+                        dispatch_routing_receipt["delegated_by"] = (
+                            dispatch_routing_receipt.get("visible_agent") or "orion"
+                        )
+                        dispatch_routing_receipt["final_speaker"] = (
+                            final_signer_agent_name if delegated_agent is not None else delegated_target
+                        )
+                        dispatch_routing_receipt["visible_agent"] = (
+                            final_signer_agent_name if delegated_agent is not None else delegated_target
+                        )
+                        dispatch_routing_receipt["target_agent"] = delegated_target
+                        dispatch_routing_receipt["mediated_single_target_delegation"] = True
+                        capability_inventory_answer = _build_direct_agent_message_answer_text(
+                            inp.message,
+                            target_agent=delegated_target,
+                            visible_agent=delegated_target,
+                        )
+                    else:
+                        capability_inventory_answer = None
                 elif _is_multiagent_audit_readonly_request(inp.message) or intent_name_live_sync == "multiagent_audit_readonly":
                     capability_inventory_answer = _build_multiagent_audit_readonly_answer_text(inp.message)
                 elif intent_name_live_sync == "presence_status_answer" or (_is_presence_status_question_request(inp.message) and not bool(dispatch_routing_receipt.get("direct_agent_message"))):
@@ -21286,7 +21388,50 @@ async def chat_stream(
                         if intent_name_live_stream == "direct_agent_message" or bool(dispatch_routing_receipt_stream.get("direct_agent_message")):
                             capability_inventory_answer = None
                         elif intent_name_live_stream == "orchestrator_dispatch_readonly" or bool(dispatch_routing_receipt_stream.get("orchestrator_dispatch")):
-                            capability_inventory_answer = None
+                            delegated_target = _orchestrator_single_target_agent(dispatch_routing_receipt_stream)
+                            if delegated_target:
+                                delegated_agent = _match_runtime_target_agent(target_agents, delegated_target)
+                                if delegated_agent is not None:
+                                    runtime_primary_agent = delegated_agent
+                                    final_signer_agent = delegated_agent
+                                    final_signer_agent_id = _agent_attr(delegated_agent, "id", None)
+                                    final_signer_agent_name = _agent_attr(delegated_agent, "name", None) or delegated_target
+                                    final_signer_voice_id = resolve_agent_voice(final_signer_agent) if final_signer_agent else final_signer_voice_id
+                                    final_signer_avatar_url = _agent_attr(final_signer_agent, "avatar_url", None)
+                                    try:
+                                        if isinstance(route_debug_payload, dict):
+                                            route_debug_payload["runtime_primary_agent"] = final_signer_agent_name
+                                            route_debug_payload["final_signer_agent"] = final_signer_agent_name
+                                    except Exception:
+                                        pass
+                                    try:
+                                        if isinstance(runtime_enrichment, dict):
+                                            dag_snapshot_live = dict((runtime_enrichment.get("dag_snapshot") or {}))
+                                            dag_snapshot_live["runtime_primary_agent_id"] = final_signer_agent_id
+                                            dag_snapshot_live["runtime_primary_agent_name"] = final_signer_agent_name
+                                            dag_snapshot_live["final_signer_agent_id"] = final_signer_agent_id
+                                            dag_snapshot_live["final_signer_agent_name"] = final_signer_agent_name
+                                            runtime_enrichment["dag_snapshot"] = dag_snapshot_live
+                                    except Exception:
+                                        pass
+                                dispatch_routing_receipt_stream["delegated_by"] = (
+                                    dispatch_routing_receipt_stream.get("visible_agent") or "orion"
+                                )
+                                dispatch_routing_receipt_stream["final_speaker"] = (
+                                    final_signer_agent_name if delegated_agent is not None else delegated_target
+                                )
+                                dispatch_routing_receipt_stream["visible_agent"] = (
+                                    final_signer_agent_name if delegated_agent is not None else delegated_target
+                                )
+                                dispatch_routing_receipt_stream["target_agent"] = delegated_target
+                                dispatch_routing_receipt_stream["mediated_single_target_delegation"] = True
+                                capability_inventory_answer = _build_direct_agent_message_answer_text(
+                                    message,
+                                    target_agent=delegated_target,
+                                    visible_agent=delegated_target,
+                                )
+                            else:
+                                capability_inventory_answer = None
                         elif _is_multiagent_audit_readonly_request(message) or intent_name_live_stream == "multiagent_audit_readonly":
                             capability_inventory_answer = _build_multiagent_audit_readonly_answer_text(message)
                         elif intent_name_live_stream == "presence_status_answer" or (_is_presence_status_question_request(message) and not bool(dispatch_routing_receipt_stream.get("direct_agent_message"))):
