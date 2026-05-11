@@ -9734,8 +9734,6 @@ def _build_presence_status_answer_text(user_text: str = "") -> str:
 _READONLY_RECEIPT_INTENTS = {
     "presence_status_answer",
     "team_roster_answer",
-    "direct_agent_message",
-    "orchestrator_dispatch_readonly",
     "model_resolution_answer",
     "multiagent_audit_readonly",
     "governance_capability_answer",
@@ -9804,8 +9802,6 @@ def _runtime_readonly_receipt_intent(
             or _runtime_receipt_extract_field(runtime_enrichment, "capability_name")
             or _runtime_receipt_extract_field(runtime_enrichment, "delivery_contract")
         ).lower()
-        if routing_intent in {"direct_agent_message", "orchestrator_dispatch_readonly"}:
-            return routing_intent
 
         direct_hint = bool(_runtime_receipt_extract_field(runtime_enrichment, "direct_agent_message"))
         orchestrator_hint = bool(
@@ -9815,9 +9811,9 @@ def _runtime_readonly_receipt_intent(
         target_hint = _runtime_receipt_clean(_runtime_receipt_extract_field(runtime_enrichment, "target_agent"))
         target_list_hint = _runtime_receipt_list(_runtime_receipt_extract_field(runtime_enrichment, "target_agents"))
         if direct_hint or target_hint:
-            return "direct_agent_message"
-        if orchestrator_hint and len(target_list_hint) > 1:
-            return "orchestrator_dispatch_readonly"
+            return ""
+        if orchestrator_hint and target_list_hint:
+            return ""
 
         if _is_multiagent_audit_readonly_request(text):
             return "multiagent_audit_readonly"
@@ -16260,16 +16256,9 @@ def chat(
             try:
                 intent_name_live_sync = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
                 if intent_name_live_sync == "direct_agent_message" or bool(dispatch_routing_receipt.get("direct_agent_message")):
-                    capability_inventory_answer = _build_direct_agent_message_answer_text(
-                        inp.message,
-                        target_agent=str(dispatch_routing_receipt.get("target_agent") or ""),
-                        visible_agent=str(dispatch_routing_receipt.get("visible_agent") or ""),
-                    )
+                    capability_inventory_answer = None
                 elif intent_name_live_sync == "orchestrator_dispatch_readonly" or bool(dispatch_routing_receipt.get("orchestrator_dispatch")):
-                    capability_inventory_answer = _build_orchestrator_dispatch_readonly_answer_text(
-                        inp.message,
-                        target_agents=list(dispatch_routing_receipt.get("target_agents") or []),
-                    )
+                    capability_inventory_answer = None
                 elif _is_multiagent_audit_readonly_request(inp.message) or intent_name_live_sync == "multiagent_audit_readonly":
                     capability_inventory_answer = _build_multiagent_audit_readonly_answer_text(inp.message)
                 elif intent_name_live_sync == "presence_status_answer" or (_is_presence_status_question_request(inp.message) and not bool(dispatch_routing_receipt.get("direct_agent_message"))):
@@ -21266,16 +21255,9 @@ async def chat_stream(
                     try:
                         intent_name_live_stream = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
                         if intent_name_live_stream == "direct_agent_message" or bool(dispatch_routing_receipt_stream.get("direct_agent_message")):
-                            capability_inventory_answer = _build_direct_agent_message_answer_text(
-                                message,
-                                target_agent=str(dispatch_routing_receipt_stream.get("target_agent") or ""),
-                                visible_agent=str(dispatch_routing_receipt_stream.get("visible_agent") or ""),
-                            )
+                            capability_inventory_answer = None
                         elif intent_name_live_stream == "orchestrator_dispatch_readonly" or bool(dispatch_routing_receipt_stream.get("orchestrator_dispatch")):
-                            capability_inventory_answer = _build_orchestrator_dispatch_readonly_answer_text(
-                                message,
-                                target_agents=list(dispatch_routing_receipt_stream.get("target_agents") or []),
-                            )
+                            capability_inventory_answer = None
                         elif _is_multiagent_audit_readonly_request(message) or intent_name_live_stream == "multiagent_audit_readonly":
                             capability_inventory_answer = _build_multiagent_audit_readonly_answer_text(message)
                         elif intent_name_live_stream == "presence_status_answer" or (_is_presence_status_question_request(message) and not bool(dispatch_routing_receipt_stream.get("direct_agent_message"))):
