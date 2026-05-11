@@ -20182,16 +20182,45 @@ def _build_execution_planner_adjustment(review: Dict[str, Any]) -> Dict[str, Any
 
 def _apply_explicit_agent_request(db: Session, org: str, target_agents: List[Any], requested_names: Optional[List[str]]) -> List[Any]:
     """Force explicit specialist execution for chat/chat_stream.
-    - If the user explicitly asks for Orion/Chris/Orkio, prefer those agents.
-    - When multiple specialists are requested, do not keep host-only fallback.
-    - Preserve the explicit order requested by the user.
+
+    Rules:
+    - Preserve explicit order whenever possible.
+    - If the request mixes a host/orchestrator mention with one or more specialists,
+      prefer the specialists and remove the host from the execution order.
+    - If the request is only for the host/orchestrator, keep the host.
     """
     requested_names = [str(x).strip() for x in (requested_names or []) if str(x).strip()]
     if not requested_names:
         return target_agents
 
     requested_norm = [x.lower() for x in requested_names]
-    requested_set = set(requested_norm)
+
+    HOST_ALIASES = {
+        "orion",
+        "chris",
+        "orkio",
+        "miguel",
+        "uriel",
+        "rafael",
+        "gabriel",
+        "metatron",
+        "saint germain",
+        "saint_germain",
+    }
+
+    def _is_host_name(name: str) -> bool:
+        raw = str(name or "").strip().lower()
+        if not raw:
+            return False
+        first = raw.split()[0] if raw.split() else raw
+        return raw in HOST_ALIASES or first in HOST_ALIASES
+
+    has_host_request = any(_is_host_name(x) for x in requested_norm)
+    has_specialist_request = any(not _is_host_name(x) for x in requested_norm)
+
+    effective_requested_norm = list(requested_norm)
+    if has_host_request and has_specialist_request:
+        effective_requested_norm = [x for x in requested_norm if not _is_host_name(x)]
 
     def _agent_name(ag: Any) -> str:
         if isinstance(ag, dict):
@@ -20211,7 +20240,7 @@ def _apply_explicit_agent_request(db: Session, org: str, target_agents: List[Any
     ordered: List[Any] = []
     seen_ids: set = set()
 
-    for req in requested_norm:
+    for req in effective_requested_norm:
         ag = by_name.get(req)
         if ag is None:
             continue
@@ -20220,12 +20249,12 @@ def _apply_explicit_agent_request(db: Session, org: str, target_agents: List[Any
             ordered.append(ag)
             seen_ids.add(agid)
 
-    if len(ordered) != len(requested_names):
+    if len(ordered) != len(effective_requested_norm):
         fallback_agents = list(
             db.execute(
                 select(Agent).where(
                     Agent.org_slug == org,
-                    func.lower(Agent.name).in_(requested_norm),
+                    func.lower(Agent.name).in_(effective_requested_norm),
                 )
             ).scalars().all()
         )
@@ -22563,36 +22592,19 @@ async def orchestrate(
                 ans_obj = await llm_task
             except Exception as e:
                 try:
-                    yield sse_event("error", {"agent_id": ag_id, "agent_name": ag_name, "message": str(e), "trace_id": trace_id})
+                    yield sse_event("error", {"agent_id": ag_id, "message": str(e), "trace_id": trace_id})
+                    yield sse_event("agent_done", {"done": True, "agent_id": ag_id, "trace_id": trace_id})
                 except Exception:
                     return
-                ans_obj = {
-                    "text": (
-                        f"{ag_name}: não consegui concluir esta etapa agora por uma falha operacional controlada. "
-                        "Estou registrando o incidente para não deixar o chat sem resposta útil. "
-                        "Tente novamente em instantes."
-                    ),
-                    "usage": None,
-                    "model": None,
-                    "code": "AGENT_STREAM_FAILOPEN",
-                    "error": str(e),
-                }
+                continue
 
             if not ans_obj or not (ans_obj.get("text") or "").strip():
                 try:
-                    yield sse_event("error", {"agent_id": ag_id, "agent_name": ag_name, "message": "Empty response", "trace_id": trace_id})
+                    yield sse_event("error", {"agent_id": ag_id, "message": "Empty response", "trace_id": trace_id})
+                    yield sse_event("agent_done", {"done": True, "agent_id": ag_id, "trace_id": trace_id})
                 except Exception:
                     return
-                ans_obj = {
-                    "text": (
-                        f"{ag_name}: o provider retornou vazio nesta tentativa. "
-                        "Estou emitindo uma falha controlada para evitar silêncio no chat."
-                    ),
-                    "usage": None,
-                    "model": None,
-                    "code": "EMPTY_RESPONSE_FAILOPEN",
-                    "error": "Empty response",
-                }
+                continue
 
             ans = _apply_truthful_execution_mode((ans_obj.get("text") or "").strip(), execution_result=None)
 
