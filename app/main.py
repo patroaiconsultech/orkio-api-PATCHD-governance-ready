@@ -5237,6 +5237,7 @@ def register(inp: RegisterIn, request: Request = None, x_org_slug: Optional[str]
 
 @app.post("/api/auth/login")
 def login(inp: LoginIn, x_org_slug: Optional[str] = Header(default=None), db: Session = Depends(get_db), request: Request = None):
+    login_started_at = time.perf_counter()
     ip = (request.client.host if request and request.client else "unknown")
     # F-10 FIX: rate limit brute-force
     if not _rate_limit_check(_login_rl_lock, _login_rl_calls, ip, _LOGIN_MAX_PER_MINUTE):
@@ -5247,6 +5248,13 @@ def login(inp: LoginIn, x_org_slug: Optional[str] = Header(default=None), db: Se
     u = db.execute(select(User).where(User.org_slug == org, User.email == email)).scalar_one_or_none()
     if not u or not verify_password(inp.password, u.salt, u.pw_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
+
+    logger.warning(
+        "LOGIN_PASSWORD_OK email=%s org=%s elapsed_ms=%s",
+        email,
+        org,
+        int((time.perf_counter() - login_started_at) * 1000),
+    )
 
     # PATCH0216C: structural admin sync (role + approved_at) for configured emails
     try:
@@ -5298,11 +5306,13 @@ def login(inp: LoginIn, x_org_slug: Optional[str] = Header(default=None), db: Se
             db.commit()
 
             # Send email (fail-closed by default so the UI does not ask for a code that was never delivered)
+            otp_send_started_at = time.perf_counter()
             logger.warning(
-                "OTP_SEND_ATTEMPT email=%s summit_mode=%s require_otp=%s",
+                "OTP_SEND_ATTEMPT email=%s summit_mode=%s require_otp=%s elapsed_ms=%s",
                 email,
                 SUMMIT_MODE,
                 os.getenv("SUMMIT_REQUIRE_OTP"),
+                int((otp_send_started_at - login_started_at) * 1000),
             )
 
             sent = False
@@ -5311,7 +5321,13 @@ def login(inp: LoginIn, x_org_slug: Optional[str] = Header(default=None), db: Se
             except Exception as send_exc:
                 logger.exception("OTP_SEND_EXCEPTION email=%s error=%s", email, str(send_exc))
 
-            logger.warning("OTP_SEND_RESULT email=%s sent=%s", email, sent)
+            logger.warning(
+                "OTP_SEND_RESULT email=%s sent=%s otp_send_ms=%s total_login_ms=%s",
+                email,
+                sent,
+                int((time.perf_counter() - otp_send_started_at) * 1000),
+                int((time.perf_counter() - login_started_at) * 1000),
+            )
 
             if not sent and os.getenv("SUMMIT_OTP_FAIL_OPEN", "false").lower() not in ("1", "true", "yes"):
                 logger.error("OTP_FAIL_CLOSED_TRIGGERED email=%s", email)
@@ -5327,6 +5343,12 @@ def login(inp: LoginIn, x_org_slug: Optional[str] = Header(default=None), db: Se
             # Fail-open: allow login without OTP only if explicitly configured
             if os.getenv("SUMMIT_OTP_FAIL_OPEN", "false").lower() not in ("1", "true", "yes"):
                 raise HTTPException(status_code=500, detail="Falha ao enviar código de verificação. Tente novamente.")
+        logger.warning(
+            "LOGIN_PENDING_OTP_RETURN email=%s org=%s total_login_ms=%s",
+            email,
+            org,
+            int((time.perf_counter() - login_started_at) * 1000),
+        )
         return {"pending_otp": True, "message": "Enviamos um código de verificação para seu e-mail. Digite-o para continuar.", "email": email, "tenant": org}
 
     response = _build_fresh_auth_response(db, org, u.id, usage_tier=usage_tier, auth_context="login")
@@ -5335,6 +5357,13 @@ def login(inp: LoginIn, x_org_slug: Optional[str] = Header(default=None), db: Se
 
     # Create user session for presence tracking
     _create_user_session(db, u.id, org, ip, getattr(u, "signup_code_label", None), usage_tier)
+
+    logger.warning(
+        "LOGIN_SUCCESS_RETURN email=%s org=%s total_login_ms=%s",
+        email,
+        org,
+        int((time.perf_counter() - login_started_at) * 1000),
+    )
 
     return response
 
@@ -9760,13 +9789,33 @@ def _runtime_readonly_receipt_intent(
 
     text = user_text or ""
     try:
+        routing_intent = _runtime_receipt_clean(
+            _runtime_receipt_extract_field(runtime_enrichment, "intent")
+            or _runtime_receipt_extract_field(runtime_enrichment, "capability_name")
+            or _runtime_receipt_extract_field(runtime_enrichment, "delivery_contract")
+        ).lower()
+        if routing_intent in {"direct_agent_message", "orchestrator_dispatch_readonly"}:
+            return routing_intent
+
+        direct_hint = bool(_runtime_receipt_extract_field(runtime_enrichment, "direct_agent_message"))
+        orchestrator_hint = bool(
+            _runtime_receipt_extract_field(runtime_enrichment, "orchestrator_dispatch")
+            or _runtime_receipt_extract_field(runtime_enrichment, "dispatch_attempted")
+        )
+        target_hint = _runtime_receipt_clean(_runtime_receipt_extract_field(runtime_enrichment, "target_agent"))
+        target_list_hint = _runtime_receipt_list(_runtime_receipt_extract_field(runtime_enrichment, "target_agents"))
+        if direct_hint or target_hint:
+            return "direct_agent_message"
+        if orchestrator_hint and len(target_list_hint) > 1:
+            return "orchestrator_dispatch_readonly"
+
         if _is_multiagent_audit_readonly_request(text):
             return "multiagent_audit_readonly"
-        if is_presence_status_question_text(text):
+        if is_presence_status_question_text(text) and not (direct_hint or target_hint):
             return "presence_status_answer"
         if _is_model_resolution_question_request(text):
             return "model_resolution_answer"
-        if is_team_roster_question_text(text):
+        if is_team_roster_question_text(text) and not (direct_hint or target_hint or orchestrator_hint):
             return "team_roster_answer"
         if is_war_room_readonly_architecture_plan_text(text):
             return "war_room_readonly_architecture_plan"
@@ -10344,6 +10393,257 @@ def _build_team_roster_answer_text(user_text: str = "") -> str:
             f"Temos {len(core)} especialistas no squad operacional padrão:",
             *[f"- {name}" for name in core],
         ])
+
+
+
+_DISPATCH_OPERATIONAL_VERBS = [
+    "peça", "peca", "acione", "orquestre", "orquestar", "solicite", "solicitar",
+    "pergunte", "mande", "teste se", "teste", "dispatch", "orchestrate", "ask",
+    "ping", "check if", "status ok", "estás online", "esta online", "está online", "is online",
+]
+
+
+def _dispatch_request_specialists(
+    *,
+    requested_names: Optional[List[str]] = None,
+    mention_tokens: Optional[List[str]] = None,
+) -> List[str]:
+    host_tokens = {"team", "time", "equipe", "board", "conselho", "orion", "orkio"}
+    names: List[str] = []
+    for item in list(requested_names or []):
+        slug = _canonical_dispatch_specialist_slug(item)
+        if slug and slug not in host_tokens and slug not in names:
+            names.append(slug)
+    for item in list(mention_tokens or []):
+        slug = _canonical_dispatch_specialist_slug(item)
+        if slug and slug not in host_tokens and slug not in names:
+            names.append(slug)
+    return names
+
+
+def _looks_like_dispatch_operational_request(
+    user_text: str,
+    *,
+    requested_names: Optional[List[str]] = None,
+    mention_tokens: Optional[List[str]] = None,
+    has_team: bool = False,
+) -> bool:
+    txt = str(user_text or "").strip().lower()
+    if not txt:
+        return False
+    if _is_team_roster_question_request(user_text):
+        return False
+    mentions = [str(x or "").strip().lower() for x in list(mention_tokens or []) if str(x or "").strip()]
+    requested = [str(x or "").strip().lower() for x in list(requested_names or []) if str(x or "").strip()]
+    specialists = _dispatch_request_specialists(requested_names=requested_names, mention_tokens=mention_tokens)
+    explicit_handle = bool(re.search(r"@[A-Za-z0-9_][A-Za-z0-9_\-]*(?:\s+[A-Za-z0-9_][A-Za-z0-9_\-]*)?", str(user_text or "")))
+    has_operational_verb = any(term in txt for term in _DISPATCH_OPERATIONAL_VERBS) or _is_presence_status_question_request(user_text)
+    multi_target = bool(len(specialists) > 1 or (has_team and len(specialists) != 1))
+    return bool((explicit_handle or mentions or requested or specialists or multi_target) and (has_operational_verb or multi_target))
+
+
+def _looks_like_direct_agent_message_request(
+    user_text: str,
+    *,
+    requested_names: Optional[List[str]] = None,
+    mention_tokens: Optional[List[str]] = None,
+    has_team: bool = False,
+) -> bool:
+    specialists = _dispatch_request_specialists(requested_names=requested_names, mention_tokens=mention_tokens)
+    if len(specialists) != 1:
+        return False
+    return bool(_looks_like_dispatch_operational_request(
+        user_text,
+        requested_names=requested_names,
+        mention_tokens=mention_tokens,
+        has_team=False,
+    ))
+
+
+def _looks_like_orchestrator_dispatch_request(
+    user_text: str,
+    *,
+    requested_names: Optional[List[str]] = None,
+    mention_tokens: Optional[List[str]] = None,
+    has_team: bool = False,
+) -> bool:
+    requested = [str(x or "").strip() for x in list(requested_names or []) if str(x or "").strip()]
+    mentions = [str(x or "").strip().lower() for x in list(mention_tokens or []) if str(x or "").strip()]
+    specialists = _dispatch_request_specialists(requested_names=requested_names, mention_tokens=mention_tokens)
+    has_host = any(tok in {"orion", "orkio", "team", "time"} for tok in mentions) or any(
+        _canonical_dispatch_specialist_slug(x) in {"orion", "orkio"} for x in requested
+    )
+    return bool(
+        _looks_like_dispatch_operational_request(
+            user_text,
+            requested_names=requested_names,
+            mention_tokens=mention_tokens,
+            has_team=has_team,
+        )
+        and (has_team or len(specialists) > 1 or (has_host and len(specialists) >= 1))
+    )
+
+
+def _freeze_dispatch_targets(
+    db: Session,
+    org: str,
+    target_agents: List[Any],
+    *,
+    requested_names: Optional[List[str]],
+    mention_tokens: Optional[List[str]],
+    has_team: bool,
+    user_text: str,
+) -> List[Any]:
+    if not target_agents:
+        return target_agents
+    if _looks_like_direct_agent_message_request(
+        user_text,
+        requested_names=requested_names,
+        mention_tokens=mention_tokens,
+        has_team=has_team,
+    ):
+        explicit = _apply_explicit_agent_request(db, org, list(target_agents or []), list(requested_names or []))
+        if explicit:
+            return explicit[:1]
+    if _looks_like_orchestrator_dispatch_request(
+        user_text,
+        requested_names=requested_names,
+        mention_tokens=mention_tokens,
+        has_team=has_team,
+    ):
+        explicit = _apply_explicit_agent_request(db, org, list(target_agents or []), list(requested_names or []))
+        if explicit:
+            return explicit
+    return target_agents
+
+
+def _build_dispatch_routing_receipt(
+    *,
+    user_text: str,
+    requested_names: Optional[List[str]],
+    mention_tokens: Optional[List[str]],
+    has_team: bool,
+    target_agents: Optional[List[Any]],
+    visible_agent: Optional[str] = None,
+    dispatch_executed: bool = False,
+    fallback_used: bool = False,
+    fallback_reason: str = "",
+    intent: str = "",
+) -> Dict[str, Any]:
+    targets: List[str] = []
+    for ag in list(target_agents or []):
+        if isinstance(ag, dict):
+            name = str(ag.get("name") or ag.get("slug") or "").strip()
+        else:
+            name = str(getattr(ag, "name", None) or getattr(ag, "slug", None) or "").strip()
+        if name:
+            targets.append(name)
+    requested = [str(x or "").strip() for x in list(requested_names or []) if str(x or "").strip()]
+    mentions = [str(x or "").strip() for x in list(mention_tokens or []) if str(x or "").strip()]
+    requested_specialists = _dispatch_request_specialists(
+        requested_names=requested_names,
+        mention_tokens=mention_tokens,
+    )
+    direct_agent_message = _looks_like_direct_agent_message_request(
+        user_text,
+        requested_names=requested_names,
+        mention_tokens=mention_tokens,
+        has_team=has_team,
+    )
+    orchestrator_dispatch = _looks_like_orchestrator_dispatch_request(
+        user_text,
+        requested_names=requested_names,
+        mention_tokens=mention_tokens,
+        has_team=has_team,
+    )
+    dispatch_attempted = bool(direct_agent_message or orchestrator_dispatch)
+    target_agent = targets[0] if len(targets) == 1 else (requested_specialists[0] if len(requested_specialists) == 1 else "")
+    visible = str(visible_agent or target_agent or (requested_specialists[0] if len(requested_specialists) == 1 else "") or "").strip()
+    return {
+        "intent": str(intent or "").strip(),
+        "visible_agent": visible,
+        "target_agent": target_agent,
+        "target_agents": targets,
+        "requested_names": requested,
+        "mention_tokens": mentions,
+        "has_team": bool(has_team),
+        "direct_agent_message": bool(direct_agent_message),
+        "orchestrator_dispatch": bool(orchestrator_dispatch),
+        "dispatch_attempted": bool(dispatch_attempted),
+        "dispatch_executed": bool(dispatch_executed),
+        "dispatch_receipt_id": (f"dispatch_{new_id()[:12]}" if dispatch_attempted else None),
+        "fallback_used": bool(fallback_used),
+        "fallback_reason": str(fallback_reason or "").strip(),
+    }
+
+
+def _merge_dispatch_routing_receipt(
+    runtime_hints: Optional[Dict[str, Any]],
+    receipt: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    merged = dict(runtime_hints or {})
+    for key, value in dict(receipt or {}).items():
+        merged[key] = value
+    return merged
+
+
+def _build_direct_agent_message_answer_text(
+    user_text: str,
+    *,
+    target_agent: str = "",
+    visible_agent: str = "",
+) -> str:
+    agent_name = str(target_agent or visible_agent or "agent").strip()
+    if _is_presence_status_question_request(user_text):
+        return f"{agent_name}\nstatus: online\ndispatch_attempted: true\ndispatch_executed: false\nmode: direct_agent_message_readonly"
+    return f"{agent_name}\npedido_direto_reconhecido: true\ndispatch_attempted: true\ndispatch_executed: false\nmode: direct_agent_message_readonly"
+
+
+def _build_orchestrator_dispatch_readonly_answer_text(
+    user_text: str,
+    *,
+    target_agents: Optional[List[str]] = None,
+) -> str:
+    selected = [str(x or "").strip() for x in list(target_agents or []) if str(x or "").strip()]
+    return "\n".join([
+        "decision:",
+        "GO PARA ORQUESTRAÇÃO READ-ONLY CONTROLADA",
+        "",
+        "dispatch_attempted:",
+        "true",
+        "",
+        "dispatch_executed:",
+        "false",
+        "",
+        "selected_specialists:",
+        *([f"- {name}" for name in selected] if selected else ["- none"]),
+        "",
+        "fallback_used:",
+        "false",
+    ])
+
+
+def _should_block_roster_fallback(
+    user_text: str,
+    *,
+    requested_names: Optional[List[str]] = None,
+    mention_tokens: Optional[List[str]] = None,
+    has_team: bool = False,
+) -> bool:
+    return bool(
+        _looks_like_direct_agent_message_request(
+            user_text,
+            requested_names=requested_names,
+            mention_tokens=mention_tokens,
+            has_team=has_team,
+        )
+        or _looks_like_orchestrator_dispatch_request(
+            user_text,
+            requested_names=requested_names,
+            mention_tokens=mention_tokens,
+            has_team=has_team,
+        )
+    )
 
 
 
@@ -15263,7 +15563,12 @@ def chat(
     mention_tokens: List[str] = []
     requested_names = _detect_requested_agent_names(inp.message or "")
     try:
-        mention_tokens = re.findall(r"@([A-Za-z0-9_\-]{2,64})", inp.message or "")
+        mention_tokens = re.findall(
+            r"@([A-Za-z0-9_\-/]+(?:\s+[A-Za-z0-9_\-/]+){0,2})(?=(?:\s*[,.:;!?])|(?:\s+@)|$)",
+            inp.message or "",
+            flags=re.IGNORECASE,
+        )
+        mention_tokens = [str(x or "").strip() for x in mention_tokens if str(x or "").strip()]
         for req in requested_names:
             if req:
                 mention_tokens.append(req)
@@ -15318,6 +15623,34 @@ def chat(
     else:
         target_agents = _select_target_agents(db, org, inp, alias_to_agent, mention_tokens, has_team)
         target_agents = _apply_explicit_agent_request(db, org, target_agents, requested_names)
+
+    target_agents = _freeze_dispatch_targets(
+        db,
+        org,
+        list(target_agents or []),
+        requested_names=requested_names,
+        mention_tokens=mention_tokens,
+        has_team=has_team,
+        user_text=inp.message,
+    )
+    dispatch_routing_receipt = _build_dispatch_routing_receipt(
+        user_text=inp.message,
+        requested_names=requested_names,
+        mention_tokens=mention_tokens,
+        has_team=has_team,
+        target_agents=target_agents,
+    )
+    block_roster_fallback = _should_block_roster_fallback(
+        inp.message,
+        requested_names=requested_names,
+        mention_tokens=mention_tokens,
+        has_team=has_team,
+    )
+    if block_roster_fallback:
+        dispatch_routing_receipt["dispatch_attempted"] = True
+        dispatch_routing_receipt["dispatch_executed"] = False
+        dispatch_routing_receipt["fallback_used"] = False
+        dispatch_routing_receipt["fallback_reason"] = ""
 
     if excluded_agent_names:
         target_agents = [a for a in (target_agents or []) if str(getattr(a, "name", "") or "").strip().lower() not in excluded_agent_names]
@@ -15423,6 +15756,15 @@ def chat(
         except Exception:
             pass
         runtime_enrichment = {}
+
+    try:
+        receipt_intent = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
+        dispatch_routing_receipt["intent"] = receipt_intent or str(dispatch_routing_receipt.get("intent") or "")
+        if isinstance(runtime_enrichment, dict):
+            runtime_hints_live = runtime_enrichment.get("runtime_hints") if isinstance(runtime_enrichment.get("runtime_hints"), dict) else {}
+            runtime_enrichment["runtime_hints"] = _merge_dispatch_routing_receipt(runtime_hints_live, dispatch_routing_receipt)
+    except Exception:
+        pass
 
     try:
         forced_dispatch_flags = _runtime_orion_dispatch_request_flags(inp.message)
@@ -15708,13 +16050,24 @@ def chat(
         if blocked_reply is None:
             try:
                 intent_name_live_sync = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
-                if _is_multiagent_audit_readonly_request(inp.message) or intent_name_live_sync == "multiagent_audit_readonly":
+                if intent_name_live_sync == "direct_agent_message" or bool(dispatch_routing_receipt.get("direct_agent_message")):
+                    capability_inventory_answer = _build_direct_agent_message_answer_text(
+                        inp.message,
+                        target_agent=str(dispatch_routing_receipt.get("target_agent") or ""),
+                        visible_agent=str(dispatch_routing_receipt.get("visible_agent") or ""),
+                    )
+                elif intent_name_live_sync == "orchestrator_dispatch_readonly" or bool(dispatch_routing_receipt.get("orchestrator_dispatch")):
+                    capability_inventory_answer = _build_orchestrator_dispatch_readonly_answer_text(
+                        inp.message,
+                        target_agents=list(dispatch_routing_receipt.get("target_agents") or []),
+                    )
+                elif _is_multiagent_audit_readonly_request(inp.message) or intent_name_live_sync == "multiagent_audit_readonly":
                     capability_inventory_answer = _build_multiagent_audit_readonly_answer_text(inp.message)
-                elif intent_name_live_sync == "presence_status_answer" or _is_presence_status_question_request(inp.message):
+                elif intent_name_live_sync == "presence_status_answer" or (_is_presence_status_question_request(inp.message) and not bool(dispatch_routing_receipt.get("direct_agent_message"))):
                     capability_inventory_answer = _build_presence_status_answer_text(inp.message)
                 elif intent_name_live_sync == "model_resolution_answer" or _is_model_resolution_question_request(inp.message):
                     capability_inventory_answer = _build_model_resolution_answer_text(final_signer_agent or agent, inp.message)
-                elif intent_name_live_sync == "team_roster_answer" or _is_team_roster_question_request(inp.message):
+                elif (intent_name_live_sync == "team_roster_answer" or _is_team_roster_question_request(inp.message)) and not block_roster_fallback:
                     capability_inventory_answer = _build_team_roster_answer_text(inp.message)
                 elif intent_name_live_sync == "governance_capability_answer" or _is_governance_capability_question_request(inp.message):
                     capability_inventory_answer = _build_governance_capability_answer_text(
@@ -19806,6 +20159,29 @@ async def chat_stream(
         target_agents_rows = _select_target_agents(db, org, inp, alias_to_agent, mention_tokens, has_team)
         target_agents_rows = _apply_explicit_agent_request(db, org, target_agents_rows, requested_names)
 
+    target_agents_rows = _freeze_dispatch_targets(
+        db,
+        org,
+        list(target_agents_rows or []),
+        requested_names=requested_names,
+        mention_tokens=mention_tokens,
+        has_team=has_team,
+        user_text=message,
+    )
+    dispatch_routing_receipt_stream = _build_dispatch_routing_receipt(
+        user_text=message,
+        requested_names=requested_names,
+        mention_tokens=mention_tokens,
+        has_team=has_team,
+        target_agents=target_agents_rows,
+    )
+    block_roster_fallback_stream = _should_block_roster_fallback(
+        message,
+        requested_names=requested_names,
+        mention_tokens=mention_tokens,
+        has_team=has_team,
+    )
+
     if not target_agents_rows:
         raise HTTPException(400, "no agents configured")
 
@@ -19902,6 +20278,15 @@ async def chat_stream(
         except Exception:
             pass
         runtime_enrichment = {}
+
+    try:
+        receipt_intent_stream = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
+        dispatch_routing_receipt_stream["intent"] = receipt_intent_stream or str(dispatch_routing_receipt_stream.get("intent") or "")
+        if isinstance(runtime_enrichment, dict):
+            runtime_hints_live = runtime_enrichment.get("runtime_hints") if isinstance(runtime_enrichment.get("runtime_hints"), dict) else {}
+            runtime_enrichment["runtime_hints"] = _merge_dispatch_routing_receipt(runtime_hints_live, dispatch_routing_receipt_stream)
+    except Exception:
+        pass
 
     try:
         forced_dispatch_flags = _runtime_orion_dispatch_request_flags(message)
@@ -20627,11 +21012,22 @@ async def chat_stream(
                         intent_name_live_stream = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
                         if _is_multiagent_audit_readonly_request(message) or intent_name_live_stream == "multiagent_audit_readonly":
                             capability_inventory_answer = _build_multiagent_audit_readonly_answer_text(message)
-                        elif intent_name_live_stream == "presence_status_answer" or _is_presence_status_question_request(message):
+                        elif intent_name_live_stream == "direct_agent_message" or bool(dispatch_routing_receipt_stream.get("direct_agent_message")):
+                            capability_inventory_answer = _build_direct_agent_message_answer_text(
+                                message,
+                                target_agent=str(dispatch_routing_receipt_stream.get("target_agent") or ""),
+                                visible_agent=str(dispatch_routing_receipt_stream.get("visible_agent") or ""),
+                            )
+                        elif intent_name_live_stream == "orchestrator_dispatch_readonly" or bool(dispatch_routing_receipt_stream.get("orchestrator_dispatch")):
+                            capability_inventory_answer = _build_orchestrator_dispatch_readonly_answer_text(
+                                message,
+                                target_agents=list(dispatch_routing_receipt_stream.get("target_agents") or []),
+                            )
+                        elif intent_name_live_stream == "presence_status_answer" or (_is_presence_status_question_request(message) and not bool(dispatch_routing_receipt_stream.get("direct_agent_message"))):
                             capability_inventory_answer = _build_presence_status_answer_text(message)
                         elif intent_name_live_stream == "model_resolution_answer" or _is_model_resolution_question_request(message):
                             capability_inventory_answer = _build_model_resolution_answer_text(final_signer_agent or agent, message)
-                        elif intent_name_live_stream == "team_roster_answer" or _is_team_roster_question_request(message):
+                        elif (intent_name_live_stream == "team_roster_answer" or _is_team_roster_question_request(message)) and not block_roster_fallback_stream:
                             capability_inventory_answer = _build_team_roster_answer_text(message)
                         elif intent_name_live_stream == "governance_capability_answer" or _is_governance_capability_question_request(message):
                             capability_inventory_answer = _build_governance_capability_answer_text(
@@ -22675,12 +23071,12 @@ def _detect_requested_agent_names(message: str) -> List[str]:
     excluded = set(_detect_excluded_agent_names(message))
     requested: List[str] = []
     patterns = [
-        ("Orkio", [r"@orkio\b", r"\borkio\b", r"host\b", r"moderador", r"moderator"]),
-        ("Chris", [r"@chris\b", r"\bchris\b", r"\bcfo\b", r"financeir", r"financial", r"financ"]),
-        ("Orion", [r"@orion\b", r"\borion\b", r"\borion only\b", r"orion only", r"signer\s*[:=]\s*orion", r"required_signer\s*[:=]\s*orion"]),
-        ("Auditor", [r"@auditor\b", r"\bauditor\b", r"technical auditor", r"auditoria t[ée]cnica", r"runtime audit"]),
-        ("CTO", [r"@cto\b", r"\bcto\b", r"systems architect", r"system architect"]),
-        ("UX Frontend", [r"ux/frontend", r"ux_frontend", r"ux frontend", r"frontend ux", r"@ux\b", r"@frontend\b"]),
+        ("orkio", [r"@orkio\b", r"\borkio\b", r"host\b", r"moderador", r"moderator"]),
+        ("chris", [r"@chris\b", r"\bchris\b", r"\bcfo\b", r"financeir", r"financial", r"financ"]),
+        ("orion", [r"@orion\b", r"\borion\b", r"\borion only\b", r"orion only", r"signer\s*[:=]\s*orion", r"required_signer\s*[:=]\s*orion"]),
+        ("auditor", [r"@auditor\b", r"\bauditor\b", r"technical auditor", r"auditoria t[ée]cnica", r"runtime audit"]),
+        ("systems_architect", [r"@cto\b", r"\bcto\b", r"systems architect", r"system architect"]),
+        ("ux_frontend", [r"ux/frontend", r"ux_frontend", r"ux frontend", r"@ux\s+frontend\b", r"frontend ux", r"@ux\b", r"@frontend\b"]),
     ]
     for name, pats in patterns:
         if name.strip().lower() in excluded:
@@ -22689,12 +23085,25 @@ def _detect_requested_agent_names(message: str) -> List[str]:
             if re.search(pat, raw, flags=re.IGNORECASE):
                 requested.append(name)
                 break
+
+    normalized = "_" + re.sub(r"[^a-z0-9_]+", "_", raw.replace("@", " ")) + "_"
+    for slug in list(get_full_agent_roster() or []):
+        canonical = _canonical_dispatch_specialist_slug(slug)
+        if not canonical:
+            continue
+        if canonical in excluded:
+            continue
+        token = f"_{canonical}_"
+        if token in normalized and canonical not in requested:
+            requested.append(canonical)
+
     if re.search(r"@team\b|\bteam\b|\bequipe\b|\bboard\b|\bconselho\b|\bambos\b|\btodos\b", raw, flags=re.IGNORECASE):
-        for name in ("Chris", "Orion"):
-            if name.strip().lower() in excluded:
-                continue
-            if name not in requested:
-                requested.append(name)
+        if not any(item not in {"orion", "orkio", "team", "time"} for item in requested):
+            for name in ("chris", "orion"):
+                if name in excluded:
+                    continue
+                if name not in requested:
+                    requested.append(name)
     return requested
 
 def _build_realtime_handoff_line(host_name: str, requested: List[str]) -> Optional[str]:
