@@ -21265,9 +21265,7 @@ async def chat_stream(
                 if blocked_reply is None:
                     try:
                         intent_name_live_stream = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
-                        if _is_multiagent_audit_readonly_request(message) or intent_name_live_stream == "multiagent_audit_readonly":
-                            capability_inventory_answer = _build_multiagent_audit_readonly_answer_text(message)
-                        elif intent_name_live_stream == "direct_agent_message" or bool(dispatch_routing_receipt_stream.get("direct_agent_message")):
+                        if intent_name_live_stream == "direct_agent_message" or bool(dispatch_routing_receipt_stream.get("direct_agent_message")):
                             capability_inventory_answer = _build_direct_agent_message_answer_text(
                                 message,
                                 target_agent=str(dispatch_routing_receipt_stream.get("target_agent") or ""),
@@ -21278,6 +21276,8 @@ async def chat_stream(
                                 message,
                                 target_agents=list(dispatch_routing_receipt_stream.get("target_agents") or []),
                             )
+                        elif _is_multiagent_audit_readonly_request(message) or intent_name_live_stream == "multiagent_audit_readonly":
+                            capability_inventory_answer = _build_multiagent_audit_readonly_answer_text(message)
                         elif intent_name_live_stream == "presence_status_answer" or (_is_presence_status_question_request(message) and not bool(dispatch_routing_receipt_stream.get("direct_agent_message"))):
                             capability_inventory_answer = _build_presence_status_answer_text(message)
                         elif intent_name_live_stream == "model_resolution_answer" or _is_model_resolution_question_request(message):
