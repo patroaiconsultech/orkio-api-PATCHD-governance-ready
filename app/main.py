@@ -10755,16 +10755,155 @@ def _efata777_apply_destination_receipt(
     return receipt
 
 
+def _display_specialist_agent_name(name: Any) -> str:
+    slug = _canonical_dispatch_specialist_slug(name) or str(name or "").strip().lower()
+    mapping = {
+        "ux_frontend": "UX Frontend",
+        "auditor": "Auditor",
+        "systems_architect": "Systems Architect",
+        "backend_engineer": "Backend Engineer",
+        "frontend_engineer": "Frontend Engineer",
+        "qa_release_engineer": "QA Release Engineer",
+        "devops_sre": "DevOps SRE",
+        "security_guardian": "Security Guardian",
+        "data_db_architect": "Data DB Architect",
+        "realtime_voice_engineer": "Realtime Voice Engineer",
+        "orion": "Orion",
+        "orkio": "Orkio",
+        "chris": "Chris",
+    }
+    if slug in mapping:
+        return mapping[slug]
+    raw = str(name or "").strip()
+    if raw:
+        return raw
+    return "Agente"
+
+
+def _build_specialist_answer_text(
+    user_text: str,
+    *,
+    target_agent: str,
+    mode: str,
+) -> str:
+    slug = _canonical_dispatch_specialist_slug(target_agent) or "agent"
+    agent_name = _display_specialist_agent_name(target_agent)
+    txt = (user_text or "").strip().lower()
+
+    if _is_presence_status_question_request(user_text) or any(term in txt for term in [
+        "está online",
+        "esta online",
+        "estás online",
+        "estas online",
+        "online?",
+        "status ok",
+        "status?",
+    ]):
+        return "\n".join([
+            agent_name,
+            "status: online",
+            f"mode: {mode}",
+            "dispatch_attempted: true",
+            "dispatch_executed: false",
+            "fallback_used: false",
+        ])
+
+    if slug == "ux_frontend":
+        return "\n".join([
+            "UX Frontend",
+            "Análise curta do console:",
+            "1. Clareza: reduzir ruído visual e destacar o próximo passo do usuário.",
+            "2. Fluxo: manter a resposta final visível sem depender de refresh ou reload.",
+            "3. Operação: mostrar agente, destino e conclusão do turno de forma previsível.",
+            f"mode: {mode}",
+            "dispatch_attempted: true",
+            "dispatch_executed: false",
+            "fallback_used: false",
+        ])
+
+    if slug == "auditor":
+        return "\n".join([
+            "Auditor",
+            "Análise curta:",
+            "1. Separar evidência de hipótese.",
+            "2. Confirmar intent, target_agent e final_speaker nos receipts.",
+            "3. Bloquear fallback quando houver alvo explícito.",
+            f"mode: {mode}",
+            "dispatch_attempted: true",
+            "dispatch_executed: false",
+            "fallback_used: false",
+        ])
+
+    if slug == "systems_architect":
+        return "\n".join([
+            "Systems Architect",
+            "Leitura técnica curta:",
+            "1. Preservar precedência entre direct, mediated single-target e multi-target.",
+            "2. Evitar colisão entre signer do host e speaker final do especialista.",
+            "3. Manter receipts confiáveis antes de abrir espaço para fanout real.",
+            f"mode: {mode}",
+            "dispatch_attempted: true",
+            "dispatch_executed: false",
+            "fallback_used: false",
+        ])
+
+    if slug == "backend_engineer":
+        return "\n".join([
+            "Backend Engineer",
+            "Status curto:",
+            "1. Backend e transporte precisam preservar intent e target até a persistência final.",
+            "2. O próximo passo é ligar dispatch real sem perder os receipts governados.",
+            f"mode: {mode}",
+            "dispatch_attempted: true",
+            "dispatch_executed: false",
+            "fallback_used: false",
+        ])
+
+    if slug == "qa_release_engineer":
+        return "\n".join([
+            "QA Release Engineer",
+            "Validação curta:",
+            "1. Testar direto, mediado single-target e multi-target separadamente.",
+            "2. Proibir regressão para roster/read-only direto quando houver alvo explícito.",
+            f"mode: {mode}",
+            "dispatch_attempted: true",
+            "dispatch_executed: false",
+            "fallback_used: false",
+        ])
+
+    if slug == "chris":
+        return "\n".join([
+            "Chris",
+            "Leitura curta:",
+            "1. A experiência precisa parecer previsível e confiável para o founder.",
+            "2. Delegação em massa só deve avançar com receipts claros e autorização governada.",
+            f"mode: {mode}",
+            "dispatch_attempted: true",
+            "dispatch_executed: false",
+            "fallback_used: false",
+        ])
+
+    return "\n".join([
+        agent_name,
+        "Resposta read-only controlada do especialista solicitado.",
+        f"mode: {mode}",
+        "dispatch_attempted: true",
+        "dispatch_executed: false",
+        "fallback_used: false",
+    ])
+
+
 def _build_direct_agent_message_answer_text(
     user_text: str,
     *,
     target_agent: str = "",
     visible_agent: str = "",
 ) -> str:
-    agent_name = str(target_agent or visible_agent or "agent").strip()
-    if _is_presence_status_question_request(user_text):
-        return f"{agent_name}\nstatus: online\ndispatch_attempted: true\ndispatch_executed: false\nmode: direct_agent_message_readonly"
-    return f"{agent_name}\npedido_direto_reconhecido: true\ndispatch_attempted: true\ndispatch_executed: false\nmode: direct_agent_message_readonly"
+    return _build_specialist_answer_text(
+        user_text,
+        target_agent=(target_agent or visible_agent or "agent"),
+        mode="direct_agent_message_readonly",
+    )
 
 
 def _build_orchestrator_dispatch_readonly_answer_text(
@@ -10801,6 +10940,24 @@ def _orchestrator_single_target_agent(
     target = str(r.get("target_agent") or "").strip()
     if target and target.lower() not in {"orion", "orkio", "team", "time"}:
         return target
+    return ""
+
+
+def _dispatch_mode_from_receipt(receipt: Optional[Dict[str, Any]]) -> str:
+    r = dict(receipt or {})
+    targets = [str(x or "").strip() for x in list(r.get("target_agents") or []) if str(x or "").strip()]
+    mentions = [str(x or "").strip().lower() for x in list(r.get("mention_tokens") or []) if str(x or "").strip()]
+    has_host = any(item in {"orion", "orkio", "team", "time"} for item in mentions)
+
+    if bool(r.get("orchestrator_dispatch")) and len(targets) > 1:
+        return "orchestrator_multi_target"
+
+    if bool(r.get("orchestrator_dispatch")) and len(targets) == 1 and has_host:
+        return "mediated_single_target"
+
+    if bool(r.get("direct_agent_message")) and len(targets) == 1 and not has_host:
+        return "direct_single_target"
+
     return ""
 
 
@@ -16290,25 +16447,44 @@ def chat(
         if blocked_reply is None:
             try:
                 intent_name_live_sync = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
-                if intent_name_live_sync == "direct_agent_message" or bool(dispatch_routing_receipt.get("direct_agent_message")):
-                    capability_inventory_answer = None
-                elif intent_name_live_sync == "orchestrator_dispatch_readonly" or bool(dispatch_routing_receipt.get("orchestrator_dispatch")):
+                dispatch_mode_sync = _dispatch_mode_from_receipt(dispatch_routing_receipt)
+                if dispatch_mode_sync == "direct_single_target":
+                    direct_target = str(dispatch_routing_receipt.get("target_agent") or dispatch_routing_receipt.get("visible_agent") or "").strip()
+                    dispatch_routing_receipt["answer_source"] = "direct_single_target_specialist_finalizer"
+                    capability_inventory_answer = _build_specialist_answer_text(
+                        inp.message,
+                        target_agent=direct_target or "agent",
+                        mode="direct_single_target",
+                    )
+                elif dispatch_mode_sync == "mediated_single_target":
                     delegated_target = _orchestrator_single_target_agent(dispatch_routing_receipt)
                     if delegated_target:
                         dispatch_routing_receipt["delegated_by"] = (
                             dispatch_routing_receipt.get("visible_agent") or "orion"
                         )
                         dispatch_routing_receipt["final_speaker"] = delegated_target
+                        dispatch_routing_receipt["visible_agent"] = delegated_target
+                        dispatch_routing_receipt["target_agent"] = delegated_target
+                        dispatch_routing_receipt["target_agents"] = [delegated_target]
                         dispatch_routing_receipt["mediated_single_target_delegation"] = True
-                        dispatch_routing_receipt["answer_source"] = "mediated_single_target_direct_agent_finalizer"
+                        dispatch_routing_receipt["answer_source"] = "mediated_single_target_specialist_finalizer"
                         dispatch_routing_receipt["host_stub_blocked"] = True
-                        capability_inventory_answer = _build_direct_agent_message_answer_text(
+                        capability_inventory_answer = _build_specialist_answer_text(
                             inp.message,
                             target_agent=delegated_target,
-                            visible_agent=delegated_target,
+                            mode="mediated_single_target",
                         )
                     else:
-                        capability_inventory_answer = None
+                        capability_inventory_answer = _build_orchestrator_dispatch_readonly_answer_text(
+                            inp.message,
+                            target_agents=list(dispatch_routing_receipt.get("target_agents") or []),
+                        )
+                elif dispatch_mode_sync == "orchestrator_multi_target":
+                    dispatch_routing_receipt["answer_source"] = "orchestrator_multi_target_readonly_finalizer"
+                    capability_inventory_answer = _build_orchestrator_dispatch_readonly_answer_text(
+                        inp.message,
+                        target_agents=list(dispatch_routing_receipt.get("target_agents") or []),
+                    )
                 elif _is_multiagent_audit_readonly_request(inp.message) or intent_name_live_sync == "multiagent_audit_readonly":
                     capability_inventory_answer = _build_multiagent_audit_readonly_answer_text(inp.message)
                 elif intent_name_live_sync == "presence_status_answer" or (_is_presence_status_question_request(inp.message) and not bool(dispatch_routing_receipt.get("direct_agent_message"))):
@@ -21333,25 +21509,44 @@ async def chat_stream(
                 if blocked_reply is None:
                     try:
                         intent_name_live_stream = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
-                        if intent_name_live_stream == "direct_agent_message" or bool(dispatch_routing_receipt_stream.get("direct_agent_message")):
-                            capability_inventory_answer = None
-                        elif intent_name_live_stream == "orchestrator_dispatch_readonly" or bool(dispatch_routing_receipt_stream.get("orchestrator_dispatch")):
+                        dispatch_mode_stream = _dispatch_mode_from_receipt(dispatch_routing_receipt_stream)
+                        if dispatch_mode_stream == "direct_single_target":
+                            direct_target = str(dispatch_routing_receipt_stream.get("target_agent") or dispatch_routing_receipt_stream.get("visible_agent") or "").strip()
+                            dispatch_routing_receipt_stream["answer_source"] = "direct_single_target_specialist_finalizer"
+                            capability_inventory_answer = _build_specialist_answer_text(
+                                message,
+                                target_agent=direct_target or "agent",
+                                mode="direct_single_target",
+                            )
+                        elif dispatch_mode_stream == "mediated_single_target":
                             delegated_target = _orchestrator_single_target_agent(dispatch_routing_receipt_stream)
                             if delegated_target:
                                 dispatch_routing_receipt_stream["delegated_by"] = (
                                     dispatch_routing_receipt_stream.get("visible_agent") or "orion"
                                 )
                                 dispatch_routing_receipt_stream["final_speaker"] = delegated_target
+                                dispatch_routing_receipt_stream["visible_agent"] = delegated_target
+                                dispatch_routing_receipt_stream["target_agent"] = delegated_target
+                                dispatch_routing_receipt_stream["target_agents"] = [delegated_target]
                                 dispatch_routing_receipt_stream["mediated_single_target_delegation"] = True
-                                dispatch_routing_receipt_stream["answer_source"] = "mediated_single_target_direct_agent_finalizer"
+                                dispatch_routing_receipt_stream["answer_source"] = "mediated_single_target_specialist_finalizer"
                                 dispatch_routing_receipt_stream["host_stub_blocked"] = True
-                                capability_inventory_answer = _build_direct_agent_message_answer_text(
+                                capability_inventory_answer = _build_specialist_answer_text(
                                     message,
                                     target_agent=delegated_target,
-                                    visible_agent=delegated_target,
+                                    mode="mediated_single_target",
                                 )
                             else:
-                                capability_inventory_answer = None
+                                capability_inventory_answer = _build_orchestrator_dispatch_readonly_answer_text(
+                                    message,
+                                    target_agents=list(dispatch_routing_receipt_stream.get("target_agents") or []),
+                                )
+                        elif dispatch_mode_stream == "orchestrator_multi_target":
+                            dispatch_routing_receipt_stream["answer_source"] = "orchestrator_multi_target_readonly_finalizer"
+                            capability_inventory_answer = _build_orchestrator_dispatch_readonly_answer_text(
+                                message,
+                                target_agents=list(dispatch_routing_receipt_stream.get("target_agents") or []),
+                            )
                         elif _is_multiagent_audit_readonly_request(message) or intent_name_live_stream == "multiagent_audit_readonly":
                             capability_inventory_answer = _build_multiagent_audit_readonly_answer_text(message)
                         elif intent_name_live_stream == "presence_status_answer" or (_is_presence_status_question_request(message) and not bool(dispatch_routing_receipt_stream.get("direct_agent_message"))):
