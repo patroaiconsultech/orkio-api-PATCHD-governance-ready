@@ -10977,6 +10977,9 @@ def _build_specialist_answer_text(user_text: str, *, target_agent: str, mode: st
     txt = str(user_text or "").strip().lower()
 
     if _is_presence_status_question_request(user_text):
+        display = _dispatch_agent_display_name(target_agent).strip().lower()
+        if slug in {"orion", "orkio"} or display in {"orion", "orkio"}:
+            return _build_presence_status_answer_text(user_text)
         return "\n".join([
             agent_name,
             "status: online",
@@ -16627,6 +16630,44 @@ def chat(
             try:
                 intent_name_live_sync = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
                 dispatch_routing_receipt = _normalize_single_target_dispatch_receipt(dispatch_routing_receipt, inp.message)
+                if _is_presence_status_question_request(inp.message):
+                    visible_slug_sync = _canonical_dispatch_specialist_slug(
+                        dispatch_routing_receipt.get("visible_agent")
+                    )
+                    target_slug_sync = _canonical_dispatch_specialist_slug(
+                        dispatch_routing_receipt.get("target_agent")
+                    )
+                    requested_slugs_sync = {
+                        _canonical_dispatch_specialist_slug(x)
+                        for x in (
+                            _dispatch_receipt_requested_specialists_original(dispatch_routing_receipt)
+                            or _dispatch_receipt_requested_specialists(dispatch_routing_receipt)
+                            or []
+                        )
+                        if str(x or "").strip()
+                    }
+                    host_presence_sync = (
+                        not requested_slugs_sync
+                        or requested_slugs_sync.issubset({"orion", "orkio"})
+                        or visible_slug_sync in {"orion", "orkio"}
+                        or target_slug_sync in {"orion", "orkio"}
+                        or _dispatch_has_explicit_host(
+                            requested_names=list(dispatch_routing_receipt.get("requested_names") or []),
+                            mention_tokens=list(dispatch_routing_receipt.get("mention_tokens") or []),
+                            has_team=bool(dispatch_routing_receipt.get("has_team")),
+                        )
+                    )
+                    if host_presence_sync:
+                        intent_name_live_sync = "presence_status_answer"
+                        dispatch_routing_receipt["answer_source"] = "presence_status_answer"
+                        dispatch_routing_receipt["presence_status_answer"] = True
+                        dispatch_routing_receipt["direct_agent_message"] = False
+                        dispatch_routing_receipt["orchestrator_dispatch"] = False
+                        dispatch_routing_receipt["mediated_single_target_delegation"] = False
+                        dispatch_routing_receipt["final_speaker"] = "Orion"
+                        dispatch_routing_receipt["visible_agent"] = "Orion"
+                        dispatch_routing_receipt["target_agent"] = "Orion"
+                        dispatch_routing_receipt["target_agents"] = ["Orion"]
                 if intent_name_live_sync == "direct_agent_message" or bool(dispatch_routing_receipt.get("direct_agent_message")):
                     requested_specialists_sync = (
                         _dispatch_receipt_requested_specialists_original(dispatch_routing_receipt)
@@ -21779,6 +21820,44 @@ async def chat_stream(
                     try:
                         intent_name_live_stream = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
                         dispatch_routing_receipt_stream = _normalize_single_target_dispatch_receipt(dispatch_routing_receipt_stream, message)
+                        if _is_presence_status_question_request(message):
+                            visible_slug_stream = _canonical_dispatch_specialist_slug(
+                                dispatch_routing_receipt_stream.get("visible_agent")
+                            )
+                            target_slug_stream = _canonical_dispatch_specialist_slug(
+                                dispatch_routing_receipt_stream.get("target_agent")
+                            )
+                            requested_slugs_stream = {
+                                _canonical_dispatch_specialist_slug(x)
+                                for x in (
+                                    _dispatch_receipt_requested_specialists_original(dispatch_routing_receipt_stream)
+                                    or _dispatch_receipt_requested_specialists(dispatch_routing_receipt_stream)
+                                    or []
+                                )
+                                if str(x or "").strip()
+                            }
+                            host_presence_stream = (
+                                not requested_slugs_stream
+                                or requested_slugs_stream.issubset({"orion", "orkio"})
+                                or visible_slug_stream in {"orion", "orkio"}
+                                or target_slug_stream in {"orion", "orkio"}
+                                or _dispatch_has_explicit_host(
+                                    requested_names=list(dispatch_routing_receipt_stream.get("requested_names") or []),
+                                    mention_tokens=list(dispatch_routing_receipt_stream.get("mention_tokens") or []),
+                                    has_team=bool(dispatch_routing_receipt_stream.get("has_team")),
+                                )
+                            )
+                            if host_presence_stream:
+                                intent_name_live_stream = "presence_status_answer"
+                                dispatch_routing_receipt_stream["answer_source"] = "presence_status_answer"
+                                dispatch_routing_receipt_stream["presence_status_answer"] = True
+                                dispatch_routing_receipt_stream["direct_agent_message"] = False
+                                dispatch_routing_receipt_stream["orchestrator_dispatch"] = False
+                                dispatch_routing_receipt_stream["mediated_single_target_delegation"] = False
+                                dispatch_routing_receipt_stream["final_speaker"] = "Orion"
+                                dispatch_routing_receipt_stream["visible_agent"] = "Orion"
+                                dispatch_routing_receipt_stream["target_agent"] = "Orion"
+                                dispatch_routing_receipt_stream["target_agents"] = ["Orion"]
                         if intent_name_live_stream == "direct_agent_message" or bool(dispatch_routing_receipt_stream.get("direct_agent_message")):
                             requested_specialists_stream = (
                                 _dispatch_receipt_requested_specialists_original(dispatch_routing_receipt_stream)
