@@ -9711,7 +9711,19 @@ def _is_presence_status_question_request(user_text: str) -> bool:
     Perguntas simples como "@Orion você está online?" devem receber resposta
     determinística, sem self-audit/runtime/capability.
     """
-    return bool(is_presence_status_question_text(user_text))
+    if bool(is_presence_status_question_text(user_text)):
+        return True
+
+    txt = re.sub(r"\s+", " ", str(user_text or "").strip().lower())
+    if not txt:
+        return False
+
+    return bool(
+        re.search(r"@\s*(orion|orkio)\b.*\b(est[aá]s?|esta|est[aá]|ta|t[aá])\s+(online|a[ií])\b", txt)
+        or re.search(r"@\s*(orion|orkio)\b.*\b(voc[eê]|tu)\s+est[aá]\s+(online|a[ií])\b", txt)
+        or re.search(r"\b(orion|orkio)\b.*\b(est[aá]s?|esta|est[aá]|ta|t[aá])\s+(online|a[ií])\b", txt)
+        or re.search(r"@\s*(orion|orkio)\b.*\b(are you online|online\?)\b", txt)
+    )
 
 
 def _build_presence_status_answer_text(user_text: str = "") -> str:
@@ -10917,8 +10929,15 @@ def _normalize_single_target_dispatch_receipt(
     if _is_presence_status_question_request(user_text):
         visible_slug = _canonical_dispatch_specialist_slug(r.get("visible_agent"))
         target_slug = _canonical_dispatch_specialist_slug(r.get("target_agent"))
+        requested_slugs = {
+            _canonical_dispatch_specialist_slug(x)
+            for x in requested_specialists
+            if str(x or "").strip()
+        }
+        requested_host_only = requested_slugs and requested_slugs.issubset({"orion", "orkio"})
         if (
             not requested_specialists
+            or requested_host_only
             or visible_slug in {"orion", "orkio"}
             or target_slug in {"orion", "orkio"}
             or explicit_host
@@ -10927,6 +10946,10 @@ def _normalize_single_target_dispatch_receipt(
             r["direct_agent_message"] = False
             r["orchestrator_dispatch"] = False
             r["mediated_single_target_delegation"] = False
+            r["visible_agent"] = "Orion"
+            r["target_agent"] = "Orion"
+            r["target_agents"] = ["Orion"]
+            r["final_speaker"] = "Orion"
             r.pop("delegated_by", None)
             return r
 
@@ -16627,10 +16650,21 @@ def chat(
                         direct_mode_sync = "mediated_single_target"
                         dispatch_routing_receipt["delegated_by"] = dispatch_routing_receipt.get("visible_agent") or "orion"
                         dispatch_routing_receipt["mediated_single_target_delegation"] = True
+                    requested_host_only_sync = (
+                        len(requested_specialists_sync) == 1
+                        and _canonical_dispatch_specialist_slug(requested_specialists_sync[0]) in {"orion", "orkio"}
+                    )
                     if _is_presence_status_question_request(inp.message) and (
-                        _canonical_dispatch_specialist_slug(direct_target) in {"orion", "orkio"} or not requested_specialists_sync
+                        requested_host_only_sync
+                        or _canonical_dispatch_specialist_slug(direct_target) in {"orion", "orkio"}
+                        or not requested_specialists_sync
                     ):
                         dispatch_routing_receipt["answer_source"] = "presence_status_answer"
+                        dispatch_routing_receipt["presence_status_answer"] = True
+                        dispatch_routing_receipt["final_speaker"] = "Orion"
+                        dispatch_routing_receipt["visible_agent"] = "Orion"
+                        dispatch_routing_receipt["target_agent"] = "Orion"
+                        dispatch_routing_receipt["target_agents"] = ["Orion"]
                         capability_inventory_answer = _build_presence_status_answer_text(inp.message)
                     elif direct_target:
                         dispatch_routing_receipt["final_speaker"] = direct_target
@@ -21768,10 +21802,21 @@ async def chat_stream(
                                 direct_mode_stream = "mediated_single_target"
                                 dispatch_routing_receipt_stream["delegated_by"] = dispatch_routing_receipt_stream.get("visible_agent") or "orion"
                                 dispatch_routing_receipt_stream["mediated_single_target_delegation"] = True
+                            requested_host_only_stream = (
+                                len(requested_specialists_stream) == 1
+                                and _canonical_dispatch_specialist_slug(requested_specialists_stream[0]) in {"orion", "orkio"}
+                            )
                             if _is_presence_status_question_request(message) and (
-                                _canonical_dispatch_specialist_slug(direct_target_stream) in {"orion", "orkio"} or not requested_specialists_stream
+                                requested_host_only_stream
+                                or _canonical_dispatch_specialist_slug(direct_target_stream) in {"orion", "orkio"}
+                                or not requested_specialists_stream
                             ):
                                 dispatch_routing_receipt_stream["answer_source"] = "presence_status_answer"
+                                dispatch_routing_receipt_stream["presence_status_answer"] = True
+                                dispatch_routing_receipt_stream["final_speaker"] = "Orion"
+                                dispatch_routing_receipt_stream["visible_agent"] = "Orion"
+                                dispatch_routing_receipt_stream["target_agent"] = "Orion"
+                                dispatch_routing_receipt_stream["target_agents"] = ["Orion"]
                                 capability_inventory_answer = _build_presence_status_answer_text(message)
                             elif direct_target_stream:
                                 dispatch_routing_receipt_stream["final_speaker"] = direct_target_stream
