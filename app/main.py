@@ -10892,6 +10892,62 @@ def _dispatch_receipt_mode(receipt: Optional[Dict[str, Any]]) -> str:
     return ""
 
 
+def _normalize_single_target_dispatch_receipt(
+    receipt: Optional[Dict[str, Any]],
+    user_text: str = "",
+) -> Dict[str, Any]:
+    r = dict(receipt or {})
+    requested_specialists = [
+        str(x or "").strip()
+        for x in (_dispatch_receipt_requested_specialists_original(r) or _dispatch_receipt_requested_specialists(r))
+        if str(x or "").strip()
+    ]
+    explicit_host = _dispatch_has_explicit_host(
+        requested_names=list(r.get("requested_names") or []),
+        mention_tokens=list(r.get("mention_tokens") or []),
+        has_team=bool(r.get("has_team")),
+    )
+    host_display = ""
+    for token in list(r.get("mention_tokens") or []) + list(r.get("requested_names") or []):
+        slug = _canonical_dispatch_specialist_slug(token)
+        if slug in {"orion", "orkio", "team", "time", "equipe", "board", "conselho"}:
+            host_display = _dispatch_agent_display_name(token)
+            break
+
+    if _is_presence_status_question_request(user_text):
+        visible_slug = _canonical_dispatch_specialist_slug(r.get("visible_agent"))
+        target_slug = _canonical_dispatch_specialist_slug(r.get("target_agent"))
+        if (
+            not requested_specialists
+            or visible_slug in {"orion", "orkio"}
+            or target_slug in {"orion", "orkio"}
+            or explicit_host
+        ):
+            r["presence_status_answer"] = True
+            r["direct_agent_message"] = False
+            r["orchestrator_dispatch"] = False
+            r["mediated_single_target_delegation"] = False
+            r.pop("delegated_by", None)
+            return r
+
+    if len(requested_specialists) == 1:
+        specialist = requested_specialists[0]
+        r["target_agent"] = specialist
+        r["target_agents"] = [specialist]
+        r["selected_specialists"] = [specialist]
+        if explicit_host:
+            r["direct_agent_message"] = True
+            r["orchestrator_dispatch"] = False
+            r["mediated_single_target_delegation"] = True
+            r["delegated_by"] = str(r.get("delegated_by") or host_display or r.get("visible_agent") or "Orion").strip()
+        else:
+            r["direct_agent_message"] = True
+            r["orchestrator_dispatch"] = False
+            r["mediated_single_target_delegation"] = False
+            r.pop("delegated_by", None)
+    return r
+
+
 def _build_specialist_answer_text(user_text: str, *, target_agent: str, mode: str) -> str:
     slug = _canonical_dispatch_specialist_slug(target_agent)
     agent_name = _dispatch_agent_display_name(target_agent)
@@ -16547,6 +16603,7 @@ def chat(
         if blocked_reply is None:
             try:
                 intent_name_live_sync = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
+                dispatch_routing_receipt = _normalize_single_target_dispatch_receipt(dispatch_routing_receipt, inp.message)
                 if intent_name_live_sync == "direct_agent_message" or bool(dispatch_routing_receipt.get("direct_agent_message")):
                     requested_specialists_sync = (
                         _dispatch_receipt_requested_specialists_original(dispatch_routing_receipt)
@@ -16560,7 +16617,12 @@ def chat(
                     if not direct_target:
                         direct_target = requested_specialists_sync[0] if len(requested_specialists_sync) == 1 else ""
                     direct_mode_sync = "direct_single_target"
-                    if _has_host_and_single_specialist(dispatch_routing_receipt) and len(requested_specialists_sync) == 1:
+                    explicit_host_sync = _dispatch_has_explicit_host(
+                        requested_names=list(dispatch_routing_receipt.get("requested_names") or []),
+                        mention_tokens=list(dispatch_routing_receipt.get("mention_tokens") or []),
+                        has_team=bool(dispatch_routing_receipt.get("has_team")),
+                    )
+                    if explicit_host_sync and len(requested_specialists_sync) == 1:
                         direct_target = requested_specialists_sync[0]
                         direct_mode_sync = "mediated_single_target"
                         dispatch_routing_receipt["delegated_by"] = dispatch_routing_receipt.get("visible_agent") or "orion"
@@ -21682,6 +21744,7 @@ async def chat_stream(
                 if blocked_reply is None:
                     try:
                         intent_name_live_stream = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
+                        dispatch_routing_receipt_stream = _normalize_single_target_dispatch_receipt(dispatch_routing_receipt_stream, message)
                         if intent_name_live_stream == "direct_agent_message" or bool(dispatch_routing_receipt_stream.get("direct_agent_message")):
                             requested_specialists_stream = (
                                 _dispatch_receipt_requested_specialists_original(dispatch_routing_receipt_stream)
@@ -21695,7 +21758,12 @@ async def chat_stream(
                             if not direct_target_stream:
                                 direct_target_stream = requested_specialists_stream[0] if len(requested_specialists_stream) == 1 else ""
                             direct_mode_stream = "direct_single_target"
-                            if _has_host_and_single_specialist(dispatch_routing_receipt_stream) and len(requested_specialists_stream) == 1:
+                            explicit_host_stream = _dispatch_has_explicit_host(
+                                requested_names=list(dispatch_routing_receipt_stream.get("requested_names") or []),
+                                mention_tokens=list(dispatch_routing_receipt_stream.get("mention_tokens") or []),
+                                has_team=bool(dispatch_routing_receipt_stream.get("has_team")),
+                            )
+                            if explicit_host_stream and len(requested_specialists_stream) == 1:
                                 direct_target_stream = requested_specialists_stream[0]
                                 direct_mode_stream = "mediated_single_target"
                                 dispatch_routing_receipt_stream["delegated_by"] = dispatch_routing_receipt_stream.get("visible_agent") or "orion"
