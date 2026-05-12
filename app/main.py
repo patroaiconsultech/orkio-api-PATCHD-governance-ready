@@ -10433,6 +10433,22 @@ def _dispatch_request_specialists(
     return names
 
 
+def _dispatch_has_explicit_host(
+    *,
+    requested_names: Optional[List[str]] = None,
+    mention_tokens: Optional[List[str]] = None,
+    has_team: bool = False,
+) -> bool:
+    hosts = {"orion", "orkio", "team", "time", "equipe", "board", "conselho"}
+    mentions = [_canonical_dispatch_specialist_slug(x) for x in list(mention_tokens or [])]
+    requested = [_canonical_dispatch_specialist_slug(x) for x in list(requested_names or [])]
+    if any(x in hosts for x in mentions if x):
+        return True
+    if any(x in {"orion", "orkio"} for x in requested if x):
+        return True
+    return bool(has_team and not any(x for x in requested if x))
+
+
 def _looks_like_dispatch_operational_request(
     user_text: str,
     *,
@@ -10464,6 +10480,12 @@ def _looks_like_direct_agent_message_request(
     specialists = _dispatch_request_specialists(requested_names=requested_names, mention_tokens=mention_tokens)
     if len(specialists) != 1:
         return False
+    if _dispatch_has_explicit_host(
+        requested_names=requested_names,
+        mention_tokens=mention_tokens,
+        has_team=has_team,
+    ):
+        return False
     return bool(_looks_like_dispatch_operational_request(
         user_text,
         requested_names=requested_names,
@@ -10479,12 +10501,13 @@ def _looks_like_orchestrator_dispatch_request(
     mention_tokens: Optional[List[str]] = None,
     has_team: bool = False,
 ) -> bool:
-    requested = [str(x or "").strip() for x in list(requested_names or []) if str(x or "").strip()]
-    mentions = [str(x or "").strip().lower() for x in list(mention_tokens or []) if str(x or "").strip()]
     specialists = _dispatch_request_specialists(requested_names=requested_names, mention_tokens=mention_tokens)
-    has_host = any(tok in {"orion", "orkio", "team", "time"} for tok in mentions) or any(
-        _canonical_dispatch_specialist_slug(x) in {"orion", "orkio"} for x in requested
+    has_host = _dispatch_has_explicit_host(
+        requested_names=requested_names,
+        mention_tokens=mention_tokens,
+        has_team=False,
     )
+    multi_target_team = bool(has_team and len(specialists) > 1)
     return bool(
         _looks_like_dispatch_operational_request(
             user_text,
@@ -10492,7 +10515,7 @@ def _looks_like_orchestrator_dispatch_request(
             mention_tokens=mention_tokens,
             has_team=has_team,
         )
-        and (has_team or len(specialists) > 1 or (has_host and len(specialists) >= 1))
+        and (len(specialists) > 1 or (has_host and len(specialists) >= 1) or multi_target_team)
     )
 
 
@@ -10851,22 +10874,20 @@ def _dispatch_receipt_mode(receipt: Optional[Dict[str, Any]]) -> str:
     r = dict(receipt or {})
     requested_specialists = _dispatch_receipt_requested_specialists_original(r) or _dispatch_receipt_requested_specialists(r)
     target_agents = _dispatch_receipt_target_agents(r)
-    has_team = bool(r.get("has_team"))
     if bool(r.get("mediated_single_target_delegation")):
         return "mediated_single_target"
-    if bool(r.get("orchestrator_dispatch")) and _has_host_and_single_specialist(r):
+    if _has_host_and_single_specialist(r):
         return "mediated_single_target"
     if bool(r.get("orchestrator_dispatch")) and (
         len(requested_specialists) > 1
         or len(target_agents) > 1
-        or (has_team and len(requested_specialists) != 1 and len(target_agents) != 1)
     ):
         return "orchestrator_multi_target"
-    if bool(r.get("direct_agent_message")) and len(requested_specialists) == 1 and not bool(r.get("orchestrator_dispatch")) and not has_team:
+    if bool(r.get("direct_agent_message")) and len(requested_specialists) == 1 and not _has_host_and_single_specialist(r):
         return "direct_single_target"
     if len(requested_specialists) > 1 or len(target_agents) > 1:
         return "orchestrator_multi_target"
-    if len(requested_specialists) == 1 and not _has_host_and_single_specialist(r) and not has_team and not bool(r.get("orchestrator_dispatch")):
+    if len(requested_specialists) == 1 and not _has_host_and_single_specialist(r):
         return "direct_single_target"
     return ""
 
@@ -16527,20 +16548,38 @@ def chat(
             try:
                 intent_name_live_sync = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
                 if intent_name_live_sync == "direct_agent_message" or bool(dispatch_routing_receipt.get("direct_agent_message")):
+                    requested_specialists_sync = (
+                        _dispatch_receipt_requested_specialists_original(dispatch_routing_receipt)
+                        or _dispatch_receipt_requested_specialists(dispatch_routing_receipt)
+                    )
                     direct_target = str(
                         dispatch_routing_receipt.get("target_agent")
                         or dispatch_routing_receipt.get("visible_agent")
                         or ""
                     ).strip()
                     if not direct_target:
-                        requested_specialists_sync = _dispatch_receipt_requested_specialists(dispatch_routing_receipt)
                         direct_target = requested_specialists_sync[0] if len(requested_specialists_sync) == 1 else ""
-                    if direct_target:
+                    direct_mode_sync = "direct_single_target"
+                    if _has_host_and_single_specialist(dispatch_routing_receipt) and len(requested_specialists_sync) == 1:
+                        direct_target = requested_specialists_sync[0]
+                        direct_mode_sync = "mediated_single_target"
+                        dispatch_routing_receipt["delegated_by"] = dispatch_routing_receipt.get("visible_agent") or "orion"
+                        dispatch_routing_receipt["mediated_single_target_delegation"] = True
+                    if _is_presence_status_question_request(inp.message) and (
+                        _canonical_dispatch_specialist_slug(direct_target) in {"orion", "orkio"} or not requested_specialists_sync
+                    ):
+                        dispatch_routing_receipt["answer_source"] = "presence_status_answer"
+                        capability_inventory_answer = _build_presence_status_answer_text(inp.message)
+                    elif direct_target:
                         dispatch_routing_receipt["final_speaker"] = direct_target
                         dispatch_routing_receipt["visible_agent"] = direct_target
                         dispatch_routing_receipt["target_agent"] = direct_target
                         dispatch_routing_receipt["target_agents"] = [direct_target]
-                        dispatch_routing_receipt["answer_source"] = "direct_single_target_finalizer"
+                        dispatch_routing_receipt["answer_source"] = (
+                            "mediated_single_target_finalizer"
+                            if direct_mode_sync == "mediated_single_target"
+                            else "direct_single_target_finalizer"
+                        )
                         resolved_direct_agent_row = _resolve_dispatch_agent_row(alias_to_agent, direct_target)
                         if resolved_direct_agent_row is not None:
                             final_signer_agent = resolved_direct_agent_row
@@ -16554,7 +16593,7 @@ def chat(
                             inp.message,
                             target_agent=direct_target,
                             visible_agent=direct_target,
-                            mode="direct_single_target",
+                            mode=direct_mode_sync,
                         )
                     else:
                         capability_inventory_answer = None
@@ -21644,20 +21683,38 @@ async def chat_stream(
                     try:
                         intent_name_live_stream = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
                         if intent_name_live_stream == "direct_agent_message" or bool(dispatch_routing_receipt_stream.get("direct_agent_message")):
+                            requested_specialists_stream = (
+                                _dispatch_receipt_requested_specialists_original(dispatch_routing_receipt_stream)
+                                or _dispatch_receipt_requested_specialists(dispatch_routing_receipt_stream)
+                            )
                             direct_target_stream = str(
                                 dispatch_routing_receipt_stream.get("target_agent")
                                 or dispatch_routing_receipt_stream.get("visible_agent")
                                 or ""
                             ).strip()
                             if not direct_target_stream:
-                                requested_specialists_stream = _dispatch_receipt_requested_specialists(dispatch_routing_receipt_stream)
                                 direct_target_stream = requested_specialists_stream[0] if len(requested_specialists_stream) == 1 else ""
-                            if direct_target_stream:
+                            direct_mode_stream = "direct_single_target"
+                            if _has_host_and_single_specialist(dispatch_routing_receipt_stream) and len(requested_specialists_stream) == 1:
+                                direct_target_stream = requested_specialists_stream[0]
+                                direct_mode_stream = "mediated_single_target"
+                                dispatch_routing_receipt_stream["delegated_by"] = dispatch_routing_receipt_stream.get("visible_agent") or "orion"
+                                dispatch_routing_receipt_stream["mediated_single_target_delegation"] = True
+                            if _is_presence_status_question_request(message) and (
+                                _canonical_dispatch_specialist_slug(direct_target_stream) in {"orion", "orkio"} or not requested_specialists_stream
+                            ):
+                                dispatch_routing_receipt_stream["answer_source"] = "presence_status_answer"
+                                capability_inventory_answer = _build_presence_status_answer_text(message)
+                            elif direct_target_stream:
                                 dispatch_routing_receipt_stream["final_speaker"] = direct_target_stream
                                 dispatch_routing_receipt_stream["visible_agent"] = direct_target_stream
                                 dispatch_routing_receipt_stream["target_agent"] = direct_target_stream
                                 dispatch_routing_receipt_stream["target_agents"] = [direct_target_stream]
-                                dispatch_routing_receipt_stream["answer_source"] = "direct_single_target_finalizer"
+                                dispatch_routing_receipt_stream["answer_source"] = (
+                                    "mediated_single_target_finalizer"
+                                    if direct_mode_stream == "mediated_single_target"
+                                    else "direct_single_target_finalizer"
+                                )
                                 resolved_direct_agent_row = _resolve_dispatch_agent_row(alias_to_agent, direct_target_stream)
                                 if resolved_direct_agent_row is not None:
                                     final_signer_agent = resolved_direct_agent_row
@@ -21671,7 +21728,7 @@ async def chat_stream(
                                     message,
                                     target_agent=direct_target_stream,
                                     visible_agent=direct_target_stream,
-                                    mode="direct_single_target",
+                                    mode=direct_mode_stream,
                                 )
                             else:
                                 capability_inventory_answer = None
