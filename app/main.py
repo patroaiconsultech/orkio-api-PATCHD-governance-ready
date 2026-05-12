@@ -3545,11 +3545,22 @@ def _chat_stream_rate_limit_payload(
     max_global: Optional[int] = None,
     max_ip: Optional[int] = None,
 ) -> Dict[str, Any]:
+    retry_value = int(retry_after or _chat_stream_retry_after_seconds())
+    bucket = _dispatch_error_bucket(scope, provider_error_code=provider_error_code, provider_error_type=provider_error_type)
+    message = "Estamos operando no limite seguro da plataforma. Tente novamente em instantes."
+    if bucket == "ip":
+        message = "Seu acesso atingiu temporariamente o limite de streams deste IP. Tente novamente em instantes."
+    elif bucket == "provider":
+        message = "O provedor do chat está limitando novas respostas no momento. Tente novamente em instantes."
     return {
         "code": "CHAT_STREAM_RATE_LIMITED",
-        "message": "Estamos operando no limite seguro da plataforma. Tente novamente em instantes.",
+        "error_type": "rate_limit",
+        "source": "chat_stream",
+        "bucket": bucket,
+        "message": message,
         "rate_limit_scope": scope or "unknown",
-        "retry_after": retry_after,
+        "retry_after": retry_value,
+        "retry_after_seconds": retry_value,
         "provider_error_code": provider_error_code,
         "provider_error_type": provider_error_type,
         "provider": provider or "openai",
@@ -10571,7 +10582,7 @@ def _build_dispatch_routing_receipt(
     dispatch_attempted = bool(direct_agent_message or orchestrator_dispatch)
     target_agent = targets[0] if len(targets) == 1 else (requested_specialists[0] if len(requested_specialists) == 1 else "")
     visible = str(visible_agent or target_agent or (requested_specialists[0] if len(requested_specialists) == 1 else "") or "").strip()
-    return {
+    receipt = {
         "intent": str(intent or "").strip(),
         "visible_agent": visible,
         "target_agent": target_agent,
@@ -10586,7 +10597,10 @@ def _build_dispatch_routing_receipt(
         "dispatch_receipt_id": (f"dispatch_{new_id()[:12]}" if dispatch_attempted else None),
         "fallback_used": bool(fallback_used),
         "fallback_reason": str(fallback_reason or "").strip(),
+        "requested_specialists_original": list(requested_specialists or []),
+        "target_agents_original": list(targets or []),
     }
+    return _freeze_dispatch_receipt_state(receipt)
 
 
 def _merge_dispatch_routing_receipt(
@@ -10811,13 +10825,24 @@ def _dispatch_receipt_requested_specialists_original(receipt: Optional[Dict[str,
     return out
 
 
+def _dispatch_receipt_non_host_specialists(receipt: Optional[Dict[str, Any]]) -> List[str]:
+    r = dict(receipt or {})
+    hosts = {"orion", "orkio", "team", "time"}
+    specialists = _dispatch_receipt_requested_specialists_original(r) or _dispatch_receipt_requested_specialists(r)
+    out: List[str] = []
+    for item in list(specialists or []):
+        slug = _canonical_dispatch_specialist_slug(item)
+        if slug and slug not in hosts and slug not in out:
+            out.append(slug)
+    return out
+
+
 def _has_host_and_single_specialist(receipt: Optional[Dict[str, Any]]) -> bool:
     r = dict(receipt or {})
     hosts = {"orion", "orkio", "team", "time"}
     mentions = [_canonical_dispatch_specialist_slug(x) for x in list(r.get("mention_tokens") or [])]
     requested = [_canonical_dispatch_specialist_slug(x) for x in list(r.get("requested_names") or [])]
-    specialists = _dispatch_receipt_requested_specialists_original(r) or _dispatch_receipt_requested_specialists(r)
-    specialists = [x for x in specialists if x and x not in hosts]
+    specialists = _dispatch_receipt_non_host_specialists(r)
     has_host = any(x in hosts for x in mentions if x) or any(x in hosts for x in requested if x)
     return bool(has_host and len(specialists) == 1)
 
@@ -10849,28 +10874,72 @@ def _resolve_dispatch_agent_row(alias_to_agent: Optional[Dict[str, Any]], agent_
 
 def _dispatch_receipt_mode(receipt: Optional[Dict[str, Any]]) -> str:
     r = dict(receipt or {})
+    frozen = str(r.get("dispatch_mode_frozen") or "").strip()
+    if frozen:
+        return frozen
     requested_specialists = _dispatch_receipt_requested_specialists_original(r) or _dispatch_receipt_requested_specialists(r)
-    target_agents = _dispatch_receipt_target_agents(r)
+    target_agents = list(r.get("target_agents_original") or []) or _dispatch_receipt_target_agents(r)
+    non_host_specialists = _dispatch_receipt_non_host_specialists(r)
     has_team = bool(r.get("has_team"))
     if bool(r.get("mediated_single_target_delegation")):
         return "mediated_single_target"
-    if bool(r.get("orchestrator_dispatch")) and _has_host_and_single_specialist(r):
+    if _has_host_and_single_specialist(r):
         return "mediated_single_target"
     if bool(r.get("orchestrator_dispatch")) and (
-        len(requested_specialists) > 1
+        len(non_host_specialists) > 1
         or len(target_agents) > 1
-        or (has_team and len(requested_specialists) != 1 and len(target_agents) != 1)
+        or (has_team and len(non_host_specialists) != 1 and len(target_agents) != 1)
     ):
         return "orchestrator_multi_target"
-    if bool(r.get("direct_agent_message")) and len(requested_specialists) == 1 and not bool(r.get("orchestrator_dispatch")) and not has_team:
+    if bool(r.get("direct_agent_message")) and len(non_host_specialists or requested_specialists) == 1 and not bool(r.get("orchestrator_dispatch")) and not has_team:
         return "direct_single_target"
-    if len(requested_specialists) > 1 or len(target_agents) > 1:
+    if len(non_host_specialists) > 1 or len(target_agents) > 1:
         return "orchestrator_multi_target"
-    if len(requested_specialists) == 1 and not _has_host_and_single_specialist(r) and not has_team and not bool(r.get("orchestrator_dispatch")):
+    if len(non_host_specialists or requested_specialists) == 1 and not has_team and not bool(r.get("orchestrator_dispatch")):
         return "direct_single_target"
     return ""
 
 
+
+
+def _freeze_dispatch_receipt_state(receipt: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    r = dict(receipt or {})
+    if not list(r.get("requested_specialists_original") or []):
+        original_requested_specialists = _dispatch_receipt_requested_specialists(r)
+        if original_requested_specialists:
+            r["requested_specialists_original"] = list(original_requested_specialists)
+    if not list(r.get("target_agents_original") or []):
+        original_target_agents = _dispatch_receipt_target_agents(r)
+        if original_target_agents:
+            r["target_agents_original"] = list(original_target_agents)
+    if not str(r.get("dispatch_mode_frozen") or "").strip():
+        temp = dict(r)
+        temp.pop("dispatch_mode_frozen", None)
+        r["dispatch_mode_frozen"] = _dispatch_receipt_mode(temp)
+    return r
+
+
+def _apply_final_speaker_override(
+    receipt: Optional[Dict[str, Any]],
+    *,
+    final_signer_agent_name: str,
+) -> str:
+    r = dict(receipt or {})
+    final_speaker = str(r.get("final_speaker") or "").strip()
+    if final_speaker:
+        return _dispatch_agent_display_name(final_speaker)
+    return str(final_signer_agent_name or "").strip()
+
+
+def _dispatch_error_bucket(scope: str, provider_error_code: Optional[str] = None, provider_error_type: Optional[str] = None) -> str:
+    if provider_error_code or provider_error_type:
+        return "provider"
+    scope_norm = str(scope or "").strip().lower()
+    if scope_norm == "ip":
+        return "ip"
+    if scope_norm in {"user", "wallet"}:
+        return scope_norm
+    return "stream"
 def _build_specialist_answer_text(user_text: str, *, target_agent: str, mode: str) -> str:
     slug = _canonical_dispatch_specialist_slug(target_agent)
     agent_name = _dispatch_agent_display_name(target_agent)
@@ -10881,6 +10950,8 @@ def _build_specialist_answer_text(user_text: str, *, target_agent: str, mode: st
             agent_name,
             "status: online",
             f"mode: {mode}",
+            "agent_answer_delivered: true",
+            "execution_kind: deterministic_singleagent_readonly",
             "dispatch_attempted: true",
             "dispatch_executed: false",
         ])
@@ -10904,6 +10975,8 @@ def _build_specialist_answer_text(user_text: str, *, target_agent: str, mode: st
             ]
         lines.extend([
             f"mode: {mode}",
+            "agent_answer_delivered: true",
+            "execution_kind: deterministic_singleagent_readonly",
             "dispatch_attempted: true",
             "dispatch_executed: false",
         ])
@@ -10917,6 +10990,8 @@ def _build_specialist_answer_text(user_text: str, *, target_agent: str, mode: st
             "2. Confirmar intent, target_agent e final_speaker nos receipts.",
             "3. Bloquear fallback quando houver alvo explícito.",
             f"mode: {mode}",
+            "agent_answer_delivered: true",
+            "execution_kind: deterministic_singleagent_readonly",
             "dispatch_attempted: true",
             "dispatch_executed: false",
         ])
@@ -10929,6 +11004,8 @@ def _build_specialist_answer_text(user_text: str, *, target_agent: str, mode: st
             "2. Impedir que o finalizer de alvo único capture fluxos multiagente.",
             "3. Preservar o trilho de escrita governada apenas com autorização explícita do Super Admin.",
             f"mode: {mode}",
+            "agent_answer_delivered: true",
+            "execution_kind: deterministic_singleagent_readonly",
             "dispatch_attempted: true",
             "dispatch_executed: false",
         ])
@@ -10941,6 +11018,8 @@ def _build_specialist_answer_text(user_text: str, *, target_agent: str, mode: st
             "2. Garantir que /api/chat/stream e /api/messages reflitam o mesmo speaker final.",
             "3. Bloquear builder de receipt quando houver resposta útil determinística do especialista.",
             f"mode: {mode}",
+            "agent_answer_delivered: true",
+            "execution_kind: deterministic_singleagent_readonly",
             "dispatch_attempted: true",
             "dispatch_executed: false",
         ])
@@ -10953,6 +11032,8 @@ def _build_specialist_answer_text(user_text: str, *, target_agent: str, mode: st
             "2. Reconciliar stream e /api/messages sem exigir refresh manual.",
             "3. Evitar que respostas de host pareçam execução real do especialista.",
             f"mode: {mode}",
+            "agent_answer_delivered: true",
+            "execution_kind: deterministic_singleagent_readonly",
             "dispatch_attempted: true",
             "dispatch_executed: false",
         ])
@@ -10965,6 +11046,8 @@ def _build_specialist_answer_text(user_text: str, *, target_agent: str, mode: st
             "2. Proibir regressão para direct_agent_message_readonly em menção direta.",
             "3. Registrar receipts claros para dispatch_executed, fallback_used e final_speaker.",
             f"mode: {mode}",
+            "agent_answer_delivered: true",
+            "execution_kind: deterministic_singleagent_readonly",
             "dispatch_attempted: true",
             "dispatch_executed: false",
         ])
@@ -11006,6 +11089,9 @@ def _build_orchestrator_dispatch_readonly_answer_text(
         "mode:",
         "orchestrator_multi_target",
         "",
+        "execution_kind:",
+        "deterministic_multiagent_readonly",
+        "",
         "dispatch_attempted:",
         "true",
         "",
@@ -11025,15 +11111,19 @@ def _orchestrator_single_target_agent(
 ) -> str:
     r = dict(receipt or {})
     requested_specialists = _dispatch_receipt_requested_specialists_original(r) or _dispatch_receipt_requested_specialists(r)
-    if len(requested_specialists) > 1:
+    non_host_specialists = _dispatch_receipt_non_host_specialists(r)
+    if len(non_host_specialists) > 1 or len(requested_specialists) > 1:
         return ""
     if bool(r.get("has_team")) and not _has_host_and_single_specialist(r):
         return ""
-    targets = [str(x or "").strip() for x in _dispatch_receipt_target_agents(r) if str(x or "").strip()]
+    if len(non_host_specialists) == 1:
+        return non_host_specialists[0]
+    targets = [str(x or "").strip() for x in (list(r.get("target_agents_original") or []) or _dispatch_receipt_target_agents(r)) if str(x or "").strip()]
+    targets = [t for t in targets if _canonical_dispatch_specialist_slug(t) not in {"orion", "orkio", "team", "time"}]
     if len(targets) == 1:
         return targets[0]
     target = str(r.get("target_agent") or "").strip()
-    if target and target.lower() not in {"orion", "orkio", "team", "time"} and len(requested_specialists) <= 1:
+    if target and _canonical_dispatch_specialist_slug(target) not in {"orion", "orkio", "team", "time"} and len(requested_specialists) <= 1:
         return target
     if len(requested_specialists) == 1:
         return requested_specialists[0]
@@ -16119,6 +16209,7 @@ def chat(
         destination_contract,
         block_roster=block_roster_fallback,
     )
+    dispatch_routing_receipt = _freeze_dispatch_receipt_state(dispatch_routing_receipt)
     if block_roster_fallback:
         dispatch_routing_receipt["dispatch_attempted"] = True
         dispatch_routing_receipt["dispatch_executed"] = False
@@ -16533,14 +16624,16 @@ def chat(
                         or ""
                     ).strip()
                     if not direct_target:
-                        requested_specialists_sync = _dispatch_receipt_requested_specialists(dispatch_routing_receipt)
+                        requested_specialists_sync = _dispatch_receipt_non_host_specialists(dispatch_routing_receipt) or _dispatch_receipt_requested_specialists(dispatch_routing_receipt)
                         direct_target = requested_specialists_sync[0] if len(requested_specialists_sync) == 1 else ""
                     if direct_target:
                         dispatch_routing_receipt["final_speaker"] = direct_target
                         dispatch_routing_receipt["visible_agent"] = direct_target
                         dispatch_routing_receipt["target_agent"] = direct_target
                         dispatch_routing_receipt["target_agents"] = [direct_target]
-                        dispatch_routing_receipt["answer_source"] = "direct_single_target_finalizer"
+                        dispatch_routing_receipt["answer_source"] = "deterministic_specialist_answer"
+                        dispatch_routing_receipt["agent_answer_delivered"] = True
+                        dispatch_routing_receipt["execution_kind"] = "deterministic_singleagent_readonly"
                         resolved_direct_agent_row = _resolve_dispatch_agent_row(alias_to_agent, direct_target)
                         if resolved_direct_agent_row is not None:
                             final_signer_agent = resolved_direct_agent_row
@@ -16566,6 +16659,7 @@ def chat(
                         list(dispatch_routing_receipt.get("requested_specialists_original") or [])
                         or _dispatch_receipt_requested_specialists(dispatch_routing_receipt)
                     )
+                    dispatch_routing_receipt = _freeze_dispatch_receipt_state(dispatch_routing_receipt)
                     dispatch_mode_sync = _dispatch_receipt_mode(dispatch_routing_receipt)
                     delegated_target = _orchestrator_single_target_agent(dispatch_routing_receipt)
                     if dispatch_mode_sync == "orchestrator_multi_target":
@@ -16576,7 +16670,9 @@ def chat(
                         )
                         dispatch_routing_receipt["target_agents"] = list(multi_targets_sync)
                         dispatch_routing_receipt["selected_specialists"] = list(multi_targets_sync)
-                        dispatch_routing_receipt["answer_source"] = "orchestrator_multi_target_finalizer"
+                        dispatch_routing_receipt["answer_source"] = "deterministic_multiagent_readonly"
+                        dispatch_routing_receipt["agent_answer_delivered"] = True
+                        dispatch_routing_receipt["execution_kind"] = "deterministic_multiagent_readonly"
                         capability_inventory_answer = _build_orchestrator_dispatch_readonly_answer_text(
                             inp.message,
                             target_agents=list(multi_targets_sync),
@@ -16591,7 +16687,9 @@ def chat(
                         dispatch_routing_receipt["target_agents"] = [delegated_target]
                         dispatch_routing_receipt["selected_specialists"] = [delegated_target]
                         dispatch_routing_receipt["mediated_single_target_delegation"] = True
-                        dispatch_routing_receipt["answer_source"] = "mediated_single_target_finalizer"
+                        dispatch_routing_receipt["answer_source"] = "deterministic_specialist_answer"
+                        dispatch_routing_receipt["agent_answer_delivered"] = True
+                        dispatch_routing_receipt["execution_kind"] = "deterministic_singleagent_readonly"
                         dispatch_routing_receipt["host_stub_blocked"] = True
                         resolved_delegated_agent_row = _resolve_dispatch_agent_row(alias_to_agent, delegated_target)
                         if resolved_delegated_agent_row is not None:
@@ -16802,6 +16900,10 @@ def chat(
             else:
                 answer = "Ainda não encontrei informação nos documentos enviados para responder com precisão. Você pode anexar um documento relacionado?"
 
+        final_signer_agent_name = _apply_final_speaker_override(
+            dispatch_routing_receipt,
+            final_signer_agent_name=final_signer_agent_name,
+        )
         # Save assistant message for this agent
         m_ass = Message(
             id=new_id(),
@@ -20802,6 +20904,7 @@ async def chat_stream(
         destination_contract_stream,
         block_roster=block_roster_fallback_stream,
     )
+    dispatch_routing_receipt_stream = _freeze_dispatch_receipt_state(dispatch_routing_receipt_stream)
 
     if not target_agents_rows:
         raise HTTPException(400, "no agents configured")
@@ -21641,14 +21744,16 @@ async def chat_stream(
                                 or ""
                             ).strip()
                             if not direct_target_stream:
-                                requested_specialists_stream = _dispatch_receipt_requested_specialists(dispatch_routing_receipt_stream)
+                                requested_specialists_stream = _dispatch_receipt_non_host_specialists(dispatch_routing_receipt_stream) or _dispatch_receipt_requested_specialists(dispatch_routing_receipt_stream)
                                 direct_target_stream = requested_specialists_stream[0] if len(requested_specialists_stream) == 1 else ""
                             if direct_target_stream:
                                 dispatch_routing_receipt_stream["final_speaker"] = direct_target_stream
                                 dispatch_routing_receipt_stream["visible_agent"] = direct_target_stream
                                 dispatch_routing_receipt_stream["target_agent"] = direct_target_stream
                                 dispatch_routing_receipt_stream["target_agents"] = [direct_target_stream]
-                                dispatch_routing_receipt_stream["answer_source"] = "direct_single_target_finalizer"
+                                dispatch_routing_receipt_stream["answer_source"] = "deterministic_specialist_answer"
+                                dispatch_routing_receipt_stream["agent_answer_delivered"] = True
+                                dispatch_routing_receipt_stream["execution_kind"] = "deterministic_singleagent_readonly"
                                 resolved_direct_agent_row = _resolve_dispatch_agent_row(alias_to_agent, direct_target_stream)
                                 if resolved_direct_agent_row is not None:
                                     final_signer_agent = resolved_direct_agent_row
@@ -21674,6 +21779,7 @@ async def chat_stream(
                                 list(dispatch_routing_receipt_stream.get("requested_specialists_original") or [])
                                 or _dispatch_receipt_requested_specialists(dispatch_routing_receipt_stream)
                             )
+                            dispatch_routing_receipt_stream = _freeze_dispatch_receipt_state(dispatch_routing_receipt_stream)
                             dispatch_mode_stream = _dispatch_receipt_mode(dispatch_routing_receipt_stream)
                             delegated_target = _orchestrator_single_target_agent(dispatch_routing_receipt_stream)
                             if dispatch_mode_stream == "orchestrator_multi_target":
@@ -21684,7 +21790,9 @@ async def chat_stream(
                                 )
                                 dispatch_routing_receipt_stream["target_agents"] = list(multi_targets_stream)
                                 dispatch_routing_receipt_stream["selected_specialists"] = list(multi_targets_stream)
-                                dispatch_routing_receipt_stream["answer_source"] = "orchestrator_multi_target_finalizer"
+                                dispatch_routing_receipt_stream["answer_source"] = "deterministic_multiagent_readonly"
+                                dispatch_routing_receipt_stream["agent_answer_delivered"] = True
+                                dispatch_routing_receipt_stream["execution_kind"] = "deterministic_multiagent_readonly"
                                 capability_inventory_answer = _build_orchestrator_dispatch_readonly_answer_text(
                                     message,
                                     target_agents=list(multi_targets_stream),
@@ -21699,7 +21807,9 @@ async def chat_stream(
                                 dispatch_routing_receipt_stream["target_agents"] = [delegated_target]
                                 dispatch_routing_receipt_stream["selected_specialists"] = [delegated_target]
                                 dispatch_routing_receipt_stream["mediated_single_target_delegation"] = True
-                                dispatch_routing_receipt_stream["answer_source"] = "mediated_single_target_finalizer"
+                                dispatch_routing_receipt_stream["answer_source"] = "deterministic_specialist_answer"
+                                dispatch_routing_receipt_stream["agent_answer_delivered"] = True
+                                dispatch_routing_receipt_stream["execution_kind"] = "deterministic_singleagent_readonly"
                                 dispatch_routing_receipt_stream["host_stub_blocked"] = True
                                 resolved_delegated_agent_row = _resolve_dispatch_agent_row(alias_to_agent, delegated_target)
                                 if resolved_delegated_agent_row is not None:
@@ -22489,6 +22599,10 @@ async def chat_stream(
                 except Exception:
                     pass
 
+                final_signer_agent_name = _apply_final_speaker_override(
+                    dispatch_routing_receipt_stream,
+                    final_signer_agent_name=final_signer_agent_name,
+                )
                 previous_agent_payload = {"id": final_signer_agent_id, "name": final_signer_agent_name}
                 _stream_final_text = ans
                 _stream_final_agent_id = final_signer_agent_id
