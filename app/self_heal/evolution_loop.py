@@ -49,7 +49,7 @@ class EvolutionLoop:
         self.legacy_bridge_requested = _env_true("AUTO_PR_EXECUTION_ENABLED", "false")
         self.legacy_writer_requested = _env_true("AUTO_PR_WRITE_ENABLED", "false")
         self.legacy_capability_requested = _env_true("ENABLE_LEGACY_EVOLUTION_AUTOGEN", "false")
-        self.min_interval = max(15, _env_int("EVOLUTION_LOOP_MIN_INTERVAL_SECONDS", 20))
+        self.min_interval = max(60, _env_int("EVOLUTION_LOOP_MIN_INTERVAL_SECONDS", 120))
         self.max_interval = max(self.min_interval, _env_int("EVOLUTION_LOOP_MAX_INTERVAL_SECONDS", 300))
 
     def _compute_next_interval(self, db, scan_result: dict | None = None) -> int:
@@ -146,6 +146,10 @@ class EvolutionLoop:
                         pass
                     next_interval = self._compute_next_interval(db, result)
                     try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                    try:
                         self.logger.warning(
                             "EVOLUTION_LOOP_SCAN_DONE trace_id=%s findings=%s proposals_created=%s proposals_touched=%s proposals_suppressed=%s next_interval=%s",
                             trace_id,
@@ -178,7 +182,7 @@ class EvolutionLoop:
                     self.logger.exception("EVOLUTION_LOOP_CYCLE_FAIL trace_id=%s error=%s", trace_id, exc)
                 except Exception:
                     pass
-                next_interval = max(self.min_interval, min(self.max_interval, int(self.interval or 60)))
+                next_interval = max(self.min_interval, min(self.max_interval, max(int(self.interval or 60), self.min_interval)))
             finally:
                 if db is not None:
                     try:
