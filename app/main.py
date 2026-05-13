@@ -3688,6 +3688,25 @@ def _bg_release_stream(request: Request) -> None:
     except Exception:
         pass
 
+def _release_db_session(db: Optional[Session]) -> None:
+    """
+    Hotfix QueuePool:
+    release any checked-out connection held by a long-lived request-scoped Session
+    before awaiting slow provider calls or while an SSE response stays open.
+    Session.close() is safe here; SQLAlchemy will lazily checkout again on demand.
+    """
+    if db is None:
+        return
+    try:
+        db.rollback()
+    except Exception:
+        pass
+    try:
+        db.close()
+    except Exception:
+        pass
+
+
 async def _auth_rate_limit(request: Request) -> None:
     ip = _client_ip(request)
     try:
@@ -21450,7 +21469,12 @@ async def chat_stream(
             return None
         if _stream_assistant_persisted:
             return None
+        write_db = None
         try:
+            if SessionLocal is None:
+                raise RuntimeError("DATABASE_URL not configured")
+            _release_db_session(db)
+            write_db = SessionLocal()
             m_ass_id = new_id()
             m_ass_created_at = now_ts()
             m_ass = Message(
@@ -21463,12 +21487,8 @@ async def chat_stream(
                 agent_name=agent_name,
                 created_at=m_ass_created_at,
             )
-            db.add(m_ass)
-            db.commit()
-            try:
-                db.refresh(m_ass)
-            except Exception:
-                pass
+            write_db.add(m_ass)
+            write_db.commit()
             _stream_assistant_persisted = True
             _stream_assistant_message_id = m_ass_id
             _stream_assistant_persist_error = None
@@ -21483,13 +21503,14 @@ async def chat_stream(
                 )
             except Exception:
                 pass
-            return m_ass
+            return type("PersistedMessageRef", (), {"id": m_ass_id})()
         except Exception as persist_err:
             _stream_assistant_persist_error = str(persist_err)
-            try:
-                db.rollback()
-            except Exception:
-                pass
+            if write_db is not None:
+                try:
+                    write_db.rollback()
+                except Exception:
+                    pass
             try:
                 logger.exception(
                     "STREAM_ASSISTANT_PERSIST_FAILED trace_id=%s thread_id=%s agent_id=%s agent_name=%s",
@@ -21501,6 +21522,12 @@ async def chat_stream(
             except Exception:
                 pass
             return None
+        finally:
+            if write_db is not None:
+                try:
+                    write_db.close()
+                except Exception:
+                    pass
 
     if _is_execution_bridge_readonly_diagnostic_request(message):
         diagnostic_text = _build_execution_bridge_readonly_diagnostic_text(message, db=db, org=org)
@@ -21564,7 +21591,10 @@ async def chat_stream(
             except Exception:
                 return
 
+        _release_db_session(db)
         return StreamingResponse(_execution_bridge_readonly_diagnostic_gen(), media_type="text/event-stream")
+
+    _release_db_session(db)
 
     async def gen():
         dispatch_routing_receipt_stream = dict(dispatch_routing_receipt_stream_seed or {})
@@ -22185,6 +22215,7 @@ async def chat_stream(
                             )
                         except Exception:
                             return
+                    _release_db_session(db)
                     llm_task = asyncio.create_task(
                         asyncio.to_thread(
                             _openai_answer,
@@ -22834,6 +22865,7 @@ async def chat_stream(
                 pass
 
             # done global
+            _release_db_session(db)
             try:
                 payload = {
                     "done": True,
@@ -22924,6 +22956,7 @@ async def chat_stream(
                     agent_id=_stream_final_agent_id,
                     agent_name=_stream_final_agent_name or "Orion",
                 )
+            _release_db_session(db)
             try:
                 yield sse_execution(
                     "stream_failed",
@@ -22946,6 +22979,7 @@ async def chat_stream(
 
 
 
+    _release_db_session(db)
     await _stream_acquire(
         request,
         meta={
@@ -23142,6 +23176,8 @@ async def orchestrate(
     def sse_event(ev: str, data: Dict[str, Any]) -> str:
         return f"event: {ev}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
+    _release_db_session(db)
+
     async def gen():
         try:
             yield sse_event("status", {"phase": "planning", "status": "Orkio está analisando a tarefa e montando o plano...", "thread_id": tid, "trace_id": trace_id})
@@ -23272,6 +23308,7 @@ async def orchestrate(
 
             # LLM call
             try:
+                _release_db_session(db)
                 llm_task = asyncio.create_task(
                     asyncio.to_thread(
                         _openai_answer,
@@ -23288,6 +23325,7 @@ async def orchestrate(
                     if await request.is_disconnected():
                         try: llm_task.cancel()
                         except Exception: pass
+                        _release_db_session(db)
                         return
                     now = time.monotonic()
                     if now - last_keepalive >= KEEPALIVE_SECS:
@@ -23299,6 +23337,7 @@ async def orchestrate(
                     await asyncio.sleep(1.0)
 
                 ans_obj = await llm_task
+                _release_db_session(db)
             except Exception as e:
                 try:
                     yield sse_event("error", {"agent_id": ag_id, "message": str(e), "trace_id": trace_id})
@@ -23326,6 +23365,7 @@ async def orchestrate(
                 )
                 db.add(m_ass)
                 db.commit()
+                _release_db_session(db)
                 try:
                     _track_cost(
                         db=db, org=org, uid=uid, tid=tid, message_id=m_ass.id,
@@ -23336,9 +23376,12 @@ async def orchestrate(
                 except Exception:
                     try: db.rollback()
                     except Exception: pass
+                finally:
+                    _release_db_session(db)
             except Exception:
                 try: db.rollback()
                 except Exception: pass
+                _release_db_session(db)
 
             # Emit chunks
             for i in range(0, len(ans), step_size):
@@ -23360,12 +23403,14 @@ async def orchestrate(
                 return
 
         # Done global
+        _release_db_session(db)
         try:
             yield sse_event("done_diagnostics", _patch_diagnostics_snapshot({"thread_id": tid, "trace_id": trace_id}))
             yield sse_event("done", {"done": True, "thread_id": tid, "trace_id": trace_id, **_patch_diagnostics_snapshot()})
         except Exception:
             return
 
+    _release_db_session(db)
     await _stream_acquire(request)
     return StreamingResponse(
         gen(),
