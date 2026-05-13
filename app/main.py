@@ -1276,6 +1276,9 @@ def _is_production_env() -> bool:
     return _app_env() == "production"
 
 APP_VERSION = "2.4.0"
+READONLY_SPECIALIST_FALLBACK_ENABLED = _env_flag("ORKIO_READONLY_SPECIALIST_FALLBACK_ENABLED", True)
+READONLY_SPECIALIST_FALLBACK_ANNOTATE = _env_flag("ORKIO_READONLY_SPECIALIST_FALLBACK_ANNOTATE", True)
+GENERIC_AGENT_FALLBACK_LABEL = _clean_env(os.getenv("ORKIO_GENERIC_AGENT_FALLBACK_LABEL", "Agent"), default="Agent")
 PATCH_SENTINEL = "PR_COMPARE_STATUS_SENTINEL_12BK_V1"
 PATCH_FEATURE = "github_pr_compare_status_resolver"
 PATCH_EXPECTED_BEHAVIOR = "github_compare_and_pr_status_requests_resolve_without_inventory_fallback"
@@ -10873,6 +10876,74 @@ def _dispatch_agent_display_name(agent_name: Any) -> str:
     return str(agent_name or "").strip() or "Agente"
 
 
+def _infer_dispatch_speaker_from_answer_text(answer_text: Any) -> str:
+    text = str(answer_text or "").strip()
+    if not text:
+        return ""
+    for raw_line in text.splitlines():
+        line = re.sub(r"^[\s#>*\-]+", "", str(raw_line or "")).strip()
+        line = re.sub(r"\s*[:：]\s*$", "", line).strip()
+        if not line:
+            continue
+        slug = _canonical_dispatch_specialist_slug(line)
+        if slug:
+            return _dispatch_agent_display_name(line)
+        lowered = line.lower()
+        if lowered in {"assistant", "model", "agent", "agente"}:
+            return GENERIC_AGENT_FALLBACK_LABEL or "Agent"
+        break
+    return ""
+
+def _resolve_visible_assistant_name(
+    *,
+    receipt: Optional[Dict[str, Any]] = None,
+    current_name: Any = None,
+    answer_text: Any = "",
+    prefer_generic_when_empty: bool = True,
+) -> str:
+    r = dict(receipt or {})
+    candidates: List[Any] = []
+    candidates.extend([
+        r.get("final_speaker"),
+        r.get("visible_agent"),
+        r.get("target_agent"),
+    ])
+    candidates.extend(list(r.get("target_agents") or []))
+    candidates.extend(list(r.get("requested_specialists_original") or []))
+    candidates.extend(list(r.get("requested_names") or []))
+    candidates.extend(list(r.get("mention_tokens") or []))
+
+    for cand in candidates:
+        slug = _canonical_dispatch_specialist_slug(cand)
+        if slug and slug not in {"team", "time", "equipe", "board", "conselho"}:
+            return _dispatch_agent_display_name(cand)
+
+    inferred = _infer_dispatch_speaker_from_answer_text(answer_text)
+    if inferred:
+        return inferred
+
+    current = str(current_name or "").strip()
+    if current:
+        lowered = current.lower()
+        if lowered in {"assistant", "model", "agent", "agente"}:
+            return GENERIC_AGENT_FALLBACK_LABEL or "Agent"
+        return current
+
+    return (GENERIC_AGENT_FALLBACK_LABEL or "Agent") if prefer_generic_when_empty else "Orkio"
+
+def _readonly_dispatch_is_synthetic(receipt: Optional[Dict[str, Any]]) -> bool:
+    r = dict(receipt or {})
+    if bool(r.get("dispatch_executed")):
+        return False
+    answer_source = str(r.get("answer_source") or "").strip().lower()
+    return answer_source in {
+        "direct_single_target_finalizer",
+        "mediated_single_target_finalizer",
+        "orchestrator_dispatch_readonly",
+        "presence_status_answer",
+        "team_roster_answer",
+    } or bool(r.get("host_stub_blocked"))
+
 def _dispatch_receipt_requested_specialists_original(receipt: Optional[Dict[str, Any]]) -> List[str]:
     r = dict(receipt or {})
     out: List[str] = []
@@ -17017,6 +17088,13 @@ def chat(
             else:
                 answer = "Ainda não encontrei informação nos documentos enviados para responder com precisão. Você pode anexar um documento relacionado?"
 
+        final_signer_agent_name = _resolve_visible_assistant_name(
+            receipt=dispatch_routing_receipt,
+            current_name=final_signer_agent_name,
+            answer_text=answer,
+            prefer_generic_when_empty=True,
+        )
+
         # Save assistant message for this agent
         m_ass = Message(
             id=new_id(),
@@ -17119,14 +17197,23 @@ def chat(
 
     # PATCH0100_18B: removed CEO consolidation block to avoid mixed-agent responses
 
+    final_response_agent_name = _resolve_visible_assistant_name(
+        receipt=dispatch_routing_receipt,
+        current_name=((getattr(last_agent, "name", None) if last_agent else None) or final_signer_agent_name),
+        answer_text=combined,
+        prefer_generic_when_empty=True,
+    )
+    final_response_agent_row = _resolve_dispatch_agent_row(alias_to_agent, final_response_agent_name) or last_agent
+    synthetic_dispatch_fallback = _readonly_dispatch_is_synthetic(dispatch_routing_receipt)
+
     return {
         "thread_id": tid,
         "answer": combined,
         "citations": all_citations,
-        "agent_id": last_agent.id if last_agent else None,
-        "agent_name": last_agent.name if last_agent else None,
-        "voice_id": resolve_agent_voice(last_agent) if last_agent else None,
-        "avatar_url": getattr(last_agent, 'avatar_url', None) if last_agent else None,
+        "agent_id": final_response_agent_row.id if final_response_agent_row else None,
+        "agent_name": final_response_agent_name,
+        "voice_id": resolve_agent_voice(final_response_agent_row) if final_response_agent_row else None,
+        "avatar_url": getattr(final_response_agent_row, 'avatar_url', None) if final_response_agent_row else None,
         "runtime_hints": (
             (lambda _rh: (dict(_rh, capabilities=_get_runtime_capability_registry(db=db, org=org)) if isinstance(_rh, dict) else {"capabilities": _get_runtime_capability_registry(db=db, org=org)}))(
                 runtime_enrichment.get("runtime_hints") if runtime_enrichment else None
@@ -22800,10 +22887,16 @@ async def chat_stream(
 
                 previous_agent_payload = {"id": final_signer_agent_id, "name": final_signer_agent_name}
                 _stream_final_text = ans
-                _stream_final_agent_id = final_signer_agent_id
-                _stream_final_agent_name = final_signer_agent_name
-                _stream_final_voice_id = final_signer_voice_id
-                _stream_final_avatar_url = final_signer_avatar_url
+                _stream_final_agent_name = _resolve_visible_assistant_name(
+                    receipt=dispatch_routing_receipt_stream,
+                    current_name=final_signer_agent_name,
+                    answer_text=ans,
+                    prefer_generic_when_empty=True,
+                )
+                _stream_visible_agent_row = _resolve_dispatch_agent_row(alias_to_agent, _stream_final_agent_name)
+                _stream_final_agent_id = (_agent_attr(_stream_visible_agent_row, "id", None) if _stream_visible_agent_row is not None else None) or final_signer_agent_id
+                _stream_final_voice_id = resolve_agent_voice(_stream_visible_agent_row) if _stream_visible_agent_row is not None else final_signer_voice_id
+                _stream_final_avatar_url = (_agent_attr(_stream_visible_agent_row, "avatar_url", None) if _stream_visible_agent_row is not None else None) or final_signer_avatar_url
                 _stream_done_debug = dict(route_debug_payload)
                 _stream_done_debug.update(_assistant_answer_debug)
 
@@ -22874,6 +22967,9 @@ async def chat_stream(
                     "final_text": _stream_final_text,
                     "agent_id": _stream_final_agent_id,
                     "agent_name": _stream_final_agent_name,
+                    "final_speaker": _stream_final_agent_name,
+                    "synthetic_fallback": _readonly_dispatch_is_synthetic(dispatch_routing_receipt_stream),
+                    "dispatch_executed": bool(dispatch_routing_receipt_stream.get("dispatch_executed")),
                     "voice_id": _stream_final_voice_id,
                     "avatar_url": _stream_final_avatar_url,
                     "patch_sentinel": PATCH_SENTINEL,
