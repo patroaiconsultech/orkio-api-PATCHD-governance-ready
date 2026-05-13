@@ -1276,9 +1276,6 @@ def _is_production_env() -> bool:
     return _app_env() == "production"
 
 APP_VERSION = "2.4.0"
-READONLY_SPECIALIST_FALLBACK_ENABLED = _env_flag("ORKIO_READONLY_SPECIALIST_FALLBACK_ENABLED", True)
-READONLY_SPECIALIST_FALLBACK_ANNOTATE = _env_flag("ORKIO_READONLY_SPECIALIST_FALLBACK_ANNOTATE", True)
-GENERIC_AGENT_FALLBACK_LABEL = _clean_env(os.getenv("ORKIO_GENERIC_AGENT_FALLBACK_LABEL", "Agent"), default="Agent")
 PATCH_SENTINEL = "PR_COMPARE_STATUS_SENTINEL_12BK_V1"
 PATCH_FEATURE = "github_pr_compare_status_resolver"
 PATCH_EXPECTED_BEHAVIOR = "github_compare_and_pr_status_requests_resolve_without_inventory_fallback"
@@ -5936,10 +5933,9 @@ def _select_target_agents(
     if has_team:
         seen_ids = set()
         preferred_order = [
-            "orkio", "orkio (ceo)", "chris", "chris (vp/cfo)", "orion", "orion (cto)",
-            "auditor", "technical auditor",
-            "aurora", "aurora (cmo)", "atlas", "atlas (cro)", "themis", "themis (legal)",
-            "gaia", "gaia (accounting)", "hermes", "hermes (coo)", "selene", "selene (people)",
+            "orkio", "orkio (ceo)",
+            "chris", "chris (vp/cfo)",
+            "orion", "orion (cto)",
         ]
         for alias in preferred_order:
             a = alias_to_agent.get(alias)
@@ -10661,6 +10657,7 @@ def _build_dispatch_routing_receipt(
         "dispatch_executed": bool(dispatch_executed),
         "dispatch_receipt_id": (f"dispatch_{new_id()[:12]}" if dispatch_attempted else None),
         "fallback_used": bool(fallback_used),
+        "synthetic_fallback": bool(fallback_used),
         "fallback_reason": str(fallback_reason or "").strip(),
     }
 
@@ -10875,74 +10872,6 @@ def _dispatch_agent_display_name(agent_name: Any) -> str:
         return labels.get(slug, str(agent_name or "").strip() or slug.replace("_", " ").title())
     return str(agent_name or "").strip() or "Agente"
 
-
-def _infer_dispatch_speaker_from_answer_text(answer_text: Any) -> str:
-    text = str(answer_text or "").strip()
-    if not text:
-        return ""
-    for raw_line in text.splitlines():
-        line = re.sub(r"^[\s#>*\-]+", "", str(raw_line or "")).strip()
-        line = re.sub(r"\s*[:：]\s*$", "", line).strip()
-        if not line:
-            continue
-        slug = _canonical_dispatch_specialist_slug(line)
-        if slug:
-            return _dispatch_agent_display_name(line)
-        lowered = line.lower()
-        if lowered in {"assistant", "model", "agent", "agente"}:
-            return GENERIC_AGENT_FALLBACK_LABEL or "Agent"
-        break
-    return ""
-
-def _resolve_visible_assistant_name(
-    *,
-    receipt: Optional[Dict[str, Any]] = None,
-    current_name: Any = None,
-    answer_text: Any = "",
-    prefer_generic_when_empty: bool = True,
-) -> str:
-    r = dict(receipt or {})
-    candidates: List[Any] = []
-    candidates.extend([
-        r.get("final_speaker"),
-        r.get("visible_agent"),
-        r.get("target_agent"),
-    ])
-    candidates.extend(list(r.get("target_agents") or []))
-    candidates.extend(list(r.get("requested_specialists_original") or []))
-    candidates.extend(list(r.get("requested_names") or []))
-    candidates.extend(list(r.get("mention_tokens") or []))
-
-    for cand in candidates:
-        slug = _canonical_dispatch_specialist_slug(cand)
-        if slug and slug not in {"team", "time", "equipe", "board", "conselho"}:
-            return _dispatch_agent_display_name(cand)
-
-    inferred = _infer_dispatch_speaker_from_answer_text(answer_text)
-    if inferred:
-        return inferred
-
-    current = str(current_name or "").strip()
-    if current:
-        lowered = current.lower()
-        if lowered in {"assistant", "model", "agent", "agente"}:
-            return GENERIC_AGENT_FALLBACK_LABEL or "Agent"
-        return current
-
-    return (GENERIC_AGENT_FALLBACK_LABEL or "Agent") if prefer_generic_when_empty else "Orkio"
-
-def _readonly_dispatch_is_synthetic(receipt: Optional[Dict[str, Any]]) -> bool:
-    r = dict(receipt or {})
-    if bool(r.get("dispatch_executed")):
-        return False
-    answer_source = str(r.get("answer_source") or "").strip().lower()
-    return answer_source in {
-        "direct_single_target_finalizer",
-        "mediated_single_target_finalizer",
-        "orchestrator_dispatch_readonly",
-        "presence_status_answer",
-        "team_roster_answer",
-    } or bool(r.get("host_stub_blocked"))
 
 def _dispatch_receipt_requested_specialists_original(receipt: Optional[Dict[str, Any]]) -> List[str]:
     r = dict(receipt or {})
@@ -11205,6 +11134,304 @@ def _build_direct_agent_message_answer_text(
         mode=str(mode or "direct_single_target").strip() or "direct_single_target",
     )
 
+
+def _should_attempt_real_agent_runtime(
+    *,
+    target_agent: str,
+    resolved_agent_row: Any = None,
+    current_loop_agent: Any = None,
+) -> bool:
+    slug = _canonical_dispatch_specialist_slug(target_agent)
+    if not slug or slug in {"agent", "time", "team"}:
+        return False
+    if resolved_agent_row is not None:
+        return True
+    if current_loop_agent is not None:
+        current_name = _agent_attr(current_loop_agent, "name", None)
+        if _canonical_dispatch_specialist_slug(current_name) == slug:
+            return True
+    return False
+
+
+def execute_agent_runtime(
+    agent_row: Any,
+    message: str,
+    *,
+    history: Optional[List[Dict[str, str]]] = None,
+    citations: Optional[List[Dict[str, Any]]] = None,
+    runtime_overlay: str = "",
+    founder_guidance: str = "",
+    has_team: bool = False,
+    mention_tokens: Optional[List[str]] = None,
+    user_prompt_override: Optional[str] = None,
+) -> Dict[str, Any]:
+    execution_id = new_id()
+    agent_name = _agent_attr(agent_row, "name", None) or "Agent"
+    agent_slug = _canonical_dispatch_specialist_slug(agent_name) or "agent"
+    if agent_row is None:
+        return {
+            "ok": False,
+            "text": "",
+            "error": "agent_runtime_unavailable",
+            "ans_obj": {
+                "code": "LLM_ERROR",
+                "error": "agent_runtime_unavailable",
+                "message": "Agente alvo indisponível para execução real.",
+                "text": "",
+                "usage": None,
+                "model": None,
+            },
+            "runtime_execution_id": execution_id,
+            "executor_agent": agent_name,
+            "execution_trace": [f"execute_agent_runtime:missing:{agent_slug}"],
+            "files_used": [],
+            "runtime_mode": "direct_agent_runtime",
+        }
+
+    system_prompt = str(_agent_attr(agent_row, "system_prompt", "") or "").strip()
+    if runtime_overlay:
+        system_prompt = ((system_prompt or "").strip() + "\n\n" + str(runtime_overlay or "").strip()).strip()
+    if founder_guidance:
+        system_prompt = ((system_prompt or "").strip() + "\n\nFounder guidance (temporary, internal):\n" + str(founder_guidance or "").strip()).strip()
+
+    model_override = _agent_attr(agent_row, "model", None)
+    fallback_model_override = _agent_attr(agent_row, "fallback_model", None)
+    temperature = None
+    try:
+        _raw_temperature = _agent_attr(agent_row, "temperature", None)
+        if _raw_temperature not in (None, ""):
+            temperature = float(_raw_temperature)
+    except Exception:
+        temperature = None
+
+    proxy_agent = type("RuntimeDispatchAgentProxy", (), {"name": agent_name})()
+    user_prompt = user_prompt_override or _build_agent_prompt(
+        proxy_agent,
+        message,
+        has_team,
+        list(mention_tokens or []),
+    )
+
+    ans_obj = _openai_answer(
+        user_prompt,
+        list(citations or []),
+        history=list(history or []),
+        system_prompt=system_prompt or None,
+        model_override=model_override,
+        temperature=temperature,
+        fallback_model_override=fallback_model_override,
+    ) or {}
+
+    text = ""
+    if isinstance(ans_obj, dict):
+        text = str(ans_obj.get("text") or "")
+    files_used = []
+    for c in list(citations or []):
+        fn = str(c.get("filename") or c.get("file_id") or "").strip()
+        if fn:
+            files_used.append(fn)
+    files_used = list(dict.fromkeys(files_used))
+
+    if text.strip():
+        return {
+            "ok": True,
+            "text": text,
+            "error": "",
+            "ans_obj": ans_obj,
+            "runtime_execution_id": execution_id,
+            "executor_agent": agent_name,
+            "execution_trace": [f"execute_agent_runtime:ok:{agent_slug}"],
+            "files_used": files_used,
+            "runtime_mode": "direct_agent_runtime",
+        }
+
+    error = ""
+    if isinstance(ans_obj, dict):
+        error = str(
+            ans_obj.get("error")
+            or ans_obj.get("code")
+            or ans_obj.get("message")
+            or "agent_runtime_empty_response"
+        )
+    if not error:
+        error = "agent_runtime_empty_response"
+
+    return {
+        "ok": False,
+        "text": "",
+        "error": error,
+        "ans_obj": ans_obj if isinstance(ans_obj, dict) else {},
+        "runtime_execution_id": execution_id,
+        "executor_agent": agent_name,
+        "execution_trace": [f"execute_agent_runtime:fail:{agent_slug}:{error}"],
+        "files_used": files_used,
+        "runtime_mode": "direct_agent_runtime",
+    }
+
+
+
+
+def _infer_team_output_type(user_text: str) -> str:
+    txt = str(user_text or "").strip().lower()
+    if any(term in txt for term in [
+        "relatório completo", "relatorio completo", "full report", "complete report",
+        "relatório detalhado", "relatorio detalhado", "parecer completo",
+    ]):
+        return "full_report"
+    if any(term in txt for term in [
+        "resumo executivo", "executive summary", "one pager", "one-pager",
+    ]):
+        return "executive_summary"
+    if "resumo" in txt or "summary" in txt:
+        return "summary"
+    return "standard"
+
+def _team_mission_participants(target_agents: Optional[List[str]] = None) -> List[str]:
+    requested = [_dispatch_agent_display_name(x) for x in list(target_agents or []) if str(x or "").strip()]
+    ordered: List[str] = []
+    for candidate in ["Orkio", "Chris", "Orion"]:
+        if candidate not in ordered and (not requested or candidate in requested):
+            ordered.append(candidate)
+    for item in requested:
+        if item not in ordered:
+            ordered.append(item)
+    return ordered or ["Orkio", "Chris", "Orion"]
+
+def _build_team_mission_answer_text(
+    user_text: str,
+    *,
+    target_agents: Optional[List[str]] = None,
+) -> str:
+    participants = _team_mission_participants(target_agents)
+    output_type = _infer_team_output_type(user_text)
+    request_text = str(user_text or "").strip()
+
+    if output_type == "summary":
+        lines = [
+            "Team Mission",
+            f"Missão executada por: {', '.join(participants)}",
+            "Coordenação final: Orkio",
+            "",
+            "Resumo:",
+            f"- Solicitação: {request_text or 'missão em equipe'}",
+            f"- Participantes: {', '.join(participants)}",
+            "- Entrega: síntese coordenada com autoria explícita dos agentes.",
+            "",
+            "mode: team_mission",
+            "dispatch_attempted: true",
+            "dispatch_executed: false",
+            "synthetic_fallback: true",
+            "output_type: summary",
+        ]
+        return "\n".join(lines)
+
+    if output_type == "executive_summary":
+        lines = [
+            "Team Mission",
+            f"Missão executada por: {', '.join(participants)}",
+            "Coordenação final: Orkio",
+            "",
+            "Resumo executivo",
+            "",
+            "Chris",
+            "- Leitura comercial e de viabilidade da missão.",
+            "",
+            "Orion",
+            "- Síntese estratégica e direcionamento prioritário.",
+            "",
+            "Orkio",
+            "- Consolidação final institucional com próximos passos.",
+            "",
+            "mode: team_mission",
+            "dispatch_attempted: true",
+            "dispatch_executed: false",
+            "synthetic_fallback: true",
+            "output_type: executive_summary",
+        ]
+        return "\n".join(lines)
+
+    if output_type == "full_report":
+        lines = [
+            "Team Mission",
+            f"Missão executada por: {', '.join(participants)}",
+            "Coordenação final: Orkio",
+            "",
+            "RELATÓRIO COMPLETO",
+            "",
+            "MISSÃO",
+            request_text or "Missão em equipe solicitada pelo usuário.",
+            "",
+            "AGENTES PARTICIPANTES",
+            *[f"- {name}" for name in participants],
+            "",
+            "ANÁLISE CHRIS",
+            "Parecer comercial, leitura de negócio e viabilidade da solicitação.",
+            "",
+            "ANÁLISE ORION",
+            "Síntese estratégica, priorização e direcionamento arquitetural/decisório.",
+            "",
+            "CONSOLIDAÇÃO ORKIO",
+            "Resposta institucional final consolidando as contribuições da equipe.",
+            "",
+            "PRÓXIMOS PASSOS",
+            "1. Validar a entrega desejada (resumo, resumo executivo ou relatório).",
+            "2. Confirmar se a missão seguirá por runtime real ou fallback controlado.",
+            "3. Persistir autoria e recibo final com participantes explícitos.",
+            "",
+            "mode: team_mission",
+            "dispatch_attempted: true",
+            "dispatch_executed: false",
+            "synthetic_fallback: true",
+            "output_type: full_report",
+        ]
+        return "\n".join(lines)
+
+    lines = [
+        "Team Mission",
+        f"Missão executada por: {', '.join(participants)}",
+        "Coordenação final: Orkio",
+        "",
+        "Entrega coordenada solicitada para a equipe.",
+        "",
+        "Chris",
+        "- análise comercial / viabilidade",
+        "",
+        "Orion",
+        "- síntese estratégica / decisão",
+        "",
+        "Orkio",
+        "- consolidação final / resposta institucional",
+        "",
+        "mode: team_mission",
+        "dispatch_attempted: true",
+        "dispatch_executed: false",
+        "synthetic_fallback: true",
+        "output_type: standard",
+    ]
+    return "\n".join(lines)
+
+def _apply_team_mission_receipt(
+    receipt: Optional[Dict[str, Any]],
+    *,
+    user_text: str,
+    target_agents: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    r = dict(receipt or {})
+    participants = _team_mission_participants(target_agents)
+    output_type = _infer_team_output_type(user_text)
+    r["mission_type"] = "team_mission"
+    r["output_type"] = output_type
+    r["participants"] = participants
+    r["target_agent"] = "Team"
+    r["target_agents"] = participants
+    r["selected_specialists"] = participants
+    r["final_speaker"] = "Orkio"
+    r["visible_agent"] = "Orkio"
+    r["answer_source"] = "team_mission_fallback"
+    r["synthetic_fallback"] = True
+    r["fallback_used"] = True
+    r["fallback_reason"] = "team_fanout_unavailable"
+    return r
 
 def _build_orchestrator_dispatch_readonly_answer_text(
     user_text: str,
@@ -16735,6 +16962,9 @@ def chat(
 
         execution_result = None
         capability_inventory_answer = None
+        direct_runtime_requested = False
+        direct_runtime_target = ""
+        direct_runtime_result: Optional[Dict[str, Any]] = None
         # PATCH27_12AJ — should_execute_runtime decidido antes do loop
         if blocked_reply is None:
             try:
@@ -16836,12 +17066,58 @@ def chat(
                             final_signer_avatar_url = _agent_attr(resolved_direct_agent_row, "avatar_url", None) or final_signer_avatar_url
                         else:
                             final_signer_agent_name = _dispatch_agent_display_name(direct_target)
-                        capability_inventory_answer = _build_direct_agent_message_answer_text(
-                            inp.message,
+                        if _should_attempt_real_agent_runtime(
                             target_agent=direct_target,
-                            visible_agent=direct_target,
-                            mode=direct_mode_sync,
-                        )
+                            resolved_agent_row=resolved_direct_agent_row,
+                            current_loop_agent=agent,
+                        ):
+                            direct_runtime_requested = True
+                            direct_runtime_target = direct_target
+                            direct_runtime_result = execute_agent_runtime(
+                                resolved_direct_agent_row or agent,
+                                inp.message,
+                                history=history,
+                                citations=citations,
+                                runtime_overlay=runtime_overlay,
+                                founder_guidance=active_founder_guidance,
+                                has_team=has_team,
+                                mention_tokens=mention_tokens,
+                            )
+                            if direct_runtime_result.get("ok"):
+                                dispatch_routing_receipt["synthetic_fallback"] = False
+                                dispatch_routing_receipt["fallback_used"] = False
+                                dispatch_routing_receipt["fallback_reason"] = ""
+                                dispatch_routing_receipt["answer_source"] = "execute_agent_runtime"
+                                dispatch_routing_receipt["runtime_execution_id"] = direct_runtime_result.get("runtime_execution_id")
+                                dispatch_routing_receipt["executor_agent"] = direct_runtime_result.get("executor_agent")
+                                dispatch_routing_receipt["execution_trace"] = list(direct_runtime_result.get("execution_trace") or [])
+                                dispatch_routing_receipt["files_used"] = list(direct_runtime_result.get("files_used") or [])
+                                capability_inventory_answer = None
+                            else:
+                                dispatch_routing_receipt["synthetic_fallback"] = True
+                                dispatch_routing_receipt["fallback_used"] = True
+                                dispatch_routing_receipt["fallback_reason"] = str(direct_runtime_result.get("error") or "agent_runtime_unavailable")
+                                dispatch_routing_receipt["answer_source"] = "controlled_fallback"
+                                dispatch_routing_receipt["runtime_execution_id"] = direct_runtime_result.get("runtime_execution_id")
+                                dispatch_routing_receipt["executor_agent"] = direct_runtime_result.get("executor_agent")
+                                dispatch_routing_receipt["execution_trace"] = list(direct_runtime_result.get("execution_trace") or [])
+                                dispatch_routing_receipt["files_used"] = list(direct_runtime_result.get("files_used") or [])
+                                capability_inventory_answer = _build_direct_agent_message_answer_text(
+                                    inp.message,
+                                    target_agent=direct_target,
+                                    visible_agent=direct_target,
+                                    mode=direct_mode_sync,
+                                )
+                        else:
+                            dispatch_routing_receipt["synthetic_fallback"] = True
+                            dispatch_routing_receipt["fallback_used"] = True
+                            dispatch_routing_receipt["fallback_reason"] = "agent_runtime_unavailable"
+                            capability_inventory_answer = _build_direct_agent_message_answer_text(
+                                inp.message,
+                                target_agent=direct_target,
+                                visible_agent=direct_target,
+                                mode=direct_mode_sync,
+                            )
                     else:
                         capability_inventory_answer = None
                 elif intent_name_live_sync == "orchestrator_dispatch_readonly" or bool(dispatch_routing_receipt.get("orchestrator_dispatch")):
@@ -16860,13 +17136,24 @@ def chat(
                             or list(dispatch_routing_receipt.get("target_agents") or [])
                             or list(requested_specialists_sync or [])
                         )
-                        dispatch_routing_receipt["target_agents"] = list(multi_targets_sync)
-                        dispatch_routing_receipt["selected_specialists"] = list(multi_targets_sync)
-                        dispatch_routing_receipt["answer_source"] = "orchestrator_multi_target_finalizer"
-                        capability_inventory_answer = _build_orchestrator_dispatch_readonly_answer_text(
+                        dispatch_routing_receipt = _apply_team_mission_receipt(
+                            dispatch_routing_receipt,
+                            user_text=inp.message,
+                            target_agents=list(multi_targets_sync),
+                        )
+                        capability_inventory_answer = _build_team_mission_answer_text(
                             inp.message,
                             target_agents=list(multi_targets_sync),
                         )
+                        resolved_team_signer_row = _resolve_dispatch_agent_row(alias_to_agent, "orkio")
+                        if resolved_team_signer_row is not None:
+                            final_signer_agent = resolved_team_signer_row
+                            final_signer_agent_id = _agent_attr(resolved_team_signer_row, "id", None) or final_signer_agent_id
+                            final_signer_agent_name = _dispatch_agent_display_name("orkio")
+                            final_signer_voice_id = resolve_agent_voice(resolved_team_signer_row) or final_signer_voice_id
+                            final_signer_avatar_url = _agent_attr(resolved_team_signer_row, "avatar_url", None) or final_signer_avatar_url
+                        else:
+                            final_signer_agent_name = "Orkio"
                     elif delegated_target:
                         dispatch_routing_receipt["delegated_by"] = (
                             dispatch_routing_receipt.get("visible_agent") or "orion"
@@ -16888,12 +17175,58 @@ def chat(
                             final_signer_avatar_url = _agent_attr(resolved_delegated_agent_row, "avatar_url", None) or final_signer_avatar_url
                         else:
                             final_signer_agent_name = _dispatch_agent_display_name(delegated_target)
-                        capability_inventory_answer = _build_direct_agent_message_answer_text(
-                            inp.message,
+                        if _should_attempt_real_agent_runtime(
                             target_agent=delegated_target,
-                            visible_agent=delegated_target,
-                            mode="mediated_single_target",
-                        )
+                            resolved_agent_row=resolved_delegated_agent_row,
+                            current_loop_agent=agent,
+                        ):
+                            direct_runtime_requested = True
+                            direct_runtime_target = delegated_target
+                            direct_runtime_result = execute_agent_runtime(
+                                resolved_delegated_agent_row or agent,
+                                inp.message,
+                                history=history,
+                                citations=citations,
+                                runtime_overlay=runtime_overlay,
+                                founder_guidance=active_founder_guidance,
+                                has_team=has_team,
+                                mention_tokens=mention_tokens,
+                            )
+                            if direct_runtime_result.get("ok"):
+                                dispatch_routing_receipt["synthetic_fallback"] = False
+                                dispatch_routing_receipt["fallback_used"] = False
+                                dispatch_routing_receipt["fallback_reason"] = ""
+                                dispatch_routing_receipt["answer_source"] = "execute_agent_runtime"
+                                dispatch_routing_receipt["runtime_execution_id"] = direct_runtime_result.get("runtime_execution_id")
+                                dispatch_routing_receipt["executor_agent"] = direct_runtime_result.get("executor_agent")
+                                dispatch_routing_receipt["execution_trace"] = list(direct_runtime_result.get("execution_trace") or [])
+                                dispatch_routing_receipt["files_used"] = list(direct_runtime_result.get("files_used") or [])
+                                capability_inventory_answer = None
+                            else:
+                                dispatch_routing_receipt["synthetic_fallback"] = True
+                                dispatch_routing_receipt["fallback_used"] = True
+                                dispatch_routing_receipt["fallback_reason"] = str(direct_runtime_result.get("error") or "agent_runtime_unavailable")
+                                dispatch_routing_receipt["answer_source"] = "controlled_fallback"
+                                dispatch_routing_receipt["runtime_execution_id"] = direct_runtime_result.get("runtime_execution_id")
+                                dispatch_routing_receipt["executor_agent"] = direct_runtime_result.get("executor_agent")
+                                dispatch_routing_receipt["execution_trace"] = list(direct_runtime_result.get("execution_trace") or [])
+                                dispatch_routing_receipt["files_used"] = list(direct_runtime_result.get("files_used") or [])
+                                capability_inventory_answer = _build_direct_agent_message_answer_text(
+                                    inp.message,
+                                    target_agent=delegated_target,
+                                    visible_agent=delegated_target,
+                                    mode="mediated_single_target",
+                                )
+                        else:
+                            dispatch_routing_receipt["synthetic_fallback"] = True
+                            dispatch_routing_receipt["fallback_used"] = True
+                            dispatch_routing_receipt["fallback_reason"] = "agent_runtime_unavailable"
+                            capability_inventory_answer = _build_direct_agent_message_answer_text(
+                                inp.message,
+                                target_agent=delegated_target,
+                                visible_agent=delegated_target,
+                                mode="mediated_single_target",
+                            )
                     else:
                         capability_inventory_answer = None
                 elif _is_multiagent_audit_readonly_request(inp.message) or intent_name_live_sync == "multiagent_audit_readonly":
@@ -17048,6 +17381,8 @@ def chat(
                 "usage": None,
                 "model": "runtime_capability_inventory",
             }
+        elif direct_runtime_result and direct_runtime_result.get("ok"):
+            ans_obj = dict(direct_runtime_result.get("ans_obj") or {})
         elif execution_result and execution_result.get("handled"):
             ans_obj = {
                 "text": _build_execution_result_payload(execution_result),
@@ -17064,6 +17399,20 @@ def chat(
                 temperature=temperature,
             )
         answer = blocked_reply or (ans_obj.get("text") if ans_obj else None)
+
+        if direct_runtime_result and direct_runtime_result.get("ok") and answer:
+            dispatch_routing_receipt["dispatch_executed"] = True
+            dispatch_routing_receipt["synthetic_fallback"] = False
+            dispatch_routing_receipt["fallback_used"] = False
+            dispatch_routing_receipt["fallback_reason"] = ""
+            dispatch_routing_receipt["runtime_execution_id"] = direct_runtime_result.get("runtime_execution_id")
+            dispatch_routing_receipt["executor_agent"] = direct_runtime_result.get("executor_agent")
+            dispatch_routing_receipt["execution_trace"] = list(direct_runtime_result.get("execution_trace") or [])
+            dispatch_routing_receipt["files_used"] = list(direct_runtime_result.get("files_used") or [])
+            dispatch_routing_receipt["final_speaker"] = direct_runtime_target or dispatch_routing_receipt.get("final_speaker") or final_signer_agent_name
+            dispatch_routing_receipt["visible_agent"] = direct_runtime_target or dispatch_routing_receipt.get("visible_agent") or final_signer_agent_name
+        elif direct_runtime_requested and not (direct_runtime_result and direct_runtime_result.get("ok")):
+            dispatch_routing_receipt["dispatch_executed"] = False
 
         answer = _apply_truthful_execution_mode(answer or "", execution_result=execution_result)
         answer = _apply_chat_anti_echo(answer or "", inp.message)
@@ -17087,13 +17436,6 @@ def chat(
                 answer = f"Encontrei esta informação no documento ({fn}):\n\n{snippet}"
             else:
                 answer = "Ainda não encontrei informação nos documentos enviados para responder com precisão. Você pode anexar um documento relacionado?"
-
-        final_signer_agent_name = _resolve_visible_assistant_name(
-            receipt=dispatch_routing_receipt,
-            current_name=final_signer_agent_name,
-            answer_text=answer,
-            prefer_generic_when_empty=True,
-        )
 
         # Save assistant message for this agent
         m_ass = Message(
@@ -17197,23 +17539,14 @@ def chat(
 
     # PATCH0100_18B: removed CEO consolidation block to avoid mixed-agent responses
 
-    final_response_agent_name = _resolve_visible_assistant_name(
-        receipt=dispatch_routing_receipt,
-        current_name=((getattr(last_agent, "name", None) if last_agent else None) or final_signer_agent_name),
-        answer_text=combined,
-        prefer_generic_when_empty=True,
-    )
-    final_response_agent_row = _resolve_dispatch_agent_row(alias_to_agent, final_response_agent_name) or last_agent
-    synthetic_dispatch_fallback = _readonly_dispatch_is_synthetic(dispatch_routing_receipt)
-
     return {
         "thread_id": tid,
         "answer": combined,
         "citations": all_citations,
-        "agent_id": final_response_agent_row.id if final_response_agent_row else None,
-        "agent_name": final_response_agent_name,
-        "voice_id": resolve_agent_voice(final_response_agent_row) if final_response_agent_row else None,
-        "avatar_url": getattr(final_response_agent_row, 'avatar_url', None) if final_response_agent_row else None,
+        "agent_id": last_agent.id if last_agent else None,
+        "agent_name": last_agent.name if last_agent else None,
+        "voice_id": resolve_agent_voice(last_agent) if last_agent else None,
+        "avatar_url": getattr(last_agent, 'avatar_url', None) if last_agent else None,
         "runtime_hints": (
             (lambda _rh: (dict(_rh, capabilities=_get_runtime_capability_registry(db=db, org=org)) if isinstance(_rh, dict) else {"capabilities": _get_runtime_capability_registry(db=db, org=org)}))(
                 runtime_enrichment.get("runtime_hints") if runtime_enrichment else None
@@ -21942,6 +22275,8 @@ async def chat_stream(
 
                 execution_result = None
                 capability_inventory_answer = None
+                direct_runtime_result: Optional[Dict[str, Any]] = None
+                direct_runtime_agent_row: Any = None
                 # PATCH27_12AK — should_execute_runtime decidido antes do loop
                 force_governed_branch_dispatch = False
                 try:
@@ -22053,12 +22388,29 @@ async def chat_stream(
                                     final_signer_avatar_url = _agent_attr(resolved_direct_agent_row, "avatar_url", None) or final_signer_avatar_url
                                 else:
                                     final_signer_agent_name = _dispatch_agent_display_name(direct_target_stream)
-                                capability_inventory_answer = _build_direct_agent_message_answer_text(
-                                    message,
+                                if _should_attempt_real_agent_runtime(
                                     target_agent=direct_target_stream,
-                                    visible_agent=direct_target_stream,
-                                    mode=direct_mode_stream,
-                                )
+                                    resolved_agent_row=resolved_direct_agent_row,
+                                    current_loop_agent=ag,
+                                ):
+                                    direct_runtime_requested = True
+                                    direct_runtime_target = direct_target_stream
+                                    direct_runtime_agent_row = resolved_direct_agent_row or ag
+                                    dispatch_routing_receipt_stream["synthetic_fallback"] = False
+                                    dispatch_routing_receipt_stream["fallback_used"] = False
+                                    dispatch_routing_receipt_stream["fallback_reason"] = ""
+                                    dispatch_routing_receipt_stream["answer_source"] = "execute_agent_runtime"
+                                    capability_inventory_answer = None
+                                else:
+                                    dispatch_routing_receipt_stream["synthetic_fallback"] = True
+                                    dispatch_routing_receipt_stream["fallback_used"] = True
+                                    dispatch_routing_receipt_stream["fallback_reason"] = "agent_runtime_unavailable"
+                                    capability_inventory_answer = _build_direct_agent_message_answer_text(
+                                        message,
+                                        target_agent=direct_target_stream,
+                                        visible_agent=direct_target_stream,
+                                        mode=direct_mode_stream,
+                                    )
                             else:
                                 capability_inventory_answer = None
                         elif intent_name_live_stream == "orchestrator_dispatch_readonly" or bool(dispatch_routing_receipt_stream.get("orchestrator_dispatch")):
@@ -22077,13 +22429,24 @@ async def chat_stream(
                                     or list(dispatch_routing_receipt_stream.get("target_agents") or [])
                                     or list(requested_specialists_stream or [])
                                 )
-                                dispatch_routing_receipt_stream["target_agents"] = list(multi_targets_stream)
-                                dispatch_routing_receipt_stream["selected_specialists"] = list(multi_targets_stream)
-                                dispatch_routing_receipt_stream["answer_source"] = "orchestrator_multi_target_finalizer"
-                                capability_inventory_answer = _build_orchestrator_dispatch_readonly_answer_text(
+                                dispatch_routing_receipt_stream = _apply_team_mission_receipt(
+                                    dispatch_routing_receipt_stream,
+                                    user_text=message,
+                                    target_agents=list(multi_targets_stream),
+                                )
+                                capability_inventory_answer = _build_team_mission_answer_text(
                                     message,
                                     target_agents=list(multi_targets_stream),
                                 )
+                                resolved_team_signer_row = _resolve_dispatch_agent_row(alias_to_agent, "orkio")
+                                if resolved_team_signer_row is not None:
+                                    final_signer_agent = resolved_team_signer_row
+                                    final_signer_agent_id = _agent_attr(resolved_team_signer_row, "id", None) or final_signer_agent_id
+                                    final_signer_agent_name = _dispatch_agent_display_name("orkio")
+                                    final_signer_voice_id = resolve_agent_voice(resolved_team_signer_row) or final_signer_voice_id
+                                    final_signer_avatar_url = _agent_attr(resolved_team_signer_row, "avatar_url", None) or final_signer_avatar_url
+                                else:
+                                    final_signer_agent_name = "Orkio"
                             elif delegated_target:
                                 dispatch_routing_receipt_stream["delegated_by"] = (
                                     dispatch_routing_receipt_stream.get("visible_agent") or "orion"
@@ -22105,12 +22468,29 @@ async def chat_stream(
                                     final_signer_avatar_url = _agent_attr(resolved_delegated_agent_row, "avatar_url", None) or final_signer_avatar_url
                                 else:
                                     final_signer_agent_name = _dispatch_agent_display_name(delegated_target)
-                                capability_inventory_answer = _build_direct_agent_message_answer_text(
-                                    message,
+                                if _should_attempt_real_agent_runtime(
                                     target_agent=delegated_target,
-                                    visible_agent=delegated_target,
-                                    mode="mediated_single_target",
-                                )
+                                    resolved_agent_row=resolved_delegated_agent_row,
+                                    current_loop_agent=ag,
+                                ):
+                                    direct_runtime_requested = True
+                                    direct_runtime_target = delegated_target
+                                    direct_runtime_agent_row = resolved_delegated_agent_row or ag
+                                    dispatch_routing_receipt_stream["synthetic_fallback"] = False
+                                    dispatch_routing_receipt_stream["fallback_used"] = False
+                                    dispatch_routing_receipt_stream["fallback_reason"] = ""
+                                    dispatch_routing_receipt_stream["answer_source"] = "execute_agent_runtime"
+                                    capability_inventory_answer = None
+                                else:
+                                    dispatch_routing_receipt_stream["synthetic_fallback"] = True
+                                    dispatch_routing_receipt_stream["fallback_used"] = True
+                                    dispatch_routing_receipt_stream["fallback_reason"] = "agent_runtime_unavailable"
+                                    capability_inventory_answer = _build_direct_agent_message_answer_text(
+                                        message,
+                                        target_agent=delegated_target,
+                                        visible_agent=delegated_target,
+                                        mode="mediated_single_target",
+                                    )
                             else:
                                 capability_inventory_answer = None
                         elif _is_multiagent_audit_readonly_request(message) or intent_name_live_stream == "multiagent_audit_readonly":
@@ -22303,18 +22683,34 @@ async def chat_stream(
                         except Exception:
                             return
                     _release_db_session(db)
-                    llm_task = asyncio.create_task(
-                        asyncio.to_thread(
-                            _openai_answer,
-                            user_msg_for_provider if blocked_reply is None else blocked_reply,
-                            citations,
-                            history_dicts,
-                            system_prompt,
-                            model_override,
-                            temperature,
-                            fallback_model_override,
+                    if direct_runtime_requested and direct_runtime_agent_row is not None and blocked_reply is None:
+                        llm_task = asyncio.create_task(
+                            asyncio.to_thread(
+                                execute_agent_runtime,
+                                direct_runtime_agent_row,
+                                message,
+                                history=history_dicts,
+                                citations=citations,
+                                runtime_overlay=runtime_overlay,
+                                founder_guidance=active_founder_guidance,
+                                has_team=has_team,
+                                mention_tokens=mention_tokens,
+                                user_prompt_override=user_msg_for_provider,
+                            )
                         )
-                    )
+                    else:
+                        llm_task = asyncio.create_task(
+                            asyncio.to_thread(
+                                _openai_answer,
+                                user_msg_for_provider if blocked_reply is None else blocked_reply,
+                                citations,
+                                history_dicts,
+                                system_prompt,
+                                model_override,
+                                temperature,
+                                fallback_model_override,
+                            )
+                        )
 
                 last_keepalive = time.monotonic()
                 started_monotonic = time.monotonic()
@@ -22369,7 +22765,32 @@ async def chat_stream(
                     _execution_model = "runtime_capability_execution" if str(execution_result.get("provider") or "").strip().lower() == "platform" else "github_capability"
                     ans_obj = {"text": _build_execution_result_payload(execution_result), "usage": None, "model": _execution_model}
                 else:
-                    ans_obj = {"text": blocked_reply, "usage": None, "model": "summit_guard"} if blocked_reply is not None else await llm_task
+                    _llm_or_runtime_result = {"text": blocked_reply, "usage": None, "model": "summit_guard"} if blocked_reply is not None else await llm_task
+                    if direct_runtime_requested and isinstance(_llm_or_runtime_result, dict) and ("ok" in _llm_or_runtime_result or "runtime_execution_id" in _llm_or_runtime_result):
+                        direct_runtime_result = dict(_llm_or_runtime_result)
+                        if direct_runtime_result.get("ok"):
+                            ans_obj = dict(direct_runtime_result.get("ans_obj") or {})
+                            dispatch_routing_receipt_stream["runtime_execution_id"] = direct_runtime_result.get("runtime_execution_id")
+                            dispatch_routing_receipt_stream["executor_agent"] = direct_runtime_result.get("executor_agent")
+                            dispatch_routing_receipt_stream["execution_trace"] = list(direct_runtime_result.get("execution_trace") or [])
+                            dispatch_routing_receipt_stream["files_used"] = list(direct_runtime_result.get("files_used") or [])
+                        else:
+                            dispatch_routing_receipt_stream["synthetic_fallback"] = True
+                            dispatch_routing_receipt_stream["fallback_used"] = True
+                            dispatch_routing_receipt_stream["fallback_reason"] = str(direct_runtime_result.get("error") or "agent_runtime_unavailable")
+                            dispatch_routing_receipt_stream["runtime_execution_id"] = direct_runtime_result.get("runtime_execution_id")
+                            dispatch_routing_receipt_stream["executor_agent"] = direct_runtime_result.get("executor_agent")
+                            dispatch_routing_receipt_stream["execution_trace"] = list(direct_runtime_result.get("execution_trace") or [])
+                            dispatch_routing_receipt_stream["files_used"] = list(direct_runtime_result.get("files_used") or [])
+                            capability_inventory_answer = _build_direct_agent_message_answer_text(
+                                message,
+                                target_agent=direct_runtime_target or final_signer_agent_name,
+                                visible_agent=direct_runtime_target or final_signer_agent_name,
+                                mode=str(_dispatch_receipt_mode(dispatch_routing_receipt_stream) or "direct_single_target"),
+                            )
+                            ans_obj = {"text": capability_inventory_answer, "usage": None, "model": "runtime_controlled_fallback"}
+                    else:
+                        ans_obj = _llm_or_runtime_result
 
                 provider_refusal_detected = False
                 refusal_retry_applied = False
@@ -22582,6 +23003,20 @@ async def chat_stream(
 
                 ans = _apply_truthful_execution_mode((ans_obj.get("text") or "").strip(), execution_result=execution_result)
                 ans = _apply_chat_anti_echo(ans, message)
+
+                if direct_runtime_result and direct_runtime_result.get("ok") and ans:
+                    dispatch_routing_receipt_stream["dispatch_executed"] = True
+                    dispatch_routing_receipt_stream["synthetic_fallback"] = False
+                    dispatch_routing_receipt_stream["fallback_used"] = False
+                    dispatch_routing_receipt_stream["fallback_reason"] = ""
+                    dispatch_routing_receipt_stream["runtime_execution_id"] = direct_runtime_result.get("runtime_execution_id")
+                    dispatch_routing_receipt_stream["executor_agent"] = direct_runtime_result.get("executor_agent")
+                    dispatch_routing_receipt_stream["execution_trace"] = list(direct_runtime_result.get("execution_trace") or [])
+                    dispatch_routing_receipt_stream["files_used"] = list(direct_runtime_result.get("files_used") or [])
+                    dispatch_routing_receipt_stream["final_speaker"] = direct_runtime_target or dispatch_routing_receipt_stream.get("final_speaker") or final_signer_agent_name
+                    dispatch_routing_receipt_stream["visible_agent"] = direct_runtime_target or dispatch_routing_receipt_stream.get("visible_agent") or final_signer_agent_name
+                elif direct_runtime_requested and not (direct_runtime_result and direct_runtime_result.get("ok")):
+                    dispatch_routing_receipt_stream["dispatch_executed"] = False
 
                 # PATCH27_12AO — não deixar o stream terminar sem resposta persistida
                 _skip_assistant_persist = _should_skip_assistant_persist(ans, execution_result=execution_result)
@@ -22887,16 +23322,10 @@ async def chat_stream(
 
                 previous_agent_payload = {"id": final_signer_agent_id, "name": final_signer_agent_name}
                 _stream_final_text = ans
-                _stream_final_agent_name = _resolve_visible_assistant_name(
-                    receipt=dispatch_routing_receipt_stream,
-                    current_name=final_signer_agent_name,
-                    answer_text=ans,
-                    prefer_generic_when_empty=True,
-                )
-                _stream_visible_agent_row = _resolve_dispatch_agent_row(alias_to_agent, _stream_final_agent_name)
-                _stream_final_agent_id = (_agent_attr(_stream_visible_agent_row, "id", None) if _stream_visible_agent_row is not None else None) or final_signer_agent_id
-                _stream_final_voice_id = resolve_agent_voice(_stream_visible_agent_row) if _stream_visible_agent_row is not None else final_signer_voice_id
-                _stream_final_avatar_url = (_agent_attr(_stream_visible_agent_row, "avatar_url", None) if _stream_visible_agent_row is not None else None) or final_signer_avatar_url
+                _stream_final_agent_id = final_signer_agent_id
+                _stream_final_agent_name = final_signer_agent_name
+                _stream_final_voice_id = final_signer_voice_id
+                _stream_final_avatar_url = final_signer_avatar_url
                 _stream_done_debug = dict(route_debug_payload)
                 _stream_done_debug.update(_assistant_answer_debug)
 
@@ -22967,9 +23396,13 @@ async def chat_stream(
                     "final_text": _stream_final_text,
                     "agent_id": _stream_final_agent_id,
                     "agent_name": _stream_final_agent_name,
-                    "final_speaker": _stream_final_agent_name,
-                    "synthetic_fallback": _readonly_dispatch_is_synthetic(dispatch_routing_receipt_stream),
-                    "dispatch_executed": bool(dispatch_routing_receipt_stream.get("dispatch_executed")),
+                    "final_speaker": str((dispatch_routing_receipt_stream or {}).get("final_speaker") or _stream_final_agent_name or ""),
+                    "participants": list((dispatch_routing_receipt_stream or {}).get("participants") or []),
+                    "mission_type": str((dispatch_routing_receipt_stream or {}).get("mission_type") or ""),
+                    "output_type": str((dispatch_routing_receipt_stream or {}).get("output_type") or ""),
+                    "dispatch_executed": bool((dispatch_routing_receipt_stream or {}).get("dispatch_executed")),
+                    "synthetic_fallback": bool((dispatch_routing_receipt_stream or {}).get("synthetic_fallback")),
+                    "fallback_reason": str((dispatch_routing_receipt_stream or {}).get("fallback_reason") or ""),
                     "voice_id": _stream_final_voice_id,
                     "avatar_url": _stream_final_avatar_url,
                     "patch_sentinel": PATCH_SENTINEL,
