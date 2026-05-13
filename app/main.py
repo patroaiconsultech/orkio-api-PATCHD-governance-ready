@@ -10461,6 +10461,7 @@ def _dispatch_has_explicit_host(
     return bool(has_team and not any(x for x in requested if x))
 
 
+
 def _looks_like_dispatch_operational_request(
     user_text: str,
     *,
@@ -10473,6 +10474,11 @@ def _looks_like_dispatch_operational_request(
         return False
     if _is_team_roster_question_request(user_text):
         return False
+    # EFATA777 V11:
+    # auditoria multiagente read-only é consultiva/determinística e não deve
+    # cair no trilho de dispatch operacional, mesmo quando cita host + especialistas.
+    if _is_multiagent_audit_readonly_request(user_text):
+        return False
     mentions = [str(x or "").strip().lower() for x in list(mention_tokens or []) if str(x or "").strip()]
     requested = [str(x or "").strip().lower() for x in list(requested_names or []) if str(x or "").strip()]
     specialists = _dispatch_request_specialists(requested_names=requested_names, mention_tokens=mention_tokens)
@@ -10480,7 +10486,6 @@ def _looks_like_dispatch_operational_request(
     has_operational_verb = any(term in txt for term in _DISPATCH_OPERATIONAL_VERBS) or _is_presence_status_question_request(user_text)
     multi_target = bool(len(specialists) > 1 or (has_team and len(specialists) != 1))
     return bool((explicit_handle or mentions or requested or specialists or multi_target) and (has_operational_verb or multi_target))
-
 
 def _looks_like_direct_agent_message_request(
     user_text: str,
@@ -10531,6 +10536,7 @@ def _looks_like_orchestrator_dispatch_request(
     )
 
 
+
 def _freeze_dispatch_targets(
     db: Session,
     org: str,
@@ -10543,6 +10549,11 @@ def _freeze_dispatch_targets(
 ) -> List[Any]:
     if not target_agents:
         return target_agents
+    # EFATA777 V11:
+    # auditoria multiagente read-only preserva o contexto citado, mas não congela
+    # targets como dispatch operacional.
+    if _is_multiagent_audit_readonly_request(user_text):
+        return list(target_agents or [])
     if _looks_like_direct_agent_message_request(
         user_text,
         requested_names=requested_names,
@@ -10603,11 +10614,19 @@ def _build_dispatch_routing_receipt(
         mention_tokens=mention_tokens,
         has_team=has_team,
     )
+    effective_intent = str(intent or "").strip()
+    if _is_multiagent_audit_readonly_request(user_text):
+        effective_intent = "multiagent_audit_readonly"
+        direct_agent_message = False
+        orchestrator_dispatch = False
+        dispatch_executed = False
+        fallback_used = False
+        fallback_reason = ""
     dispatch_attempted = bool(direct_agent_message or orchestrator_dispatch)
     target_agent = targets[0] if len(targets) == 1 else (requested_specialists[0] if len(requested_specialists) == 1 else "")
     visible = str(visible_agent or target_agent or (requested_specialists[0] if len(requested_specialists) == 1 else "") or "").strip()
     return {
-        "intent": str(intent or "").strip(),
+        "intent": effective_intent,
         "visible_agent": visible,
         "target_agent": target_agent,
         "target_agents": targets,
@@ -10622,7 +10641,6 @@ def _build_dispatch_routing_receipt(
         "fallback_used": bool(fallback_used),
         "fallback_reason": str(fallback_reason or "").strip(),
     }
-
 
 def _merge_dispatch_routing_receipt(
     runtime_hints: Optional[Dict[str, Any]],
@@ -10882,8 +10900,11 @@ def _resolve_dispatch_agent_row(alias_to_agent: Optional[Dict[str, Any]], agent_
     return None
 
 
+
 def _dispatch_receipt_mode(receipt: Optional[Dict[str, Any]]) -> str:
     r = dict(receipt or {})
+    if str(r.get("intent") or "").strip().lower() == "multiagent_audit_readonly":
+        return ""
     requested_specialists = _dispatch_receipt_requested_specialists_original(r) or _dispatch_receipt_requested_specialists(r)
     target_agents = _dispatch_receipt_target_agents(r)
     if bool(r.get("mediated_single_target_delegation")):
@@ -10902,7 +10923,6 @@ def _dispatch_receipt_mode(receipt: Optional[Dict[str, Any]]) -> str:
     if len(requested_specialists) == 1 and not _has_host_and_single_specialist(r):
         return "direct_single_target"
     return ""
-
 
 def _normalize_single_target_dispatch_receipt(
     receipt: Optional[Dict[str, Any]],
