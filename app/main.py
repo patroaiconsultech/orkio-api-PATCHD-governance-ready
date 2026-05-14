@@ -25114,23 +25114,149 @@ async def chat_stream(
                     max_stream_seconds = float(os.getenv("MAX_STREAM_SECONDS", "0") or "0")
                 except Exception:
                     max_stream_seconds = 0.0
+                # PATCH: governed stream deterministic timeout.
+                # For patch/governance requests the SSE must never wait indefinitely for
+                # Orkio/provider/runtime. If no global MAX_STREAM_SECONDS is configured,
+                # apply a bounded governance timeout and return a persisted fallback with
+                # final_text + done so the UI can always close the turn.
+                try:
+                    _governed_stream_timeout_seconds = float(
+                        os.getenv("GITHUB_GOVERNED_STREAM_TIMEOUT_SECONDS", "35") or "35"
+                    )
+                except Exception:
+                    _governed_stream_timeout_seconds = 35.0
+                try:
+                    if (
+                        max_stream_seconds <= 0
+                        and (
+                            _is_patch_governance_request_message(message)
+                            or _github_is_simple_chat_approval_message(message)
+                            or bool(direct_runtime_requested)
+                        )
+                    ):
+                        max_stream_seconds = max(_governed_stream_timeout_seconds, 5.0)
+                except Exception:
+                    pass
                 while llm_task is not None and not llm_task.done():
                     if max_stream_seconds and (time.monotonic() - started_monotonic) > max_stream_seconds:
-                        # Emit timeout + done, cancel task and end generator without awaiting llm_task.
+                        _timeout_agent_id = final_signer_agent_id or ag_id
+                        _timeout_agent_name = final_signer_agent_name or ag_name or "Orkio"
+                        _timeout_text = (
+                            "GOVERNED STREAM TIMEOUT\n\n"
+                            f"- status: execution_timeout\n"
+                            f"- timeout_seconds: {int(max_stream_seconds)}\n"
+                            "- resultado: o runtime principal não concluiu dentro do limite seguro.\n"
+                            "- nenhuma escrita foi confirmada por este turno.\n"
+                            "- próximo passo: repetir a solicitação com escopo menor ou verificar logs do runtime governado.\n"
+                        )
+                        if _is_patch_governance_request_message(message):
+                            try:
+                                _timeout_clamp = _clamp_patch_governance_response(
+                                    message,
+                                    _timeout_text,
+                                    runtime_result={
+                                        "ok": False,
+                                        "error": "governed_stream_timeout",
+                                        "runtime_execution_id": trace_id,
+                                        "execution_trace": ["stream_timeout_fallback"],
+                                    },
+                                    governance_ctx=_build_patch_governance_request_context(message),
+                                )
+                                _timeout_text = str(_timeout_clamp.get("text") or _timeout_text)
+                                _timeout_governance = dict(_timeout_clamp.get("governance") or {})
+                                dispatch_routing_receipt_stream = _apply_patch_governance_fields_to_receipt(
+                                    dispatch_routing_receipt_stream,
+                                    _timeout_governance,
+                                )
+                            except Exception:
+                                pass
+                        _stream_final_text = _timeout_text
+                        _stream_final_agent_id = _timeout_agent_id
+                        _stream_final_agent_name = _timeout_agent_name
+                        _stream_done_debug = {
+                            "stream_timeout": True,
+                            "timeout_seconds": int(max_stream_seconds),
+                            "governed_timeout": bool(_is_patch_governance_request_message(message)),
+                        }
                         try:
                             yield sse_execution(
                                 "provider_timeout",
                                 "Tempo máximo excedido",
                                 kind="error",
                                 scope="agent",
-                                agent_id=ag_id,
-                                agent_name=ag_name,
+                                agent_id=_timeout_agent_id,
+                                agent_name=_timeout_agent_name,
                                 started_monotonic=agent_started_monotonic,
-                                detail="O provider excedeu o tempo máximo configurado para o stream.",
+                                detail="O runtime excedeu o tempo máximo seguro; retornando fallback governado determinístico.",
                             )
-                            yield sse_event("error", {"code": "TIMEOUT", "message": "Stream excedeu tempo máximo."})
-                            yield sse_event("done_diagnostics", _patch_diagnostics_snapshot({"thread_id": tid, "trace_id": trace_id}))
-                            yield sse_event("done", {"done": True, "thread_id": tid, "trace_id": trace_id, **_patch_diagnostics_snapshot()})
+                        except Exception:
+                            pass
+                        try:
+                            _persist_stream_assistant_message(
+                                content=_stream_final_text,
+                                agent_id=_stream_final_agent_id,
+                                agent_name=_stream_final_agent_name,
+                            )
+                        except Exception as _timeout_persist_err:
+                            _stream_assistant_persist_error = str(_timeout_persist_err)
+                            try:
+                                logger.exception("STREAM_TIMEOUT_FALLBACK_PERSIST_FAILED trace_id=%s thread_id=%s", trace_id, tid)
+                            except Exception:
+                                pass
+                        try:
+                            _step_timeout = 140
+                            for _j in range(0, len(_stream_final_text), _step_timeout):
+                                _chunk_timeout = _stream_final_text[_j:_j + _step_timeout]
+                                yield sse_event(
+                                    "chunk",
+                                    {
+                                        "agent_id": _stream_final_agent_id,
+                                        "agent_name": _stream_final_agent_name,
+                                        "executor_agent_id": _stream_final_agent_id,
+                                        "executor_agent_name": _stream_final_agent_name,
+                                        "content": _chunk_timeout,
+                                        "delta": _chunk_timeout,
+                                        "thread_id": tid,
+                                        "trace_id": trace_id,
+                                    },
+                                )
+                            yield sse_event("error", {"code": "TIMEOUT", "message": "Stream excedeu tempo máximo seguro.", "trace_id": trace_id})
+                            yield sse_event(
+                                "agent_done",
+                                {
+                                    "done": True,
+                                    "agent_id": _stream_final_agent_id,
+                                    "agent_name": _stream_final_agent_name,
+                                    "thread_id": tid,
+                                    "trace_id": trace_id,
+                                },
+                            )
+                            yield sse_event("done_diagnostics", _patch_diagnostics_snapshot({
+                                "thread_id": tid,
+                                "trace_id": trace_id,
+                                "stream_timeout": True,
+                                "timeout_seconds": int(max_stream_seconds),
+                                "assistant_persisted": bool(_stream_assistant_persisted),
+                                "assistant_message_id": _stream_assistant_message_id,
+                                "assistant_persist_error": _stream_assistant_persist_error,
+                            }))
+                            yield sse_event(
+                                "done",
+                                {
+                                    "done": True,
+                                    "thread_id": tid,
+                                    "trace_id": trace_id,
+                                    "stream_timeout": True,
+                                    "timeout_seconds": int(max_stream_seconds),
+                                    "final_text": _stream_final_text,
+                                    "agent_id": _stream_final_agent_id,
+                                    "agent_name": _stream_final_agent_name,
+                                    "assistant_persisted": bool(_stream_assistant_persisted),
+                                    "assistant_message_id": _stream_assistant_message_id,
+                                    "assistant_persist_error": _stream_assistant_persist_error,
+                                    **_patch_diagnostics_snapshot(),
+                                },
+                            )
                         except Exception:
                             pass
                         try:
