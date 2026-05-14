@@ -23432,12 +23432,117 @@ async def chat_stream(
         except Exception:
             return
 
+        _is_simple_approval_text = _github_is_simple_chat_approval_message(message)
         _simple_approval_hydration = _github_hydrate_simple_pending_approval(
             org=org,
             thread_id=tid,
             payload=user,
             user_text=message,
         )
+        if _is_simple_approval_text and not bool(_simple_approval_hydration.get("simple_chat_approval")):
+            _simple_pending = _simple_approval_hydration.get("pending") if isinstance(_simple_approval_hydration.get("pending"), dict) else {}
+            _simple_status = "approval_context_invalid"
+            _stream_final_text = _build_simple_approval_stream_fallback_text(
+                status=_simple_status,
+                pending=_simple_pending,
+                detail="nenhuma_proposta_pendente_encontrada_para_thread_usuario",
+            )
+            _stream_final_agent_name = "Orion"
+            _stream_final_agent_id = (
+                _agent_attr(_resolve_dispatch_agent_row(alias_to_agent, _stream_final_agent_name), "id", None)
+                if isinstance(alias_to_agent, dict)
+                else None
+            )
+            _stream_done_debug = {
+                "simple_approval_turn": True,
+                "approval_status": _simple_status,
+                "pending_patch_id": str((_simple_pending or {}).get("patch_id") or ""),
+                "approval_id": "",
+                "execution_event": None,
+            }
+            if isinstance(dispatch_routing_receipt_stream, dict):
+                dispatch_routing_receipt_stream["simple_approval_turn"] = True
+                dispatch_routing_receipt_stream["approval_status"] = _simple_status
+                dispatch_routing_receipt_stream["dispatch_executed"] = False
+                dispatch_routing_receipt_stream["human_approved"] = False
+                dispatch_routing_receipt_stream["write_allowed"] = False
+
+            try:
+                yield sse_execution(
+                    "approval_turn_invalid",
+                    "Aprovação simples sem contexto",
+                    kind="system",
+                    scope="system",
+                    agent_id=_stream_final_agent_id,
+                    agent_name=_stream_final_agent_name,
+                    detail="Nenhuma proposta pendente foi encontrada para esta thread/usuário.",
+                )
+            except Exception:
+                return
+
+            try:
+                _persist_stream_assistant_message(
+                    content=_stream_final_text,
+                    agent_id=_stream_final_agent_id,
+                    agent_name=_stream_final_agent_name,
+                )
+            except Exception:
+                pass
+
+            _simple_step_size = 120
+            for _i in range(0, len(_stream_final_text), _simple_step_size):
+                if await request.is_disconnected():
+                    return
+                _chunk = _stream_final_text[_i:_i + _simple_step_size]
+                try:
+                    yield sse_event("chunk", {
+                        "agent_id": _stream_final_agent_id,
+                        "agent_name": _stream_final_agent_name,
+                        "content": _chunk,
+                        "delta": _chunk,
+                        "thread_id": tid,
+                        "trace_id": trace_id,
+                    })
+                except Exception:
+                    return
+
+            try:
+                yield sse_event("agent_done", {
+                    "done": True,
+                    "agent_id": _stream_final_agent_id,
+                    "agent_name": _stream_final_agent_name,
+                    "thread_id": tid,
+                    "trace_id": trace_id,
+                })
+                yield sse_event("done_diagnostics", _patch_diagnostics_snapshot({
+                    "thread_id": tid,
+                    "trace_id": trace_id,
+                    "simple_approval_turn": True,
+                    "approval_status": _simple_status,
+                    "assistant_persisted": bool(_stream_assistant_persisted),
+                    "assistant_message_id": _stream_assistant_message_id,
+                }))
+                yield sse_event("done", {
+                    "done": True,
+                    "thread_id": tid,
+                    "trace_id": trace_id,
+                    "simple_approval_turn": True,
+                    "approval_status": _simple_status,
+                    "final_text": _stream_final_text,
+                    "agent_id": _stream_final_agent_id,
+                    "agent_name": _stream_final_agent_name,
+                    "voice_id": _stream_final_voice_id,
+                    "avatar_url": _stream_final_avatar_url,
+                    "assistant_persisted": bool(_stream_assistant_persisted),
+                    "assistant_message_id": _stream_assistant_message_id,
+                    "write_allowed": False,
+                    "human_approved": False,
+                    **_patch_diagnostics_snapshot(),
+                })
+            except Exception:
+                return
+            return
+
         if bool(_simple_approval_hydration.get("simple_chat_approval")):
             _simple_pending = _simple_approval_hydration.get("pending") if isinstance(_simple_approval_hydration.get("pending"), dict) else {}
             _simple_approval = None
