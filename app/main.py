@@ -915,6 +915,91 @@ _github_write_approval_state: dict = {}  # {(org, thread_id, user_id): approval_
 _github_write_pending_approval_state: dict = {}  # {(org, thread_id/userwide, user_id): pending_proposal_dict}
 _github_write_execution_state: dict = {}  # {(org, thread_id, user_id): execution_receipts}
 
+_GITHUB_PENDING_DB_TABLE = "github_pending_approvals"
+
+def _github_pending_db_upsert(
+    *,
+    db: Session,
+    lookup_key: str,
+    org_slug: str,
+    user_id: str,
+    thread_id: Optional[str],
+    scope_kind: str,
+    proposal: Dict[str, Any],
+) -> None:
+    # Do not commit here; caller controls transaction boundaries.
+    now = now_ts()
+    expires_at = int(proposal.get("expires_at") or 0)
+    payload_json = json.dumps(proposal, ensure_ascii=False)
+    db.execute(
+        text(
+            f"""
+            INSERT INTO {_GITHUB_PENDING_DB_TABLE}
+                (lookup_key, org_slug, user_id, thread_id, scope_kind, proposal_json, expires_at, created_at, updated_at)
+            VALUES
+                (:lookup_key, :org_slug, :user_id, :thread_id, :scope_kind, :proposal_json, :expires_at, :created_at, :updated_at)
+            ON CONFLICT (lookup_key) DO UPDATE SET
+                org_slug = EXCLUDED.org_slug,
+                user_id = EXCLUDED.user_id,
+                thread_id = EXCLUDED.thread_id,
+                scope_kind = EXCLUDED.scope_kind,
+                proposal_json = EXCLUDED.proposal_json,
+                expires_at = EXCLUDED.expires_at,
+                updated_at = EXCLUDED.updated_at
+            """
+        ),
+        {
+            "lookup_key": str(lookup_key or "").strip(),
+            "org_slug": str(org_slug or "default").strip() or "default",
+            "user_id": str(user_id or "unknown").strip() or "unknown",
+            "thread_id": str(thread_id).strip() if thread_id is not None else None,
+            "scope_kind": str(scope_kind or "thread").strip() or "thread",
+            "proposal_json": payload_json,
+            "expires_at": expires_at if expires_at else None,
+            "created_at": int(proposal.get("created_at") or now),
+            "updated_at": now,
+        },
+    )
+
+def _github_pending_db_fetch(*, db: Session, lookup_key: str) -> Optional[Dict[str, Any]]:
+    lookup = str(lookup_key or "").strip()
+    if not lookup:
+        return None
+    row = db.execute(
+        text(f"SELECT proposal_json, expires_at FROM {_GITHUB_PENDING_DB_TABLE} WHERE lookup_key = :k"),
+        {"k": lookup},
+    ).fetchone()
+    if not row:
+        return None
+    proposal_json = row[0]
+    expires_at = int(row[1] or 0)
+    now = now_ts()
+    if expires_at and expires_at < now:
+        # Expired: delete and behave as not found.
+        db.execute(text(f"DELETE FROM {_GITHUB_PENDING_DB_TABLE} WHERE lookup_key = :k"), {"k": lookup})
+        return None
+    try:
+        parsed = json.loads(proposal_json) if proposal_json else None
+        return dict(parsed) if isinstance(parsed, dict) else None
+    except Exception:
+        return None
+
+def _github_pending_db_delete(*, db: Session, lookup_key: str) -> None:
+    lookup = str(lookup_key or "").strip()
+    if not lookup:
+        return
+    db.execute(text(f"DELETE FROM {_GITHUB_PENDING_DB_TABLE} WHERE lookup_key = :k"), {"k": lookup})
+
+def _github_pending_db_try_session() -> Optional[Session]:
+    if SessionLocal is None:
+        return None
+    try:
+        return SessionLocal()
+    except Exception:
+        return None
+
+
+
 
 def _github_write_bootstrap_state() -> None:
     global _github_write_lock
@@ -7548,6 +7633,7 @@ def _github_write_store_pending_proposal(
     approval_token: str = "",
     requested_actions: Optional[List[str]] = None,
     requested_paths: Optional[List[str]] = None,
+    db: Optional[Session] = None,
 ) -> Dict[str, Any]:
     _github_write_bootstrap_state()
     now = now_ts()
@@ -7556,6 +7642,8 @@ def _github_write_store_pending_proposal(
     token = str(approval_token or "").strip().upper().replace("_", "-")
     if not token:
         token = _github_generate_approval_token()
+
+    user_id = str((payload or {}).get("sub") or "").strip() or "unknown"
     proposal = {
         "proposal_id": f"prop_{new_id()[:12]}",
         "patch_id": normalized_patch_id,
@@ -7571,21 +7659,69 @@ def _github_write_store_pending_proposal(
         "approval_model": "tokenized_pending_proposal_scope",
         "token_model": "random_nonce_per_pending_proposal",
     }
+
     key = _github_write_pending_key(org, thread_id, payload)
-    userwide_key = _github_write_user_approval_key(org, str((payload or {}).get("sub") or "unknown").strip())
+    userwide_key = _github_write_user_approval_key(org, user_id)
+
     with _github_write_lock:
         _github_write_cleanup_locked()
         _github_write_pending_approval_state[key] = dict(proposal)
         _github_write_pending_approval_state[userwide_key] = dict(proposal)
+
+    # Persist pending proposal so simple approvals survive restarts / replicas.
+    session = db
+    owned = False
+    if session is None:
+        session = _github_pending_db_try_session()
+        owned = session is not None
+
+    if session is not None:
+        try:
+            _github_pending_db_upsert(
+                db=session,
+                lookup_key=key,
+                org_slug=str(org or "default"),
+                user_id=user_id,
+                thread_id=str(thread_id or "global"),
+                scope_kind="thread",
+                proposal=proposal,
+            )
+            _github_pending_db_upsert(
+                db=session,
+                lookup_key=userwide_key,
+                org_slug=str(org or "default"),
+                user_id=user_id,
+                thread_id=None,
+                scope_kind="userwide",
+                proposal=proposal,
+            )
+            if owned:
+                session.commit()
+        except Exception:
+            if owned:
+                try:
+                    session.rollback()
+                except Exception:
+                    pass
+            logger.exception("GITHUB_PENDING_APPROVAL_PERSIST_FAILED")
+        finally:
+            if owned:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+
     return proposal
 
 
 
-def _github_write_get_pending_proposal(org: str, thread_id: Optional[str], payload: Optional[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+
+def _github_write_get_pending_proposal(org: str, thread_id: Optional[str], payload: Optional[Dict[str, Any]], db: Optional[Session] = None) -> Optional[Dict[str, Any]]:
     _github_write_bootstrap_state()
     key = _github_write_pending_key(org, thread_id, payload)
     userwide_key = _github_write_user_approval_key(org, str((payload or {}).get("sub") or "unknown").strip())
     now = now_ts()
+
     with _github_write_lock:
         for lookup in (key, userwide_key):
             item = _github_write_pending_approval_state.get(lookup)
@@ -7595,16 +7731,73 @@ def _github_write_get_pending_proposal(org: str, thread_id: Optional[str], paylo
                     _github_write_pending_approval_state.pop(lookup, None)
                     continue
                 return dict(item)
-    return None
+
+    # Fallback: persistent lookup (survive restarts/replicas).
+    session = db
+    owned = False
+    if session is None:
+        session = _github_pending_db_try_session()
+        owned = session is not None
+
+    if session is None:
+        return None
+
+    try:
+        for lookup in (key, userwide_key):
+            item = _github_pending_db_fetch(db=session, lookup_key=lookup)
+            if isinstance(item, dict) and item:
+                # Re-hydrate in-memory cache for faster follow-ups.
+                with _github_write_lock:
+                    _github_write_pending_approval_state[key] = dict(item)
+                    _github_write_pending_approval_state[userwide_key] = dict(item)
+                return dict(item)
+        return None
+    finally:
+        if owned:
+            try:
+                session.close()
+            except Exception:
+                pass
 
 
-def _github_write_clear_pending_proposal(org: str, thread_id: Optional[str], payload: Optional[Dict[str, Any]]) -> None:
+
+def _github_write_clear_pending_proposal(org: str, thread_id: Optional[str], payload: Optional[Dict[str, Any]], db: Optional[Session] = None) -> None:
     _github_write_bootstrap_state()
     key = _github_write_pending_key(org, thread_id, payload)
     userwide_key = _github_write_user_approval_key(org, str((payload or {}).get("sub") or "unknown").strip())
+
     with _github_write_lock:
         _github_write_pending_approval_state.pop(key, None)
         _github_write_pending_approval_state.pop(userwide_key, None)
+
+    session = db
+    owned = False
+    if session is None:
+        session = _github_pending_db_try_session()
+        owned = session is not None
+
+    if session is None:
+        return
+
+    try:
+        _github_pending_db_delete(db=session, lookup_key=key)
+        _github_pending_db_delete(db=session, lookup_key=userwide_key)
+        if owned:
+            session.commit()
+    except Exception:
+        if owned:
+            try:
+                session.rollback()
+            except Exception:
+                pass
+        logger.exception("GITHUB_PENDING_APPROVAL_CLEAR_FAILED")
+    finally:
+        if owned:
+            try:
+                session.close()
+            except Exception:
+                pass
+
 
 
 def _github_write_is_identity_question(user_text: str) -> bool:
@@ -8209,7 +8402,7 @@ def _github_write_policy_snapshot(
     github = capabilities.get("github") if isinstance(capabilities.get("github"), dict) else {}
     approval = _github_write_get_active_approval(org, thread_id, payload)
     identity = _github_write_identity(payload)
-    pending_proposal = _github_write_get_pending_proposal(org, thread_id, payload)
+    pending_proposal = _github_write_get_pending_proposal(org, thread_id, payload, db=db)
     return {
         "org_slug": org,
         "subject": _github_write_subject(payload),
@@ -8587,6 +8780,7 @@ def _build_github_write_response_text(
             approval_token=approval_token,
             requested_actions=requested_actions,
             requested_paths=requested_paths,
+            db=db,
         )
         approval_token = str(proposal.get("approval_token") or approval_token).strip().upper()
         identity = _github_write_identity(payload)
