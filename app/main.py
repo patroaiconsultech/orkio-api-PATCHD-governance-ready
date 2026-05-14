@@ -23450,15 +23450,20 @@ def governance_execute_approved_patch(
 
     text_out = (
         "GOVERNED PATCH EXECUTION RESPONSE\n\n"
-        "- status: execution_ready_but_apply_not_wired_in_this_hotfix\n"
+        "- status: execution_blocked_executor_not_wired\n"
         f"- approval_id: {approval.get('approval_id') or 'n/d'}\n"
         f"- patch_id: {approval.get('patch_id') or 'n/d'}\n"
         "- patch_mode: approved_apply\n"
-        "- write_allowed: true\n"
-        "- human_approved: true\n\n"
+        "- write_allowed: false\n"
+        "- human_approved: true\n"
+        "- branch_created: false\n"
+        "- files_written: nenhum\n"
+        "- commit_created: false\n"
+        "- pull_request_opened: false\n\n"
         "Resultado:\n"
-        "A aprovação e o artifact estão presentes, mas este hotfix não executa escrita direta. "
-        "Encaminhe para o executor GitHub transacional dedicado."
+        "A aprovação e o artifact foram reconhecidos, mas o executor GitHub transacional ainda não está conectado "
+        "a este hotfix. Nenhuma escrita real foi executada. Este turno foi finalizado como bloqueio governado, "
+        "sem resposta narrativa e sem estado fantasma de aplicação."
     )
     try:
         msg = Message(
@@ -23479,15 +23484,19 @@ def governance_execute_approved_patch(
         try: db.rollback()
         except Exception: pass
     return {
-        "ok": True,
-        "status": "execution_ready_but_apply_not_wired_in_this_hotfix",
+        "ok": False,
+        "status": "execution_blocked_executor_not_wired",
         "patch_mode": "approved_apply",
-        "write_allowed": True,
+        "write_allowed": False,
         "human_approved": True,
         "approval_id": approval.get("approval_id"),
         "patch_id": approval.get("patch_id"),
         "audit_receipt_id": approval_audit,
         "thread_id": tid,
+        "branch_created": False,
+        "files_written": [],
+        "commit_created": False,
+        "pull_request_opened": False,
         "message": text_out,
     }
 
@@ -24623,26 +24632,31 @@ async def chat_stream(
                     else None
                 )
                 _stream_final_text = (
-                    "PATCH EXECUTION PENDING\n\n"
-                    "- status: execution_pending\n"
+                    "GOVERNED PATCH EXECUTION RESPONSE\n\n"
+                    "- status: execution_blocked_conversational_channel\n"
                     f"- approval_id: {str(_active_approved_execution.get('approval_id') or 'n/d')}\n"
                     f"- patch_id: {str(_active_approved_execution.get('patch_id') or 'n/d')}\n"
                     "- patch_mode: approved_apply\n"
-                    "- write_allowed: true\n"
+                    "- write_allowed: false\n"
                     "- human_approved: true\n"
-                    "- execution_channel: side_channel_required\n\n"
+                    "- execution_channel: side_channel_required\n"
+                    "- branch_created: false\n"
+                    "- files_written: nenhum\n"
+                    "- commit_created: false\n"
+                    "- pull_request_opened: false\n\n"
                     "Resultado:\n"
-                    "A aprovação humana já foi registrada. Para evitar resposta narrativa sem escrita real, "
-                    "o chat comum está bloqueado para este patch.\n\n"
-                    "Use o botão “Executar patch aprovado” na mensagem de aprovação."
+                    "A aprovação humana já foi registrada, mas o chat comum não pode aplicar patch nem simular aplicação. "
+                    "Nenhuma escrita foi executada por este turno. Use exclusivamente o botão “Executar patch aprovado”; "
+                    "se não houver artifact executável, o sistema retornará bloqueio governado explícito."
                 )
                 if isinstance(dispatch_routing_receipt_stream, dict):
                     dispatch_routing_receipt_stream["approved_execution_pending"] = True
                     dispatch_routing_receipt_stream["patch_mode"] = "approved_apply"
-                    dispatch_routing_receipt_stream["write_allowed"] = True
+                    dispatch_routing_receipt_stream["write_allowed"] = False
                     dispatch_routing_receipt_stream["human_approved"] = True
                     dispatch_routing_receipt_stream["dispatch_executed"] = False
                     dispatch_routing_receipt_stream["execution_channel"] = "side_channel_required"
+                    dispatch_routing_receipt_stream["execution_status"] = "execution_blocked_conversational_channel"
                     dispatch_routing_receipt_stream["approval_id"] = str(_active_approved_execution.get("approval_id") or "")
                     dispatch_routing_receipt_stream["patch_id"] = str(_active_approved_execution.get("patch_id") or "")
 
