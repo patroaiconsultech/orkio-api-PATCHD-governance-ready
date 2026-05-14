@@ -7533,6 +7533,23 @@ def _github_extract_approval_token(user_text: str) -> str:
     return str(m.group(1) or "").strip().upper().replace("_", "-") if m else ""
 
 
+def _github_is_simple_pending_approval_phrase(user_text: str) -> bool:
+    txt = str(user_text or "").strip()
+    low = txt.lower()
+    if not low:
+        return False
+    if _github_extract_patch_id(txt) or _github_extract_approval_token(txt):
+        return False
+    if re.search(r"(n[ãa]o\s+(?:aprovo|autorizo)|revog\w*|cancel\w*)", low, flags=re.IGNORECASE):
+        return False
+    return bool(
+        re.search(
+            r"\b(sim|ok|okay|confirmo|aprovo|aprovado|autorizo|autorizado|pode\s+aplicar|pode\s+executar|siga\s+em\s+frente|prosseguir)\b",
+            low,
+            flags=re.IGNORECASE,
+        )
+    )
+
 
 def _github_write_pending_key(org: str, thread_id: Optional[str], payload: Optional[Dict[str, Any]]) -> str:
     user_id = str((payload or {}).get("sub") or "").strip() or "unknown"
@@ -7548,6 +7565,7 @@ def _github_write_store_pending_proposal(
     approval_token: str = "",
     requested_actions: Optional[List[str]] = None,
     requested_paths: Optional[List[str]] = None,
+    original_user_text: str = "",
 ) -> Dict[str, Any]:
     _github_write_bootstrap_state()
     now = now_ts()
@@ -7566,6 +7584,7 @@ def _github_write_store_pending_proposal(
         "thread_id": str(thread_id or "global"),
         "requested_actions": list(dict.fromkeys(requested_actions or [])),
         "requested_paths": list(dict.fromkeys(requested_paths or [])),
+        "original_user_text": str(original_user_text or "").strip(),
         "proposed_for": identity,
         "approval_required": True,
         "approval_model": "tokenized_pending_proposal_scope",
@@ -7783,9 +7802,13 @@ def _github_write_authorization_flags(user_text: str) -> Dict[str, Any]:
         "patch_id": patch_id,
         "approval_token": approval_token,
         "has_scoped_approval_token": bool(patch_id and approval_token),
+        "raw_text": txt,
+        "simple_pending_approval": False,
     }
     if not txt:
         return flags
+
+    flags["simple_pending_approval"] = _github_is_simple_pending_approval_phrase(txt)
 
     flags["deny_execution"] = bool(
         re.search(
@@ -7845,7 +7868,10 @@ def _github_write_authorization_flags(user_text: str) -> Dict[str, Any]:
         flags["allow_commit"] = True
         flags["allow_pr"] = True
 
-    flags["grant"] = any(bool(flags[k]) for k in ("allow_branch", "allow_patch", "allow_commit", "allow_pr", "allow_main"))
+    flags["grant"] = bool(
+        flags.get("simple_pending_approval")
+        or any(bool(flags[k]) for k in ("allow_branch", "allow_patch", "allow_commit", "allow_pr", "allow_main"))
+    )
     return flags
 
 
@@ -7931,6 +7957,30 @@ def _github_write_request_flags(user_text: str) -> Dict[str, Any]:
         for k in ("create_branch", "create_file", "update_file", "batch_commit", "apply_patch", "prepare_commit", "open_pr", "write_main")
     )
     return requested
+
+
+def _github_write_request_flags_from_pending_proposal(pending: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    pending = dict(pending or {})
+    requested_actions = {str(x).strip() for x in list(pending.get("requested_actions") or []) if str(x).strip()}
+    requested_paths = [str(x).strip() for x in list(pending.get("requested_paths") or []) if str(x).strip()]
+    requested = {
+        "requested": False,
+        "create_branch": "create_branch" in requested_actions,
+        "create_file": False,
+        "update_file": False,
+        "batch_commit": False,
+        "apply_patch": "apply_patch" in requested_actions or "write_file" in requested_actions or "create_file" in requested_actions or "update_file" in requested_actions,
+        "prepare_commit": "prepare_commit" in requested_actions or "batch_commit" in requested_actions,
+        "open_pr": "open_pr" in requested_actions,
+        "write_main": "write_main" in requested_actions,
+        "paths": requested_paths,
+    }
+    requested["requested"] = any(
+        bool(requested[k])
+        for k in ("create_branch", "create_file", "update_file", "batch_commit", "apply_patch", "prepare_commit", "open_pr", "write_main")
+    )
+    return requested
+
 
 def _is_controlled_self_evolution_propose_request_message(
     user_text: str,
@@ -8201,6 +8251,7 @@ def _github_write_validate_tokenized_approval(
     identity = _github_write_identity(payload)
     patch_id = _github_normalize_patch_id(str(auth_flags.get("patch_id") or ""))
     approval_token = str(auth_flags.get("approval_token") or "").strip().upper().replace("_", "-")
+    simple_pending_approval = bool(auth_flags.get("simple_pending_approval")) or _github_is_simple_pending_approval_phrase(str(auth_flags.get("raw_text") or ""))
     if not bool(identity.get("write_approval_authority")):
         return {
             "ok": False,
@@ -8233,19 +8284,24 @@ def _github_write_validate_tokenized_approval(
     expected_token = str(pending.get("approval_token") or "").strip().upper().replace("_", "-")
 
     if not patch_id or patch_id == "EFATA777_ORKIO_PATCH" or not approval_token:
-        return {
-            "ok": False,
-            "reason": "missing_patch_or_token",
-            "message": (
-                "AUTORIZAÇÃO INSUFICIENTE.\n"
-                "- motivo: aprovação precisa citar patch_id e approval_token da proposta pendente.\n"
-                f"- patch_id_esperado: {expected_patch or 'n/d'}\n"
-                f"- approval_token_esperado: {expected_token or 'n/d'}\n"
-                "- formato: APROVO O PATCH <PATCH_ID> COM O TOKEN <APPROVAL_TOKEN>."
-            ),
-            "identity": identity,
-            "pending": pending,
-        }
+        if simple_pending_approval and expected_patch and expected_token:
+            patch_id = expected_patch
+            approval_token = expected_token
+        else:
+            return {
+                "ok": False,
+                "reason": "missing_patch_or_token",
+                "message": (
+                    "AUTORIZAÇÃO INSUFICIENTE.\n"
+                    "- motivo: aprovação precisa citar patch_id e approval_token da proposta pendente ou usar confirmação simples na mesma thread.\n"
+                    f"- patch_id_esperado: {expected_patch or 'n/d'}\n"
+                    f"- approval_token_esperado: {expected_token or 'n/d'}\n"
+                    '- formato simples aceito: "sim, aprovo".\n'
+                    "- formato explícito alternativo: APROVO O PATCH <PATCH_ID> COM O TOKEN <APPROVAL_TOKEN>."
+                ),
+                "identity": identity,
+                "pending": pending,
+            }
 
     if expected_patch != patch_id:
         return {
@@ -8282,6 +8338,7 @@ def _github_write_validate_tokenized_approval(
         "patch_id": patch_id,
         "approval_token": approval_token,
         "pending": pending,
+        "simple_pending_approval": simple_pending_approval,
     }
 
 
@@ -8354,6 +8411,13 @@ def _github_store_write_approval(
         "scope_inherited_from_pending_proposal": True,
         "requested_actions": pending_actions,
         "requested_paths": pending_paths,
+        "patch_mode": "approved_apply",
+        "write_allowed": True,
+        "human_approval_required": True,
+        "human_approved": True,
+        "risk_level": "high" if allow_main else "medium",
+        "rollback_plan": "Reverter em branch isolada e/ou abrir PR de revert governado antes de qualquer merge.",
+        "approval_source": "chat_simple_confirmation" if bool(auth_flags.get("simple_pending_approval")) else "chat_tokenized_confirmation",
     }
     with _github_write_lock:
         _github_write_cleanup_locked()
@@ -8471,6 +8535,7 @@ def _build_github_write_response_text(
             approval_token=approval_token,
             requested_actions=requested_actions,
             requested_paths=requested_paths,
+            original_user_text=user_text,
         )
         approval_token = str(proposal.get("approval_token") or approval_token).strip().upper()
         identity = _github_write_identity(payload)
@@ -8493,8 +8558,9 @@ def _build_github_write_response_text(
         if requested_paths:
             lines.append(f"- requested_paths: {', '.join(requested_paths)}")
         lines.extend([
-            "- next_step: aprovação precisa citar patch_id e approval_token exatamente.",
-            f'- exact_confirmation: "APROVO O PATCH {patch_id} COM O TOKEN {approval_token}. NÃO AUTORIZO MERGE."',
+            "- next_step: responda com uma confirmação simples na mesma thread para autorizar a execução.",
+            '- simple_confirmation: "sim, aprovo".',
+            f'- explicit_confirmation_fallback: "APROVO O PATCH {patch_id} COM O TOKEN {approval_token}. NÃO AUTORIZO MERGE."',
             "- merge_policy: merge continua bloqueado nesta aprovação.",
             "- deploy_policy: deploy continua sujeito à validação humana.",
         ])
@@ -8550,6 +8616,7 @@ def _build_github_write_response_text(
         lines = [
             "EXECUÇÃO GITHUB GOVERNADA:",
             f"- approval_id: {approval.get('approval_id') or 'n/d'}",
+            f"- approval_source: {approval.get('approval_source') or 'n/d'}",
             f"- scope: {approval.get('scope') or 'n/d'}",
             f"- write_target: {'main' if req_flags.get('write_main') else 'branch'}",
             f"- approved_by: {approval.get('approved_by') or 'n/d'}",
@@ -15917,7 +15984,16 @@ def _dispatch_governed_github_write(
         req_flags["create_branch"] = True
         req_flags["requested"] = True
 
-    if auth_flags.get("deny_execution") or auth_flags.get("grant") or not req_flags.get("requested"):
+    pending = _github_write_get_pending_proposal(org, thread_id, payload)
+    conversational_auto_execute = bool(
+        auth_flags.get("grant")
+        and auth_flags.get("simple_pending_approval")
+        and isinstance(pending, dict)
+        and pending
+        and not req_flags.get("requested")
+    )
+
+    if auth_flags.get("deny_execution"):
         return {
             "text": _build_github_write_response_text(
                 org=org,
@@ -15929,7 +16005,66 @@ def _dispatch_governed_github_write(
             "execution_result": None,
         }
 
-    approval = snapshot.get("active_approval") if isinstance(snapshot.get("active_approval"), dict) else {}
+    if auth_flags.get("grant") and not conversational_auto_execute:
+        return {
+            "text": _build_github_write_response_text(
+                org=org,
+                thread_id=thread_id,
+                payload=payload,
+                user_text=user_text,
+                db=db,
+            ),
+            "execution_result": None,
+        }
+
+    if not req_flags.get("requested") and not conversational_auto_execute:
+        return {
+            "text": _build_github_write_response_text(
+                org=org,
+                thread_id=thread_id,
+                payload=payload,
+                user_text=user_text,
+                db=db,
+            ),
+            "execution_result": None,
+        }
+
+    if conversational_auto_execute:
+        token_validation = _github_write_validate_tokenized_approval(
+            org=org,
+            thread_id=thread_id,
+            payload=payload,
+            auth_flags=auth_flags,
+        )
+        if not bool(token_validation.get("ok")):
+            return {
+                "text": str(token_validation.get("message") or "AUTORIZAÇÃO INSUFICIENTE.").strip(),
+                "execution_result": None,
+            }
+        auth_flags["patch_id"] = token_validation.get("patch_id")
+        auth_flags["approval_token"] = token_validation.get("approval_token")
+        approval = _github_store_write_approval(
+            org=org,
+            thread_id=thread_id,
+            payload=payload,
+            auth_flags=auth_flags,
+            pending=token_validation.get("pending"),
+        )
+        req_flags = _github_write_request_flags_from_pending_proposal(token_validation.get("pending"))
+        pending_user_text = str((token_validation.get("pending") or {}).get("original_user_text") or "").strip()
+        if pending_user_text:
+            user_text = pending_user_text
+        _github_write_clear_pending_proposal(org, thread_id, payload)
+        _github_write_clear_execution_receipts(org, thread_id, payload)
+        snapshot = _github_write_policy_snapshot(org=org, thread_id=thread_id, payload=payload, db=db)
+        forced_branch_req = _extract_github_create_branch_request(user_text) or forced_branch_req
+        force_branch_dispatch = bool(forced_branch_req or _is_explicit_github_create_branch_command(user_text))
+        if force_branch_dispatch:
+            req_flags["create_branch"] = True
+            req_flags["requested"] = True
+    else:
+        approval = snapshot.get("active_approval") if isinstance(snapshot.get("active_approval"), dict) else {}
+
     if not approval:
         return {
             "text": _build_github_write_response_text(
