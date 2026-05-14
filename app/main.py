@@ -8083,6 +8083,32 @@ def _github_write_clear_approval(org: str, thread_id: Optional[str], payload: Op
         _github_write_approval_state.pop(userwide_key, None)
     _github_write_clear_execution_receipts(org, thread_id, payload)
 
+
+def _github_governance_reset_thread_state_for_new_proposal(
+    org: str,
+    thread_id: Optional[str],
+    payload: Optional[Dict[str, Any]],
+    db: Optional[Session] = None,
+) -> None:
+    """PATCH23: one active governance proposal/approval per thread+user.
+
+    A new proposal invalidates older pending proposals, active approvals and
+    execution receipts for the same thread/user. This prevents stale approval_id
+    / patch_id / audit_receipt_id from contaminating the next proposal.
+    """
+    try:
+        _github_write_clear_pending_proposal(org, thread_id, payload, db=db)
+    except Exception:
+        logger.exception("GITHUB_GOVERNANCE_RESET_PENDING_FAILED")
+    try:
+        _github_write_clear_approval(org, thread_id, payload)
+    except Exception:
+        logger.exception("GITHUB_GOVERNANCE_RESET_APPROVAL_FAILED")
+    try:
+        _github_write_clear_execution_receipts(org, thread_id, payload)
+    except Exception:
+        logger.exception("GITHUB_GOVERNANCE_RESET_EXECUTION_RECEIPTS_FAILED")
+
 def _github_extract_scoped_files(user_text: str) -> List[str]:
     txt = (user_text or "").strip()
     if not txt:
@@ -8193,6 +8219,12 @@ def _github_write_ensure_pending_from_patch_governance(
     patch_id = _github_normalize_patch_id(f"ORKIO_PATCH_{base}")
     requested_actions = _github_write_requested_actions_for_patch_governance(user_text, g)
 
+    _github_governance_reset_thread_state_for_new_proposal(
+        org=org,
+        thread_id=thread_id,
+        payload=payload,
+        db=db,
+    )
     proposal = _github_write_store_pending_proposal(
         org=org,
         thread_id=thread_id,
@@ -9076,6 +9108,12 @@ def _build_github_write_response_text(
                 patch_id = "EFATA777_GOVERNED_WRITE_PATCH"
         patch_id = _github_normalize_patch_id(patch_id)
         approval_token = _github_approval_token_for_patch(patch_id)
+        _github_governance_reset_thread_state_for_new_proposal(
+            org=org,
+            thread_id=thread_id,
+            payload=payload,
+            db=db,
+        )
         proposal = _github_write_store_pending_proposal(
             org=org,
             thread_id=thread_id,
