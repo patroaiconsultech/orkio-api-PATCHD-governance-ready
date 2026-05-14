@@ -15124,12 +15124,85 @@ _GITHUB_SEARCH_FILE_LIMIT = 24
 _GITHUB_SEARCH_SNIPPET_LIMIT = 20
 
 
+def _github_normalize_repo_slug(value: Any) -> str:
+    """Return a safe GitHub repo slug in owner/repo format.
+
+    Accepts:
+    - owner/repo
+    - https://github.com/owner/repo(.git)
+    - git@github.com:owner/repo.git
+
+    Rejects deployment domains such as Railway URLs, because those are not
+    GitHub repository identifiers and will fail at branch creation time.
+    """
+    raw = _clean_env(value or "", default="")
+    if not raw:
+        return ""
+    s = raw.strip()
+    if s.startswith("git@github.com:"):
+        s = s.split("git@github.com:", 1)[1]
+    elif "github.com/" in s.lower():
+        s = re.split(r"github\.com/", s, flags=re.IGNORECASE, maxsplit=1)[-1]
+    s = s.strip().strip("/")
+    if s.endswith(".git"):
+        s = s[:-4]
+    # remove accidental URL query/fragment
+    s = s.split("?", 1)[0].split("#", 1)[0].strip("/")
+    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", s or ""):
+        return ""
+    return s
+
+
+def _github_first_valid_repo_env(*names: str) -> str:
+    for name in names:
+        val = _github_normalize_repo_slug(os.getenv(name, ""))
+        if val:
+            return val
+    return ""
+
+
 def _github_backend_repo() -> str:
-    return _clean_env(os.getenv("GITHUB_REPO", ""))
+    return _github_first_valid_repo_env(
+        "GITHUB_REPO_BACKEND",
+        "GITHUB_BACKEND_REPO",
+        "GITHUB_API_REPO",
+        "GITHUB_REPO_API",
+        "GITHUB_REPO",
+    )
 
 
 def _github_frontend_repo() -> str:
-    return _clean_env(os.getenv("GITHUB_REPO_WEB", ""))
+    return _github_first_valid_repo_env(
+        "GITHUB_REPO_WEB",
+        "GITHUB_WEB_REPO",
+        "GITHUB_FRONTEND_REPO",
+        "GITHUB_REPO_FRONTEND",
+        "GITHUB_REPO_UI",
+    )
+
+
+def _github_repo_config_diagnostics(*, repo_target: Optional[str] = None) -> Dict[str, Any]:
+    backend_raw = _clean_env(os.getenv("GITHUB_REPO", ""), default="")
+    frontend_raw = (
+        _clean_env(os.getenv("GITHUB_REPO_WEB", ""), default="")
+        or _clean_env(os.getenv("GITHUB_WEB_REPO", ""), default="")
+        or _clean_env(os.getenv("GITHUB_FRONTEND_REPO", ""), default="")
+        or _clean_env(os.getenv("GITHUB_REPO_FRONTEND", ""), default="")
+    )
+    backend = _github_backend_repo()
+    frontend = _github_frontend_repo()
+    wanted = str(repo_target or "").strip().lower()
+    selected = frontend if wanted in {"frontend", "web", "ui"} else backend
+    return {
+        "selected_repo": selected,
+        "backend_repo": backend,
+        "frontend_repo": frontend,
+        "backend_raw": backend_raw,
+        "frontend_raw": frontend_raw,
+        "repo_target": repo_target or "",
+        "valid": bool(selected),
+        "expected_format": "owner/repo",
+    }
 
 
 def _github_extract_repo_target(user_text: str, repo_target: Optional[str] = None) -> Dict[str, str]:
@@ -15173,9 +15246,30 @@ def _github_resolve_repo_branch(
     user_text: Optional[str] = None,
 ) -> tuple[str, str, str, str]:
     target = _github_extract_repo_target(user_text or "", repo_target=repo_target)
-    repo = str(target.get("repo") or "").strip()
+    repo = _github_normalize_repo_slug(str(target.get("repo") or "").strip())
     repo_kind = str(target.get("kind") or "repo").strip() or "repo"
-    resolved_branch = (_clean_env(branch or "", default="") or _clean_env(os.getenv("GITHUB_BRANCH", "main"), default="main") or "main")
+
+    if repo_kind == "frontend":
+        branch_env = (
+            _clean_env(os.getenv("GITHUB_BRANCH_WEB", ""), default="")
+            or _clean_env(os.getenv("GITHUB_WEB_BRANCH", ""), default="")
+            or _clean_env(os.getenv("GITHUB_FRONTEND_BRANCH", ""), default="")
+        )
+    elif repo_kind == "backend":
+        branch_env = (
+            _clean_env(os.getenv("GITHUB_BRANCH_BACKEND", ""), default="")
+            or _clean_env(os.getenv("GITHUB_BACKEND_BRANCH", ""), default="")
+            or _clean_env(os.getenv("GITHUB_API_BRANCH", ""), default="")
+        )
+    else:
+        branch_env = ""
+
+    resolved_branch = (
+        _clean_env(branch or "", default="")
+        or branch_env
+        or _clean_env(os.getenv("GITHUB_BRANCH", "main"), default="main")
+        or "main"
+    )
     token = _github_token_value()
     return repo, resolved_branch, token, repo_kind
 
@@ -23659,6 +23753,32 @@ def _github_governed_minimal_artifact_execution(
     repo_hint_text = " ".join(target_files + [patch_id, "frontend web react AppConsole"]) if any("src/routes/" in p or p.endswith(".jsx") or p.endswith(".tsx") for p in target_files) else " ".join(target_files + [patch_id])
     repo_target = "frontend" if any("src/routes/" in p or p.endswith(".jsx") or p.endswith(".tsx") for p in target_files) else None
     repo, base_branch, _, repo_kind = _github_resolve_repo_branch(repo_target=repo_target, user_text=repo_hint_text)
+    repo_diag = _github_repo_config_diagnostics(repo_target=repo_target)
+    if not repo:
+        return {
+            "ok": False,
+            "status": "execution_blocked_github_repo_config_invalid",
+            "patch_mode": "approved_apply",
+            "write_allowed": False,
+            "human_approved": True,
+            "approval_id": approval_id,
+            "patch_id": patch_id,
+            "audit_receipt_id": audit_id,
+            "repo": "n/d",
+            "repo_kind": repo_kind,
+            "repo_target": repo_target or "",
+            "repo_config": repo_diag,
+            "branch": "n/d",
+            "base_branch": base_branch,
+            "branch_created": False,
+            "files_written": [],
+            "commit_created": False,
+            "pull_request_opened": False,
+            "provider_result": {
+                "success": False,
+                "message": "GitHub repo inválido ou ausente. Configure GITHUB_REPO_WEB/GITHUB_WEB_REPO/GITHUB_FRONTEND_REPO para frontend ou GITHUB_REPO_BACKEND/GITHUB_REPO para backend no formato owner/repo.",
+            },
+        }
 
     suffix = re.sub(r"[^a-zA-Z0-9]+", "-", (audit_id or patch_id)[-12:]).strip("-").lower() or uuid.uuid4().hex[:8]
     branch = _github_generated_branch_name(f"orkio/governed-{suffix}")
@@ -23699,6 +23819,9 @@ def _github_governed_minimal_artifact_execution(
             "commit_created": False,
             "pull_request_opened": False,
             "provider_result": branch_result,
+            "provider_message": branch_result.get("message"),
+            "provider_status": branch_result.get("status"),
+            "repo_config": _github_repo_config_diagnostics(repo_target=repo_target),
         }
 
     artifact_dir = "orkio-governance"
@@ -23841,7 +23964,10 @@ def _github_render_governed_execution_result(result: Dict[str, Any]) -> str:
         + (
             "Executor governado mínimo concluído. Foi criada branch/commit/PR de artifact de governança, sem modificar arquivos-fonte porque a proposta aprovada ainda não continha diff executável seguro."
             if str(result.get("status") or "").startswith("execution_completed")
-            else "A execução governada falhou ou foi bloqueada antes de concluir branch/commit/PR. Nenhuma escrita de código-fonte foi aplicada."
+            else (
+                "A execução governada falhou ou foi bloqueada antes de concluir branch/commit/PR. Nenhuma escrita de código-fonte foi aplicada."
+                + (f"\n\nDetalhe técnico: {result.get('provider_message')}" if result.get("provider_message") else "")
+            )
         )
     )
 
