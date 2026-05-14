@@ -16008,6 +16008,103 @@ def _coerce_platform_audit_dispatch_result(
 
 
 
+
+
+def _classify_simple_approval_turn_status(
+    *,
+    response_text: str,
+    execution_result: Optional[Dict[str, Any]] = None,
+    approval: Optional[Dict[str, Any]] = None,
+    pending: Optional[Dict[str, Any]] = None,
+) -> str:
+    txt = str(response_text or "").strip().lower()
+    if execution_result and execution_result.get("handled"):
+        if execution_result.get("success") is False:
+            return "execution_result_error"
+        return "execution_started"
+    if "patch_sem_emissao_de_arquivos" in txt or "execution_blocked_no_artifact" in txt:
+        return "execution_blocked_no_artifact"
+    if "autoriza" in txt and ("insuficiente" in txt or "contexto" in txt or "token" in txt):
+        return "approval_context_invalid"
+    if approval:
+        return "approval_registered"
+    if pending:
+        return "pending_proposal_detected"
+    return "approval_not_completed"
+
+
+def _build_simple_approval_stream_fallback_text(
+    *,
+    status: str,
+    approval: Optional[Dict[str, Any]] = None,
+    pending: Optional[Dict[str, Any]] = None,
+    execution_result: Optional[Dict[str, Any]] = None,
+    detail: Optional[str] = None,
+) -> str:
+    approval = dict(approval or {})
+    pending = dict(pending or {})
+    execution_result = dict(execution_result or {})
+    lines = [
+        "PATCH APPROVAL RESPONSE",
+        "",
+        f"- status: {status}",
+        f"- approval_id: {approval.get('approval_id') or 'n/d'}",
+        f"- patch_id: {approval.get('patch_id') or pending.get('patch_id') or 'n/d'}",
+        f"- approval_source: {'chat_simple_confirmation' if pending else 'chat'}",
+    ]
+    if approval:
+        lines.append(f"- scope: {approval.get('scope') or 'branch'}")
+        lines.append(f"- actions_allowed: {', '.join(list(approval.get('actions_allowed') or [])) or 'n/d'}")
+    if execution_result:
+        lines.append(f"- execution_event: {execution_result.get('event') or 'n/d'}")
+        lines.append(f"- execution_provider: {execution_result.get('provider') or 'n/d'}")
+        if execution_result.get("branch"):
+            lines.append(f"- branch: {execution_result.get('branch')}")
+        if execution_result.get("commit_sha"):
+            lines.append(f"- commit_sha: {execution_result.get('commit_sha')}")
+        if execution_result.get("pull_request_url"):
+            lines.append(f"- pull_request_url: {execution_result.get('pull_request_url')}")
+    if detail:
+        lines.append(f"- detail: {detail}")
+    if status == "execution_started":
+        lines.extend([
+            "",
+            "Resultado:",
+            "A aprovação foi registrada e a execução governada foi iniciada.",
+        ])
+    elif status == "execution_blocked_no_artifact":
+        lines.extend([
+            "",
+            "Resultado:",
+            "A aprovação foi registrada, mas a execução ficou bloqueada porque a proposta ainda não persistiu um artifact executável suficiente.",
+        ])
+    elif status == "approval_context_invalid":
+        lines.extend([
+            "",
+            "Resultado:",
+            "A aprovação simples foi recebida, mas o contexto da proposta pendente não pôde ser resolvido com segurança.",
+        ])
+    elif status == "execution_timeout":
+        lines.extend([
+            "",
+            "Resultado:",
+            "A aprovação foi registrada, mas a execução governada não concluiu dentro do tempo máximo do turno.",
+        ])
+    elif status == "execution_result_error":
+        lines.extend([
+            "",
+            "Resultado:",
+            "A aprovação foi registrada, porém a execução devolveu erro governado e não confirmou escrita real.",
+        ])
+    else:
+        lines.extend([
+            "",
+            "Resultado:",
+            "A aprovação não gerou resultado final completo; o sistema retornou um fallback determinístico para encerrar o turno com segurança.",
+        ])
+    return "\n".join(lines)
+
+
 def _dispatch_governed_github_write(
 
     *,
@@ -23334,6 +23431,195 @@ async def chat_stream(
             )
         except Exception:
             return
+
+        _simple_approval_hydration = _github_hydrate_simple_pending_approval(
+            org=org,
+            thread_id=tid,
+            payload=user,
+            user_text=message,
+        )
+        if bool(_simple_approval_hydration.get("simple_chat_approval")):
+            _simple_pending = _simple_approval_hydration.get("pending") if isinstance(_simple_approval_hydration.get("pending"), dict) else {}
+            _simple_approval = None
+            _simple_execution_result = None
+            _simple_response_text = ""
+            _simple_timeout_seconds = max(float(os.getenv("GITHUB_SIMPLE_APPROVAL_STREAM_TIMEOUT_SECONDS", "12") or "12"), 3.0)
+
+            try:
+                yield sse_execution(
+                    "approval_turn_started",
+                    "Aprovação simples recebida",
+                    kind="system",
+                    scope="system",
+                    detail="Resolvendo a proposta pendente e iniciando o fluxo governado de escrita.",
+                    patch_id=str((_simple_pending or {}).get("patch_id") or ""),
+                )
+            except Exception:
+                return
+
+            try:
+                _simple_dispatch = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        _dispatch_governed_github_write,
+                        org=org,
+                        thread_id=tid,
+                        payload=user,
+                        user_text=message,
+                        db=None,
+                        trace_id=trace_id,
+                    ),
+                    timeout=_simple_timeout_seconds,
+                )
+                if isinstance(_simple_dispatch, dict):
+                    _simple_response_text = str(_simple_dispatch.get("text") or "").strip()
+                    _simple_execution_result = _simple_dispatch.get("execution_result") if isinstance(_simple_dispatch.get("execution_result"), dict) else None
+            except asyncio.TimeoutError:
+                _simple_response_text = _build_simple_approval_stream_fallback_text(
+                    status="execution_timeout",
+                    pending=_simple_pending,
+                    detail=f"autorun_governado_timeout_{int(_simple_timeout_seconds)}s",
+                )
+            except Exception as _simple_approval_err:
+                try:
+                    logger.exception(
+                        "SIMPLE_APPROVAL_STREAM_AUTORUN_FAILED trace_id=%s thread_id=%s",
+                        trace_id,
+                        tid,
+                    )
+                except Exception:
+                    pass
+                _simple_response_text = _build_simple_approval_stream_fallback_text(
+                    status="execution_result_error",
+                    pending=_simple_pending,
+                    detail=str(_simple_approval_err),
+                )
+
+            _simple_approval = _github_write_get_active_approval(org, tid, user)
+            if not str(_simple_response_text or "").strip():
+                try:
+                    _simple_response_text = str(
+                        _build_github_write_response_text(
+                            org=org,
+                            thread_id=tid,
+                            payload=user,
+                            user_text=message,
+                            db=None,
+                        ) or ""
+                    ).strip()
+                except Exception:
+                    _simple_response_text = ""
+
+            _simple_status = _classify_simple_approval_turn_status(
+                response_text=_simple_response_text,
+                execution_result=_simple_execution_result,
+                approval=_simple_approval,
+                pending=_simple_pending,
+            )
+            if not str(_simple_response_text or "").strip():
+                _simple_response_text = _build_simple_approval_stream_fallback_text(
+                    status=_simple_status,
+                    approval=_simple_approval,
+                    pending=_simple_pending,
+                    execution_result=_simple_execution_result,
+                )
+
+            _stream_final_text = str(_simple_response_text or "").strip()
+            _stream_final_agent_name = str(
+                (dispatch_routing_receipt_stream.get("visible_agent") if isinstance(dispatch_routing_receipt_stream, dict) else "")
+                or "Orion"
+            ).strip() or "Orion"
+            _stream_final_agent_id = (
+                _agent_attr(_resolve_dispatch_agent_row(alias_to_agent, _stream_final_agent_name), "id", None)
+                if isinstance(alias_to_agent, dict)
+                else None
+            )
+            _stream_done_debug = {
+                "simple_approval_turn": True,
+                "approval_status": _simple_status,
+                "pending_patch_id": str((_simple_pending or {}).get("patch_id") or ""),
+                "approval_id": str((_simple_approval or {}).get("approval_id") or ""),
+                "execution_event": (_simple_execution_result or {}).get("event"),
+            }
+            if isinstance(dispatch_routing_receipt_stream, dict):
+                dispatch_routing_receipt_stream["simple_approval_turn"] = True
+                dispatch_routing_receipt_stream["approval_status"] = _simple_status
+                dispatch_routing_receipt_stream["patch_id"] = str((_simple_approval or {}).get("patch_id") or (_simple_pending or {}).get("patch_id") or "")
+                dispatch_routing_receipt_stream["approval_id"] = str((_simple_approval or {}).get("approval_id") or "")
+                if isinstance(_simple_execution_result, dict) and _simple_execution_result:
+                    dispatch_routing_receipt_stream["execution_event"] = _simple_execution_result.get("event")
+                    dispatch_routing_receipt_stream["dispatch_executed"] = bool(_simple_execution_result.get("handled") and _simple_execution_result.get("success", True))
+
+            try:
+                yield sse_execution(
+                    "approval_turn_resolved",
+                    "Aprovação simples resolvida",
+                    kind="system",
+                    scope="system",
+                    agent_id=_stream_final_agent_id,
+                    agent_name=_stream_final_agent_name,
+                    detail=f"status={_simple_status}",
+                    approval_id=str((_simple_approval or {}).get("approval_id") or ""),
+                    patch_id=str((_simple_approval or {}).get("patch_id") or (_simple_pending or {}).get("patch_id") or ""),
+                )
+            except Exception:
+                return
+
+            try:
+                _persist_stream_assistant_message(
+                    content=_stream_final_text,
+                    agent_id=_stream_final_agent_id,
+                    agent_name=_stream_final_agent_name,
+                )
+            except Exception:
+                pass
+
+            _simple_step_size = 120
+            for _i in range(0, len(_stream_final_text), _simple_step_size):
+                if await request.is_disconnected():
+                    return
+                _chunk = _stream_final_text[_i:_i + _simple_step_size]
+                try:
+                    yield sse_event("chunk", {
+                        "agent_id": _stream_final_agent_id,
+                        "agent_name": _stream_final_agent_name,
+                        "content": _chunk,
+                        "delta": _chunk,
+                        "thread_id": tid,
+                        "trace_id": trace_id,
+                    })
+                except Exception:
+                    return
+
+            try:
+                yield sse_event("agent_done", {
+                    "done": True,
+                    "agent_id": _stream_final_agent_id,
+                    "agent_name": _stream_final_agent_name,
+                    "thread_id": tid,
+                    "trace_id": trace_id,
+                })
+                yield sse_event("done_diagnostics", _patch_diagnostics_snapshot({
+                    "thread_id": tid,
+                    "trace_id": trace_id,
+                    "simple_approval_turn": True,
+                    "approval_status": _simple_status,
+                    "assistant_persisted": bool(_stream_assistant_persisted),
+                    "assistant_message_id": _stream_assistant_message_id,
+                }))
+                yield sse_event("done", {
+                    "done": True,
+                    "thread_id": tid,
+                    "trace_id": trace_id,
+                    "simple_approval_turn": True,
+                    "approval_status": _simple_status,
+                    "assistant_persisted": bool(_stream_assistant_persisted),
+                    "assistant_message_id": _stream_assistant_message_id,
+                    **_patch_diagnostics_snapshot(),
+                })
+            except Exception:
+                return
+            return
+
 
         # Keepalive ticker
         KEEPALIVE_SECS = int(os.getenv("SSE_KEEPALIVE_SECONDS", "15") or 15)
