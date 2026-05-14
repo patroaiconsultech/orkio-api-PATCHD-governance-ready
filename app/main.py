@@ -957,58 +957,15 @@ def _github_write_persist_pending_proposal_runtime_memory(
     payload: Optional[Dict[str, Any]],
     proposal: Dict[str, Any],
 ) -> None:
-    """Secondary persistence path using RuntimeMemory.
+    """No-op secondary persistence.
 
-    This is a backup to the dedicated github_pending_approvals table. It keeps
-    Patch 14 behavior available while the dedicated table remains the canonical
-    transactional source.
+    RuntimeMemory is not guaranteed to exist in all deployed ORKIO databases.
+    The canonical pending-approval store is github_pending_approvals, created
+    lazily by _github_pending_db_ensure_schema(). This function is intentionally
+    disabled to prevent UndefinedTable(runtime_memories) from poisoning the
+    stream approval turn.
     """
-    user_id = str((payload or {}).get("sub") or "").strip()
-    if not user_id:
-        return
-    now = now_ts()
-    keys = [
-        _github_write_pending_memory_key(thread_id),
-        _github_write_pending_memory_key(None),
-    ]
-    try:
-        with SessionLocal() as memdb:
-            for memory_key in keys:
-                existing = memdb.execute(
-                    select(RuntimeMemory).where(
-                        RuntimeMemory.org_slug == str(org or "default"),
-                        RuntimeMemory.user_id == user_id,
-                        RuntimeMemory.memory_key == memory_key,
-                    ).limit(1)
-                ).scalar_one_or_none()
-                serialized = json.dumps(dict(proposal or {}), ensure_ascii=False)
-                if existing:
-                    existing.thread_id = thread_id
-                    existing.memory_value = serialized
-                    existing.source = "github_pending_proposal"
-                    existing.confidence = 1.0
-                    existing.updated_at = now
-                    memdb.add(existing)
-                else:
-                    memdb.add(RuntimeMemory(
-                        id=new_id(),
-                        org_slug=str(org or "default"),
-                        user_id=user_id,
-                        thread_id=thread_id,
-                        memory_key=memory_key,
-                        memory_value=serialized,
-                        source="github_pending_proposal",
-                        confidence=1.0,
-                        created_at=now,
-                        updated_at=now,
-                    ))
-            memdb.commit()
-    except Exception:
-        try:
-            memdb.rollback()
-        except Exception:
-            pass
-        logger.exception("GITHUB_PENDING_APPROVAL_RUNTIME_MEMORY_PERSIST_FAILED")
+    return
 
 
 def _github_write_load_pending_proposal_runtime_memory(
@@ -1016,54 +973,12 @@ def _github_write_load_pending_proposal_runtime_memory(
     thread_id: Optional[str],
     payload: Optional[Dict[str, Any]],
 ) -> Optional[Dict[str, Any]]:
-    user_id = str((payload or {}).get("sub") or "").strip()
-    if not user_id:
-        return None
-    now = now_ts()
-    lookup_keys = [
-        _github_write_pending_memory_key(thread_id),
-        _github_write_pending_memory_key(None),
-    ]
-    try:
-        with SessionLocal() as memdb:
-            for memory_key in lookup_keys:
-                row = memdb.execute(
-                    select(RuntimeMemory).where(
-                        RuntimeMemory.org_slug == str(org or "default"),
-                        RuntimeMemory.user_id == user_id,
-                        RuntimeMemory.memory_key == memory_key,
-                    ).limit(1)
-                ).scalar_one_or_none()
-                if not row:
-                    continue
-                raw = str(getattr(row, "memory_value", "") or "").strip()
-                if not raw:
-                    continue
-                try:
-                    proposal = json.loads(raw)
-                except Exception:
-                    proposal = None
-                if not isinstance(proposal, dict):
-                    continue
-                expires_at = int(proposal.get("expires_at") or 0)
-                status = str(proposal.get("status") or "pending").strip().lower()
-                if (expires_at and expires_at < now) or status not in {"pending", "awaiting_human_approval"}:
-                    try:
-                        proposal["status"] = "expired" if (expires_at and expires_at < now) else status
-                        proposal["updated_at"] = now
-                        row.memory_value = json.dumps(proposal, ensure_ascii=False)
-                        row.updated_at = now
-                        memdb.add(row)
-                        memdb.commit()
-                    except Exception:
-                        try:
-                            memdb.rollback()
-                        except Exception:
-                            pass
-                    continue
-                return dict(proposal)
-    except Exception:
-        logger.exception("GITHUB_PENDING_APPROVAL_RUNTIME_MEMORY_FETCH_FAILED")
+    """No-op secondary lookup.
+
+    Do not query RuntimeMemory here: some production schemas do not have
+    runtime_memories. Lookup must remain deterministic through the dedicated
+    github_pending_approvals table and in-memory cache only.
+    """
     return None
 
 
@@ -1074,50 +989,13 @@ def _github_write_mark_pending_proposal_runtime_memory(
     payload: Optional[Dict[str, Any]],
     status: str,
 ) -> None:
-    user_id = str((payload or {}).get("sub") or "").strip()
-    if not user_id:
-        return
-    now = now_ts()
-    lookup_keys = [
-        _github_write_pending_memory_key(thread_id),
-        _github_write_pending_memory_key(None),
-    ]
-    try:
-        with SessionLocal() as memdb:
-            changed = False
-            for memory_key in lookup_keys:
-                row = memdb.execute(
-                    select(RuntimeMemory).where(
-                        RuntimeMemory.org_slug == str(org or "default"),
-                        RuntimeMemory.user_id == user_id,
-                        RuntimeMemory.memory_key == memory_key,
-                    ).limit(1)
-                ).scalar_one_or_none()
-                if not row:
-                    continue
-                raw = str(getattr(row, "memory_value", "") or "").strip()
-                try:
-                    proposal = json.loads(raw) if raw else {}
-                except Exception:
-                    proposal = {}
-                if not isinstance(proposal, dict):
-                    proposal = {}
-                proposal["status"] = str(status or "cleared").strip() or "cleared"
-                proposal["updated_at"] = now
-                row.memory_value = json.dumps(proposal, ensure_ascii=False)
-                row.updated_at = now
-                row.source = "github_pending_proposal"
-                row.confidence = 1.0
-                memdb.add(row)
-                changed = True
-            if changed:
-                memdb.commit()
-    except Exception:
-        try:
-            memdb.rollback()
-        except Exception:
-            pass
-        logger.exception("GITHUB_PENDING_APPROVAL_RUNTIME_MEMORY_MARK_FAILED")
+    """No-op secondary cleanup.
+
+    The dedicated pending approval table is cleared by
+    _github_write_clear_pending_proposal(). RuntimeMemory cleanup is disabled
+    because runtime_memories is not present in every deployment.
+    """
+    return
 
 
 def _github_pending_db_upsert(
@@ -8319,17 +8197,54 @@ def _github_write_ensure_pending_from_patch_governance(
         proposal["risk_level"] = str(g.get("risk_level") or "medium")
         proposal["rollback_plan"] = str(g.get("rollback_plan") or "Reverter em branch isolada e/ou PR revert governado antes de qualquer merge.")
         proposal["status"] = "pending"
-        # Re-store enriched proposal.
-        _github_write_store_pending_proposal(
-            org=org,
-            thread_id=thread_id,
-            payload=payload,
-            patch_id=str(proposal.get("patch_id") or patch_id),
-            approval_token=str(proposal.get("approval_token") or ""),
-            requested_actions=list(proposal.get("requested_actions") or requested_actions),
-            requested_paths=list(proposal.get("requested_paths") or target_files),
-            db=db,
-        )
+        # Persist enriched proposal without regenerating a thinner proposal.
+        key = _github_write_pending_key(org, thread_id, payload)
+        user_id = str((payload or {}).get("sub") or "unknown").strip() or "unknown"
+        userwide_key = _github_write_user_approval_key(org, user_id)
+        with _github_write_lock:
+            _github_write_pending_approval_state[key] = dict(proposal)
+            _github_write_pending_approval_state[userwide_key] = dict(proposal)
+
+        session = db
+        owned = False
+        if session is None:
+            session = _github_pending_db_try_session()
+            owned = session is not None
+        if session is not None:
+            try:
+                _github_pending_db_upsert(
+                    db=session,
+                    lookup_key=key,
+                    org_slug=str(org or "default"),
+                    user_id=user_id,
+                    thread_id=str(thread_id or "global"),
+                    scope_kind="thread",
+                    proposal=proposal,
+                )
+                _github_pending_db_upsert(
+                    db=session,
+                    lookup_key=userwide_key,
+                    org_slug=str(org or "default"),
+                    user_id=user_id,
+                    thread_id=None,
+                    scope_kind="userwide",
+                    proposal=proposal,
+                )
+                if owned:
+                    session.commit()
+            except Exception:
+                if owned:
+                    try:
+                        session.rollback()
+                    except Exception:
+                        pass
+                logger.exception("GITHUB_PENDING_APPROVAL_ENRICH_PERSIST_FAILED")
+            finally:
+                if owned:
+                    try:
+                        session.close()
+                    except Exception:
+                        pass
     except Exception:
         logger.exception("GITHUB_PENDING_APPROVAL_ENRICH_FAILED")
     return proposal
