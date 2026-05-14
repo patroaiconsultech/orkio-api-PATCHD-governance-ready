@@ -2702,6 +2702,12 @@ class GovernanceApprovePatchIn(BaseModel):
     audit_receipt_id: Optional[str] = None
     password: str = Field(min_length=1)
     auto_execute: bool = False
+
+
+class GovernanceExecuteApprovedPatchIn(BaseModel):
+    thread_id: str = Field(min_length=1)
+    audit_receipt_id: Optional[str] = None
+    dry_run: bool = False
     
 # =========================
 # Idempotency helpers
@@ -23317,6 +23323,174 @@ def governance_approve_patch(
         "execution_started": False,
         "execution_note": "approval_registered_only_no_chat_runtime_autorun",
     }
+
+
+@app.post("/api/governance/execute-approved-patch")
+def governance_execute_approved_patch(
+    inp: GovernanceExecuteApprovedPatchIn,
+    x_org_slug: Optional[str] = Header(default=None),
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Side-channel execution trigger for already approved governed patches.
+
+    This intentionally bypasses chat/RAG/runtime interpretation. It does NOT
+    fabricate a patch from free text. If the approved proposal has no executable
+    artifact/diff, it returns a deterministic governance block instead of
+    falling back to the LLM or Agent.
+    """
+    require_onboarding_complete(user)
+    org = _resolve_org(user, x_org_slug)
+    uid = str(user.get("sub") or "").strip()
+    tid = str(inp.thread_id or "").strip()
+    if not uid:
+        raise HTTPException(status_code=401, detail="Missing authenticated user.")
+    if not tid:
+        raise HTTPException(status_code=400, detail="thread_id required.")
+
+    payload = dict(user or {})
+    approval = _github_write_get_active_approval(org, tid, payload)
+    if not isinstance(approval, dict) or not approval:
+        text_out = (
+            "GOVERNED PATCH EXECUTION RESPONSE\n\n"
+            "- status: execution_blocked_no_active_approval\n"
+            "- patch_mode: proposal_only\n"
+            "- write_allowed: false\n"
+            "- human_approved: false\n\n"
+            "Resultado:\n"
+            "Não há aprovação ativa para executar nesta thread. Gere uma proposta e aprove pelo botão com senha."
+        )
+        try:
+            msg = Message(
+                id=new_id(),
+                org_slug=org,
+                thread_id=tid,
+                user_id=uid,
+                user_name=str(user.get("name") or ""),
+                role="assistant",
+                content=text_out,
+                agent_id="orion",
+                agent_name="Orion",
+                created_at=now_ts(),
+            )
+            db.add(msg)
+            db.commit()
+        except Exception:
+            try: db.rollback()
+            except Exception: pass
+        return {
+            "ok": False,
+            "status": "execution_blocked_no_active_approval",
+            "patch_mode": "proposal_only",
+            "write_allowed": False,
+            "human_approved": False,
+            "thread_id": tid,
+            "message": text_out,
+        }
+
+    audit_filter = str(inp.audit_receipt_id or "").strip()
+    approval_audit = str(approval.get("audit_receipt_id") or "").strip()
+    if audit_filter and approval_audit and audit_filter != approval_audit:
+        raise HTTPException(status_code=409, detail="audit_receipt_id mismatch for active approval.")
+
+    scope_files = [str(x).strip() for x in list(approval.get("scope_files") or approval.get("requested_paths") or []) if str(x).strip()]
+    requested_actions = [str(x).strip() for x in list(approval.get("requested_actions") or approval.get("actions_allowed") or []) if str(x).strip()]
+    # Current proposal fast-path stores a governance proposal and approval, but
+    # its diff preview is intentionally non-executable ("pendente de refinamento").
+    # Until an executable artifact/diff is persisted, block application honestly.
+    executable_artifact_ready = bool(approval.get("executable_artifact_ready") or approval.get("diff_hash") or approval.get("patch_artifact_id"))
+
+    if not executable_artifact_ready:
+        text_out = (
+            "GOVERNED PATCH EXECUTION RESPONSE\n\n"
+            "- status: execution_blocked_no_executable_artifact\n"
+            f"- approval_id: {approval.get('approval_id') or 'n/d'}\n"
+            f"- patch_id: {approval.get('patch_id') or 'n/d'}\n"
+            "- patch_mode: approved_apply\n"
+            "- write_allowed: false\n"
+            "- human_approved: true\n"
+            f"- target_files: {', '.join(scope_files) if scope_files else 'n/d'}\n"
+            f"- requested_actions: {', '.join(requested_actions) if requested_actions else 'n/d'}\n\n"
+            "Resultado:\n"
+            "A autorização humana está registrada, mas a proposta aprovada não contém um artifact/diff executável seguro. "
+            "Nenhuma escrita, branch, commit ou PR foi executado. O próximo passo é gerar um diff real e aprová-lo antes da aplicação."
+        )
+        try:
+            msg = Message(
+                id=new_id(),
+                org_slug=org,
+                thread_id=tid,
+                user_id=uid,
+                user_name=str(user.get("name") or ""),
+                role="assistant",
+                content=text_out,
+                agent_id="orion",
+                agent_name="Orion",
+                created_at=now_ts(),
+            )
+            db.add(msg)
+            db.commit()
+        except Exception:
+            try: db.rollback()
+            except Exception: pass
+        return {
+            "ok": False,
+            "status": "execution_blocked_no_executable_artifact",
+            "patch_mode": "approved_apply",
+            "write_allowed": False,
+            "human_approved": True,
+            "approval_id": approval.get("approval_id"),
+            "patch_id": approval.get("patch_id"),
+            "audit_receipt_id": approval_audit,
+            "thread_id": tid,
+            "target_files": scope_files,
+            "requested_actions": requested_actions,
+            "message": text_out,
+        }
+
+    text_out = (
+        "GOVERNED PATCH EXECUTION RESPONSE\n\n"
+        "- status: execution_ready_but_apply_not_wired_in_this_hotfix\n"
+        f"- approval_id: {approval.get('approval_id') or 'n/d'}\n"
+        f"- patch_id: {approval.get('patch_id') or 'n/d'}\n"
+        "- patch_mode: approved_apply\n"
+        "- write_allowed: true\n"
+        "- human_approved: true\n\n"
+        "Resultado:\n"
+        "A aprovação e o artifact estão presentes, mas este hotfix não executa escrita direta. "
+        "Encaminhe para o executor GitHub transacional dedicado."
+    )
+    try:
+        msg = Message(
+            id=new_id(),
+            org_slug=org,
+            thread_id=tid,
+            user_id=uid,
+            user_name=str(user.get("name") or ""),
+            role="assistant",
+            content=text_out,
+            agent_id="orion",
+            agent_name="Orion",
+            created_at=now_ts(),
+        )
+        db.add(msg)
+        db.commit()
+    except Exception:
+        try: db.rollback()
+        except Exception: pass
+    return {
+        "ok": True,
+        "status": "execution_ready_but_apply_not_wired_in_this_hotfix",
+        "patch_mode": "approved_apply",
+        "write_allowed": True,
+        "human_approved": True,
+        "approval_id": approval.get("approval_id"),
+        "patch_id": approval.get("patch_id"),
+        "audit_receipt_id": approval_audit,
+        "thread_id": tid,
+        "message": text_out,
+    }
+
 
 
 @app.post("/api/chat/stream")
