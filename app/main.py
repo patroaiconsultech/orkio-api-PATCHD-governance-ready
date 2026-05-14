@@ -2695,6 +2695,13 @@ class ChatOut(BaseModel):
     voice_id: Optional[str] = None
     avatar_url: Optional[str] = None
     runtime_hints: Optional[Dict[str, Any]] = None
+
+
+class GovernanceApprovePatchIn(BaseModel):
+    thread_id: str = Field(min_length=1)
+    audit_receipt_id: Optional[str] = None
+    password: str = Field(min_length=1)
+    auto_execute: bool = False
     
 # =========================
 # Idempotency helpers
@@ -23136,6 +23143,181 @@ def _apply_explicit_agent_request(db: Session, org: str, target_agents: List[Any
                 seen_ids.add(agid)
 
     return ordered or target_agents
+
+
+@app.post("/api/governance/approve-patch")
+def governance_approve_patch(
+    inp: GovernanceApprovePatchIn,
+    x_org_slug: Optional[str] = Header(default=None),
+    user=Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """Side-channel governed patch approval.
+
+    This route intentionally bypasses chat/RAG/runtime interpretation.
+    Approval must be explicit, authenticated, and password-confirmed.
+    It registers an approved_apply grant only when a persisted pending proposal
+    exists for the current thread/user and the user's password is valid.
+    """
+    require_onboarding_complete(user)
+    org = _resolve_org(user, x_org_slug)
+    uid = str(user.get("sub") or "").strip()
+    tid = str(inp.thread_id or "").strip()
+    if not uid:
+        raise HTTPException(status_code=401, detail="Missing authenticated user.")
+    if not tid:
+        raise HTTPException(status_code=400, detail="thread_id required.")
+
+    db_user = db.execute(select(User).where(User.id == uid, User.org_slug == org)).scalar_one_or_none()
+    if not db_user:
+        raise HTTPException(status_code=404, detail="User not found.")
+    if not verify_password(str(inp.password or ""), db_user.salt, db_user.pw_hash):
+        raise HTTPException(status_code=401, detail="Invalid approval password.")
+
+    payload = dict(user or {})
+    pending = _github_write_get_pending_proposal(org, tid, payload, db=db)
+    if not isinstance(pending, dict) or not pending:
+        text_out = (
+            "PATCH APPROVAL RESPONSE\n\n"
+            "- status: approval_context_invalid\n"
+            "- detail: nenhuma_proposta_pendente_encontrada_para_thread_usuario\n"
+            "- write_allowed: false\n"
+            "- human_approved: false\n\n"
+            "Resultado:\n"
+            "A senha foi validada, mas não há proposta pendente segura para esta thread."
+        )
+        try:
+            msg = Message(
+                id=new_id(),
+                org_slug=org,
+                thread_id=tid,
+                user_id=uid,
+                user_name=str(user.get("name") or db_user.name or ""),
+                role="assistant",
+                content=text_out,
+                agent_id="orion",
+                agent_name="Orion",
+                created_at=now_ts(),
+            )
+            db.add(msg)
+            db.commit()
+        except Exception:
+            try: db.rollback()
+            except Exception: pass
+        return {
+            "ok": False,
+            "approved": False,
+            "status": "approval_context_invalid",
+            "patch_mode": "proposal_only",
+            "write_allowed": False,
+            "human_approval_required": True,
+            "human_approved": False,
+            "thread_id": tid,
+            "message": text_out,
+        }
+
+    audit_filter = str(inp.audit_receipt_id or "").strip()
+    if audit_filter and str(pending.get("audit_receipt_id") or "").strip() and audit_filter != str(pending.get("audit_receipt_id") or "").strip():
+        raise HTTPException(status_code=409, detail="audit_receipt_id mismatch for pending proposal.")
+
+    auth_flags = {
+        "patch_id": str(pending.get("patch_id") or ""),
+        "approval_token": str(pending.get("approval_token") or ""),
+        "has_scoped_approval_token": True,
+        "allow_branch": True,
+        "allow_patch": True,
+        "allow_commit": True,
+        "allow_pr": True,
+        "allow_main": False,
+        "deny_merge": False,
+        "scope_files": list(pending.get("requested_paths") or []),
+    }
+    validation = _github_write_validate_tokenized_approval(
+        org=org,
+        thread_id=tid,
+        payload=payload,
+        auth_flags=auth_flags,
+    )
+    if not bool(validation.get("ok")):
+        text_out = str(validation.get("message") or "APROVAÇÃO BLOQUEADA PELA GOVERNANÇA.")
+        return {
+            "ok": False,
+            "approved": False,
+            "status": str(validation.get("reason") or "approval_blocked"),
+            "patch_mode": "proposal_only",
+            "write_allowed": False,
+            "human_approval_required": True,
+            "human_approved": False,
+            "thread_id": tid,
+            "message": text_out,
+        }
+
+    approval = _github_store_write_approval(
+        org=org,
+        thread_id=tid,
+        payload=payload,
+        auth_flags=auth_flags,
+        pending=dict(validation.get("pending") or pending),
+    )
+    try:
+        _github_write_clear_pending_proposal(org, tid, payload, db=db)
+    except Exception:
+        logger.exception("GOVERNANCE_APPROVE_PATCH_CLEAR_PENDING_FAILED")
+
+    text_out = (
+        "PATCH APPROVAL RESPONSE\n\n"
+        "- status: approval_registered\n"
+        f"- approval_id: {approval.get('approval_id') or 'n/d'}\n"
+        f"- patch_id: {approval.get('patch_id') or 'n/d'}\n"
+        "- patch_mode: approved_apply\n"
+        "- write_allowed: true\n"
+        "- human_approval_required: true\n"
+        "- human_approved: true\n"
+        "- approval_source: password_modal\n\n"
+        "Resultado:\n"
+        "A autorização humana foi registrada fora do chat, com senha validada. "
+        "A escrita governada agora pode ser executada pelo fluxo aprovado, sem depender de interpretação textual."
+    )
+    assistant_message_id = None
+    try:
+        msg = Message(
+            id=new_id(),
+            org_slug=org,
+            thread_id=tid,
+            user_id=uid,
+            user_name=str(user.get("name") or db_user.name or ""),
+            role="assistant",
+            content=text_out,
+            agent_id="orion",
+            agent_name="Orion",
+            created_at=now_ts(),
+        )
+        db.add(msg)
+        db.commit()
+        assistant_message_id = msg.id
+    except Exception:
+        try: db.rollback()
+        except Exception: pass
+        logger.exception("GOVERNANCE_APPROVE_PATCH_MESSAGE_PERSIST_FAILED")
+
+    return {
+        "ok": True,
+        "approved": True,
+        "status": "approval_registered",
+        "patch_mode": "approved_apply",
+        "write_allowed": True,
+        "human_approval_required": True,
+        "human_approved": True,
+        "approval_id": approval.get("approval_id"),
+        "patch_id": approval.get("patch_id"),
+        "audit_receipt_id": approval.get("audit_receipt_id") or pending.get("audit_receipt_id"),
+        "thread_id": tid,
+        "assistant_message_id": assistant_message_id,
+        "message": text_out,
+        "execution_started": False,
+        "execution_note": "approval_registered_only_no_chat_runtime_autorun",
+    }
+
 
 @app.post("/api/chat/stream")
 async def chat_stream(
