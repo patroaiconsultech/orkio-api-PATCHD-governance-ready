@@ -24598,6 +24598,124 @@ async def chat_stream(
             return
 
 
+
+        # PATCH19: approved-apply execution lock.
+        # Once a password-modal approval is registered, conversational chat must
+        # not pretend to continue/apply the patch. The only valid path is the
+        # side-channel /api/governance/execute-approved-patch.
+        _active_approved_execution = _github_write_get_active_approval(org, tid, user)
+        if isinstance(_active_approved_execution, dict) and _active_approved_execution:
+            _low_msg = str(message or "").strip().lower()
+            _is_new_patch_request = _is_patch_governance_request_message(message)
+            _is_status_probe = any(x in _low_msg for x in (
+                "está andando", "esta andando", "status", "aplicação do patch",
+                "aplicacao do patch", "execução", "execucao", "andamento",
+            ))
+            _is_conversational_continue = any(x in _low_msg for x in (
+                "sim", "por favor", "prossiga", "continue", "ok", "pode seguir",
+                "segue", "vamos", "aplique", "executa", "execute",
+            ))
+            if (not _is_new_patch_request) or _is_conversational_continue or _is_status_probe:
+                _stream_final_agent_name = "Orion"
+                _stream_final_agent_id = (
+                    _agent_attr(_resolve_dispatch_agent_row(alias_to_agent, _stream_final_agent_name), "id", None)
+                    if isinstance(alias_to_agent, dict)
+                    else None
+                )
+                _stream_final_text = (
+                    "PATCH EXECUTION PENDING\n\n"
+                    "- status: execution_pending\n"
+                    f"- approval_id: {str(_active_approved_execution.get('approval_id') or 'n/d')}\n"
+                    f"- patch_id: {str(_active_approved_execution.get('patch_id') or 'n/d')}\n"
+                    "- patch_mode: approved_apply\n"
+                    "- write_allowed: true\n"
+                    "- human_approved: true\n"
+                    "- execution_channel: side_channel_required\n\n"
+                    "Resultado:\n"
+                    "A aprovação humana já foi registrada. Para evitar resposta narrativa sem escrita real, "
+                    "o chat comum está bloqueado para este patch.\n\n"
+                    "Use o botão “Executar patch aprovado” na mensagem de aprovação."
+                )
+                if isinstance(dispatch_routing_receipt_stream, dict):
+                    dispatch_routing_receipt_stream["approved_execution_pending"] = True
+                    dispatch_routing_receipt_stream["patch_mode"] = "approved_apply"
+                    dispatch_routing_receipt_stream["write_allowed"] = True
+                    dispatch_routing_receipt_stream["human_approved"] = True
+                    dispatch_routing_receipt_stream["dispatch_executed"] = False
+                    dispatch_routing_receipt_stream["execution_channel"] = "side_channel_required"
+                    dispatch_routing_receipt_stream["approval_id"] = str(_active_approved_execution.get("approval_id") or "")
+                    dispatch_routing_receipt_stream["patch_id"] = str(_active_approved_execution.get("patch_id") or "")
+
+                try:
+                    yield sse_execution(
+                        "approved_execution_pending",
+                        "Execução aprovada aguardando canal governado",
+                        kind="system",
+                        scope="governance",
+                        agent_id=_stream_final_agent_id,
+                        agent_name=_stream_final_agent_name,
+                        detail="Chat comum bloqueado. Use o botão Executar patch aprovado.",
+                    )
+                except Exception:
+                    return
+
+                try:
+                    _persist_stream_assistant_message(
+                        content=_stream_final_text,
+                        agent_id=_stream_final_agent_id,
+                        agent_name=_stream_final_agent_name,
+                    )
+                except Exception:
+                    pass
+
+                _exec_lock_step_size = 120
+                for _i in range(0, len(_stream_final_text), _exec_lock_step_size):
+                    if await request.is_disconnected():
+                        return
+                    _chunk = _stream_final_text[_i:_i + _exec_lock_step_size]
+                    try:
+                        yield sse_event("chunk", {
+                            "agent_id": _stream_final_agent_id,
+                            "agent_name": _stream_final_agent_name,
+                            "content": _chunk,
+                            "delta": _chunk,
+                            "thread_id": tid,
+                            "trace_id": trace_id,
+                        })
+                    except Exception:
+                        return
+
+                try:
+                    yield sse_event("agent_done", {
+                        "done": True,
+                        "agent_id": _stream_final_agent_id,
+                        "agent_name": _stream_final_agent_name,
+                        "thread_id": tid,
+                        "trace_id": trace_id,
+                    })
+                    yield sse_event("done", {
+                        "done": True,
+                        "thread_id": tid,
+                        "trace_id": trace_id,
+                        "final_text": _stream_final_text,
+                        "agent_id": _stream_final_agent_id,
+                        "agent_name": _stream_final_agent_name,
+                        "assistant_persisted": bool(_stream_assistant_persisted),
+                        "assistant_message_id": _stream_assistant_message_id,
+                        "approved_execution_pending": True,
+                        "patch_mode": "approved_apply",
+                        "write_allowed": True,
+                        "human_approved": True,
+                        "execution_channel": "side_channel_required",
+                        "approval_id": str(_active_approved_execution.get("approval_id") or ""),
+                        "patch_id": str(_active_approved_execution.get("patch_id") or ""),
+                        **_patch_diagnostics_snapshot(),
+                    })
+                except Exception:
+                    return
+                return
+
+
         # PATCH15: deterministic proposal-only fast-path.
         # Patch governance requests must never enter generic Team/RAG/runtime before
         # a proposal envelope is emitted, persisted, and closed with done.
