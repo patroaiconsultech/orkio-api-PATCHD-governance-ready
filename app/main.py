@@ -11422,6 +11422,151 @@ def _apply_patch_governance_fields_to_receipt(
     return r
 
 
+def _sanitize_patch_governance_note_lines(text_value: str) -> List[str]:
+    txt = str(text_value or "")
+    if not txt.strip():
+        return []
+    blocked_markers = (
+        "patch_mode",
+        "write_allowed",
+        "human_approved",
+        "human_approval_required",
+        "audit_receipt_id",
+        "rollback_plan",
+        "target_files",
+        "target_functions",
+        "risk_level",
+        "diff_preview",
+    )
+    safe_lines: List[str] = []
+    for raw_line in txt.splitlines():
+        line = str(raw_line or "").strip()
+        if not line:
+            continue
+        low = line.lower()
+        if any(marker in low for marker in blocked_markers):
+            continue
+        if line.startswith("```") or line.startswith("{") or line.startswith("}"):
+            continue
+        safe_lines.append(line)
+    return safe_lines[:6]
+
+
+def _render_governed_patch_response(
+    *,
+    user_text: str,
+    governance: Optional[Dict[str, Any]] = None,
+    original_text: str = "",
+) -> str:
+    g = dict(governance or {})
+    target_files = [str(x).strip() for x in list(g.get("target_files") or []) if str(x).strip()]
+    target_functions = [str(x).strip() for x in list(g.get("target_functions") or []) if str(x).strip()]
+    diff_preview = str(g.get("diff_preview") or "").strip()
+    risk_level = str(g.get("risk_level") or "medium").strip() or "medium"
+    rollback_plan = str(g.get("rollback_plan") or "").strip() or "Reverter em branch isolada e/ou PR revert governado antes de qualquer merge."
+    audit_receipt_id = str(g.get("audit_receipt_id") or "").strip()
+    patch_mode = "proposal_only"
+    write_allowed = False
+    human_approval_required = True
+    human_approved = False
+
+    note_lines = _sanitize_patch_governance_note_lines(original_text)
+    objective = ""
+    for line in note_lines:
+        if len(line) >= 18:
+            objective = line
+            break
+    if not objective:
+        objective = f"Proposta governada para: {str(user_text or '').strip()[:240]}"
+
+    lines: List[str] = [
+        "PATCH GOVERNANCE RESPONSE",
+        "",
+        f"patch_mode: {patch_mode}",
+        f"write_allowed: {str(write_allowed).lower()}",
+        f"human_approval_required: {str(human_approval_required).lower()}",
+        f"human_approved: {str(human_approved).lower()}",
+        f"audit_receipt_id: {audit_receipt_id or 'pending'}",
+        "",
+        "Objetivo:",
+        objective,
+        "",
+        "Escopo:",
+        "- proposal_only",
+        "- sem escrita real",
+        "- sem branch",
+        "- sem commit",
+        "- sem pull request",
+        "",
+        "Arquivos alvo:",
+    ]
+    if target_files:
+        lines.extend([f"- {item}" for item in target_files[:20]])
+    else:
+        lines.append("- não explicitado")
+    lines.extend([
+        "",
+        "Funções alvo:",
+    ])
+    if target_functions:
+        lines.extend([f"- {item}" for item in target_functions[:20]])
+    else:
+        lines.append("- não explicitado")
+    lines.extend([
+        "",
+        "Diff preview:",
+        diff_preview or "# proposal-only\n# diff preview pendente de refinamento pelo agente",
+        "",
+        f"Risco: {risk_level}",
+        f"Rollback: {rollback_plan}",
+    ])
+    if note_lines:
+        lines.extend([
+            "",
+            "Notas do agente:",
+            *[f"- {line}" for line in note_lines[:4]],
+        ])
+    return "\n".join(lines).strip()
+
+
+def _clamp_patch_governance_response(
+    user_text: str,
+    text_value: str,
+    *,
+    runtime_result: Optional[Dict[str, Any]] = None,
+    governance_ctx: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    raw_text = str(text_value or "")
+    if not _is_patch_governance_request_message(user_text):
+        return {
+            "text": raw_text,
+            "governance": dict(runtime_result or {}),
+            "applied": False,
+        }
+
+    ctx = dict(governance_ctx or {})
+    if not ctx:
+        ctx = _build_patch_governance_request_context(user_text)
+
+    governance = _finalize_patch_governance_runtime_fields(ctx, raw_text)
+    governance["patch_mode"] = "proposal_only"
+    governance["write_allowed"] = False
+    governance["human_approval_required"] = True
+    governance["human_approved"] = False
+    governance["patch_proposal_ready"] = bool(str(raw_text or "").strip())
+
+    rendered_text = _render_governed_patch_response(
+        user_text=user_text,
+        governance=governance,
+        original_text=raw_text,
+    )
+    return {
+        "text": rendered_text,
+        "governance": governance,
+        "applied": True,
+    }
+
+
 
 def _github_governance_context_is_approved_apply(ctx: Optional[Dict[str, Any]]) -> bool:
     c = dict(ctx or {})
@@ -11520,6 +11665,7 @@ def execute_agent_runtime(
     file_context_block = str(file_ctx.get("file_context_block") or "")
     file_evidence_count = int(file_ctx.get("file_evidence_count") or 0)
     patch_governance_ctx = _build_patch_governance_request_context(message)
+    governance_fields = _finalize_patch_governance_runtime_fields(patch_governance_ctx, "")
 
     if agent_row is None:
         return {
@@ -11609,7 +11755,14 @@ def execute_agent_runtime(
             execution_trace.append(f"file_context:missing_content:{len(files_used)}")
         else:
             execution_trace.append("file_context:none")
-        governance_fields = _finalize_patch_governance_runtime_fields(patch_governance_ctx, text)
+        clamp_result = _clamp_patch_governance_response(
+            message,
+            text,
+            runtime_result=ans_obj if isinstance(ans_obj, dict) else {},
+            governance_ctx=patch_governance_ctx,
+        )
+        text = str(clamp_result.get("text") or text)
+        governance_fields = dict(clamp_result.get("governance") or {})
         execution_trace.extend(list(governance_fields.get("governance_trace") or []))
         return {
             "ok": True,
@@ -11625,6 +11778,17 @@ def execute_agent_runtime(
             "file_evidence_required": file_evidence_required,
             "file_evidence_count": file_evidence_count,
             "runtime_mode": "direct_agent_runtime",
+            "patch_mode": governance_fields.get("patch_mode"),
+            "write_allowed": governance_fields.get("write_allowed"),
+            "target_files": list(governance_fields.get("target_files") or []),
+            "target_functions": list(governance_fields.get("target_functions") or []),
+            "diff_preview": governance_fields.get("diff_preview"),
+            "risk_level": governance_fields.get("risk_level"),
+            "human_approval_required": governance_fields.get("human_approval_required"),
+            "human_approved": governance_fields.get("human_approved"),
+            "rollback_plan": governance_fields.get("rollback_plan"),
+            "audit_receipt_id": governance_fields.get("audit_receipt_id"),
+            "patch_proposal_ready": governance_fields.get("patch_proposal_ready"),
         }
 
     error = ""
@@ -11903,6 +12067,39 @@ def execute_team_fanout(
         fallback_reason = "team_orchestrator_runtime_unavailable" if final_text else "team_fanout_unavailable"
 
     dispatch_executed = bool(final_text.strip()) and any(status in {"executed", "aggregated"} for status in participant_statuses.values())
+
+    if _is_patch_governance_request_message(message):
+        clamp_result = _clamp_patch_governance_response(
+            message,
+            final_text,
+            runtime_result={
+                "patch_mode": patch_mode,
+                "write_allowed": write_allowed,
+                "target_files": target_files,
+                "target_functions": target_functions,
+                "diff_preview": diff_preview,
+                "risk_level": risk_level,
+                "human_approval_required": human_approval_required,
+                "human_approved": human_approved,
+                "rollback_plan": rollback_plan,
+                "audit_receipt_id": audit_receipt_id,
+                "patch_proposal_ready": patch_proposal_ready,
+            },
+            governance_ctx=_build_patch_governance_request_context(message),
+        )
+        final_text = str(clamp_result.get("text") or final_text)
+        _team_governance = dict(clamp_result.get("governance") or {})
+        patch_mode = str(_team_governance.get("patch_mode") or patch_mode)
+        write_allowed = bool(_team_governance.get("write_allowed"))
+        target_files = list(_team_governance.get("target_files") or target_files)
+        target_functions = list(_team_governance.get("target_functions") or target_functions)
+        diff_preview = str(_team_governance.get("diff_preview") or diff_preview)
+        risk_level = str(_team_governance.get("risk_level") or risk_level)
+        human_approval_required = bool(_team_governance.get("human_approval_required"))
+        human_approved = bool(_team_governance.get("human_approved"))
+        rollback_plan = str(_team_governance.get("rollback_plan") or rollback_plan)
+        audit_receipt_id = str(_team_governance.get("audit_receipt_id") or audit_receipt_id)
+        patch_proposal_ready = bool(_team_governance.get("patch_proposal_ready"))
 
     return {
         "ok": bool(final_text.strip()),
@@ -17664,6 +17861,18 @@ def chat(
                 inp.message,
                 target_agents=list(dispatch_routing_receipt.get("participants") or []),
             )
+        if _is_patch_governance_request_message(inp.message):
+            team_clamp_result = _clamp_patch_governance_response(
+                inp.message,
+                answer,
+                runtime_result=team_runtime_result,
+                governance_ctx=_build_patch_governance_request_context(inp.message),
+            )
+            answer = str(team_clamp_result.get("text") or answer)
+            dispatch_routing_receipt = _apply_patch_governance_fields_to_receipt(
+                dispatch_routing_receipt,
+                dict(team_clamp_result.get("governance") or {}),
+            )
         team_signer_name = str(dispatch_routing_receipt.get("final_speaker") or team_runtime_result.get("final_speaker") or "Orkio")
         team_signer_agent = _resolve_dispatch_agent_row(alias_to_agent, team_signer_name)
         team_signer_agent_id = _agent_attr(team_signer_agent, "id", None)
@@ -18295,11 +18504,25 @@ def chat(
             dispatch_routing_receipt["file_evidence_count"] = int(direct_runtime_result.get("file_evidence_count") or 0)
             dispatch_routing_receipt["final_speaker"] = direct_runtime_target or dispatch_routing_receipt.get("final_speaker") or final_signer_agent_name
             dispatch_routing_receipt["visible_agent"] = direct_runtime_target or dispatch_routing_receipt.get("visible_agent") or final_signer_agent_name
+            dispatch_routing_receipt = _apply_patch_governance_fields_to_receipt(dispatch_routing_receipt, direct_runtime_result)
         elif direct_runtime_requested and not (direct_runtime_result and direct_runtime_result.get("ok")):
             dispatch_routing_receipt["dispatch_executed"] = False
 
         answer = _apply_truthful_execution_mode(answer or "", execution_result=execution_result)
         answer = _apply_chat_anti_echo(answer or "", inp.message)
+
+        if _is_patch_governance_request_message(inp.message):
+            clamp_result = _clamp_patch_governance_response(
+                inp.message,
+                answer or "",
+                runtime_result=direct_runtime_result if isinstance(direct_runtime_result, dict) else execution_result,
+                governance_ctx=_build_patch_governance_request_context(inp.message),
+            )
+            answer = str(clamp_result.get("text") or answer or "")
+            dispatch_routing_receipt = _apply_patch_governance_fields_to_receipt(
+                dispatch_routing_receipt,
+                dict(clamp_result.get("governance") or {}),
+            )
 
         if ans_obj and ans_obj.get("code") and not answer:
             # surface structured error
@@ -22717,6 +22940,7 @@ async def chat_stream(
     _stream_final_voice_id = None
     _stream_final_avatar_url = None
     _stream_done_debug: Dict[str, Any] = {}
+    _stream_patch_governance_fields: Dict[str, Any] = {}
     _stream_assistant_persisted = False
     _stream_assistant_message_id = None
     _stream_assistant_persist_error = None
@@ -22970,6 +23194,19 @@ async def chat_stream(
                     _stream_final_text = _build_team_mission_answer_text(
                         message,
                         target_agents=list(dispatch_routing_receipt_stream.get("participants") or []),
+                    )
+                if _is_patch_governance_request_message(message):
+                    _team_clamp_result = _clamp_patch_governance_response(
+                        message,
+                        _stream_final_text,
+                        runtime_result=team_runtime_result,
+                        governance_ctx=_build_patch_governance_request_context(message),
+                    )
+                    _stream_final_text = str(_team_clamp_result.get("text") or _stream_final_text)
+                    _stream_patch_governance_fields = dict(_team_clamp_result.get("governance") or {})
+                    dispatch_routing_receipt_stream = _apply_patch_governance_fields_to_receipt(
+                        dispatch_routing_receipt_stream,
+                        _stream_patch_governance_fields,
                     )
                 _stream_final_agent_id = team_signer_agent_id
                 _stream_final_agent_name = team_signer_name
@@ -24392,6 +24629,19 @@ async def chat_stream(
 
                 previous_agent_payload = {"id": final_signer_agent_id, "name": final_signer_agent_name}
                 _stream_final_text = ans
+                if _is_patch_governance_request_message(message):
+                    _stream_clamp_result = _clamp_patch_governance_response(
+                        message,
+                        _stream_final_text,
+                        runtime_result=execution_result if isinstance(execution_result, dict) else {},
+                        governance_ctx=_build_patch_governance_request_context(message),
+                    )
+                    _stream_final_text = str(_stream_clamp_result.get("text") or _stream_final_text)
+                    _stream_patch_governance_fields = dict(_stream_clamp_result.get("governance") or {})
+                    dispatch_routing_receipt_stream = _apply_patch_governance_fields_to_receipt(
+                        dispatch_routing_receipt_stream,
+                        _stream_patch_governance_fields,
+                    )
                 _stream_final_agent_id = final_signer_agent_id
                 _stream_final_agent_name = final_signer_agent_name
                 _stream_final_voice_id = final_signer_voice_id
@@ -24479,6 +24729,20 @@ async def chat_stream(
                     "assistant_persisted": bool(_stream_assistant_persisted),
                     "assistant_message_id": _stream_assistant_message_id,
                 }
+                if _stream_patch_governance_fields:
+                    payload.update({
+                        "patch_mode": str(_stream_patch_governance_fields.get("patch_mode") or ""),
+                        "write_allowed": bool(_stream_patch_governance_fields.get("write_allowed")),
+                        "target_files": list(_stream_patch_governance_fields.get("target_files") or []),
+                        "target_functions": list(_stream_patch_governance_fields.get("target_functions") or []),
+                        "diff_preview": str(_stream_patch_governance_fields.get("diff_preview") or ""),
+                        "risk_level": str(_stream_patch_governance_fields.get("risk_level") or ""),
+                        "human_approval_required": bool(_stream_patch_governance_fields.get("human_approval_required")),
+                        "human_approved": bool(_stream_patch_governance_fields.get("human_approved")),
+                        "rollback_plan": str(_stream_patch_governance_fields.get("rollback_plan") or ""),
+                        "audit_receipt_id": str(_stream_patch_governance_fields.get("audit_receipt_id") or ""),
+                        "patch_proposal_ready": bool(_stream_patch_governance_fields.get("patch_proposal_ready")),
+                    })
                 if _stream_done_debug:
                     payload["diagnostics"] = {**dict(_stream_done_debug), "patch_sentinel": PATCH_SENTINEL, "build_fingerprint": _safe_build_fingerprint()}
                 if final_runtime_enrichment and final_runtime_enrichment.get("runtime_hints"):
