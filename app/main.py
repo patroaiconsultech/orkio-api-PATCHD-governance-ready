@@ -24310,6 +24310,27 @@ async def chat_stream(
 
                 ans = _apply_truthful_execution_mode((ans_obj.get("text") or "").strip(), execution_result=execution_result)
                 ans = _apply_chat_anti_echo(ans, message)
+                if _is_patch_governance_request_message(message):
+                    _stream_pre_persist_runtime_result = execution_result if isinstance(execution_result, dict) else {}
+                    if isinstance(direct_runtime_result, dict) and direct_runtime_result:
+                        try:
+                            _stream_pre_persist_runtime_result = dict(_stream_pre_persist_runtime_result or {})
+                            _stream_pre_persist_runtime_result.update({k: v for k, v in direct_runtime_result.items() if v is not None})
+                        except Exception:
+                            _stream_pre_persist_runtime_result = execution_result if isinstance(execution_result, dict) else {}
+                    _stream_pre_persist_clamp = _clamp_patch_governance_response(
+                        message,
+                        ans,
+                        runtime_result=_stream_pre_persist_runtime_result,
+                        governance_ctx=_build_patch_governance_request_context(message),
+                    )
+                    ans = str(_stream_pre_persist_clamp.get("text") or ans)
+                    _stream_final_text = ans
+                    _stream_patch_governance_fields = dict(_stream_pre_persist_clamp.get("governance") or {})
+                    dispatch_routing_receipt_stream = _apply_patch_governance_fields_to_receipt(
+                        dispatch_routing_receipt_stream,
+                        _stream_patch_governance_fields,
+                    )
 
                 if direct_runtime_result and direct_runtime_result.get("ok") and ans:
                     dispatch_routing_receipt_stream["dispatch_executed"] = True
@@ -25218,6 +25239,14 @@ async def orchestrate(
                 continue
 
             ans = _apply_truthful_execution_mode((ans_obj.get("text") or "").strip(), execution_result=None)
+            if _is_patch_governance_request_message(message):
+                _orch_stream_clamp = _clamp_patch_governance_response(
+                    message,
+                    ans,
+                    runtime_result=ans_obj if isinstance(ans_obj, dict) else {},
+                    governance_ctx=_build_patch_governance_request_context(message),
+                )
+                ans = str(_orch_stream_clamp.get("text") or ans)
 
             # Persist
             try:
