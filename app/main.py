@@ -8531,6 +8531,13 @@ def _build_github_write_response_text(
             normalized = _github_create_branch_capability(
                 branch=branch_name,
                 trace_id=str(approval.get("approval_id") or ""),
+                governance={
+                    "patch_mode": "proposal_only",
+                    "write_allowed": False,
+                    "human_approval_required": True,
+                    "human_approved": False,
+                    "approval_id": str(approval.get("approval_id") or ""),
+                },
             )
         else:
             raw = orion_github_execute(OrionExecuteIn(message=user_text))
@@ -11153,6 +11160,343 @@ def _should_attempt_real_agent_runtime(
     return False
 
 
+
+
+def _dedupe_nonempty_strs(items: Optional[List[Any]] = None) -> List[str]:
+    out: List[str] = []
+    seen: set = set()
+    for item in list(items or []):
+        value = str(item or "").strip()
+        if not value or value in seen:
+            continue
+        out.append(value)
+        seen.add(value)
+    return out
+
+
+def _build_file_context_block(
+    citations: Optional[List[Dict[str, Any]]] = None,
+) -> Dict[str, Any]:
+    files_used: List[str] = []
+    evidence_blocks: List[str] = []
+    evidence_count = 0
+
+    for c in list(citations or []):
+        try:
+            filename = str(c.get("filename") or c.get("file_id") or "").strip()
+        except Exception:
+            filename = ""
+        if filename:
+            files_used.append(filename)
+
+        content = ""
+        for key in ("content", "text", "excerpt", "chunk_text", "summary"):
+            try:
+                content = str(c.get(key) or "").strip()
+            except Exception:
+                content = ""
+            if content:
+                break
+
+        if not content:
+            continue
+
+        evidence_count += 1
+        label = filename or f"arquivo_{evidence_count}"
+        evidence_blocks.append(f"[Arquivo: {label}]\n{content}")
+
+    files_used = _dedupe_nonempty_strs(files_used)
+
+    try:
+        max_chars = int(os.getenv("FILE_CONTEXT_MAX_CHARS", "8000") or "8000")
+    except Exception:
+        max_chars = 8000
+
+    raw_context = "\n\n".join(evidence_blocks).strip()
+    if max_chars and len(raw_context) > max_chars:
+        raw_context = raw_context[:max_chars].rstrip() + "\n\n[...contexto de arquivo truncado...]"
+
+    file_context_block = ""
+    if raw_context:
+        file_context_block = (
+            "CONTEXTO DOS ARQUIVOS ANEXADOS:\n"
+            f"{raw_context}\n\n"
+            "Use evidências concretas do arquivo. "
+            "Se o conteúdo não for suficiente para sustentar a resposta, declare isso explicitamente."
+        )
+
+    return {
+        "files_used": files_used,
+        "file_context_block": file_context_block,
+        "file_context_injected": bool(file_context_block),
+        "file_context_chars": len(file_context_block),
+        "file_evidence_required": bool(files_used),
+        "file_evidence_count": evidence_count,
+    }
+
+
+
+
+def _extract_patch_governance_target_files(user_text: str) -> List[str]:
+    txt = str(user_text or "")
+    matches = re.findall(r'(?<![\w/.-])([A-Za-z0-9_./\\-]+\.(?:py|jsx|tsx|js|ts|json|md|txt|yml|yaml|sql|html|css|docx|pptx|pdf))(?![\w/.-])', txt)
+    return _dedupe_nonempty_strs([str(x).strip() for x in matches])
+
+def _extract_patch_governance_target_functions(user_text: str) -> List[str]:
+    txt = str(user_text or "")
+    found: List[str] = []
+    for m in re.findall(r'`([A-Za-z_][A-Za-z0-9_]*)\s*\(`', txt):
+        found.append(str(m).strip())
+    for m in re.findall(r'\bfun[cç][ãa]o\s+([A-Za-z_][A-Za-z0-9_]*)\b', txt, flags=re.IGNORECASE):
+        found.append(str(m).strip())
+    for m in re.findall(r'\bfunction\s+([A-Za-z_][A-Za-z0-9_]*)\b', txt, flags=re.IGNORECASE):
+        found.append(str(m).strip())
+    return _dedupe_nonempty_strs(found)
+
+def _is_patch_governance_request_message(user_text: str) -> bool:
+    low = str(user_text or "").strip().lower()
+    if not low:
+        return False
+    intent_markers = (
+        "patch",
+        "diff",
+        "rollback",
+        "pull request",
+        "branch",
+        "commit",
+        "proposal-only",
+        "proposal only",
+        "proposta",
+        "aprovação humana",
+        "aplicar patch",
+        "propor patch",
+        "diff preview",
+        "arquivo ",
+        "função ",
+        "funçao ",
+        "function ",
+    )
+    return any(marker in low for marker in intent_markers)
+
+def _infer_patch_governance_risk_level(user_text: str, target_files: Optional[List[str]] = None, target_functions: Optional[List[str]] = None) -> str:
+    low = str(user_text or "").strip().lower()
+    files = list(target_files or [])
+    funcs = list(target_functions or [])
+    high_markers = ("produção", "production", "main", "master", "delete", "drop table", "destrutiv", "destructive", "migrate", "schema")
+    if any(marker in low for marker in high_markers):
+        return "high"
+    if len(files) > 2 or len(funcs) > 3:
+        return "medium"
+    if files or funcs:
+        return "medium"
+    return "low"
+
+def _build_patch_governance_request_context(user_text: str) -> Dict[str, Any]:
+    requested = _is_patch_governance_request_message(user_text)
+    target_files = _extract_patch_governance_target_files(user_text)
+    target_functions = _extract_patch_governance_target_functions(user_text)
+    risk_level = _infer_patch_governance_risk_level(user_text, target_files, target_functions)
+    return {
+        "proposal_only": bool(requested),
+        "patch_mode": "proposal_only" if requested else "",
+        "write_allowed": False,
+        "target_files": target_files,
+        "target_functions": target_functions,
+        "risk_level": risk_level,
+        "human_approval_required": bool(requested),
+        "human_approved": False,
+        "rollback_plan": "Reverter em branch isolada e/ou PR revert governado antes de qualquer merge.",
+        "audit_receipt_id": new_id() if requested else "",
+        "diff_preview": "",
+    }
+
+def _build_patch_governance_prompt_instruction(ctx: Optional[Dict[str, Any]]) -> str:
+    c = dict(ctx or {})
+    if not bool(c.get("proposal_only")):
+        return ""
+    files = list(c.get("target_files") or [])
+    funcs = list(c.get("target_functions") or [])
+    risk_level = str(c.get("risk_level") or "medium")
+    lines = [
+        "MODO DE GOVERNANÇA DE PATCH: proposal_only",
+        "Você NÃO pode aplicar escrita real, alterar arquivos, criar branch, abrir PR ou confirmar deploy.",
+        "Sua tarefa é SOMENTE propor uma alteração governada, com escopo explícito e diff preview.",
+        "",
+        "Responda obrigatoriamente com as seções:",
+        "1. Objetivo",
+        "2. Escopo",
+        "3. Arquivos alvo",
+        "4. Funções alvo",
+        "5. Diff preview",
+        "6. Risco",
+        "7. Aprovação humana",
+        "8. Rollback",
+        "",
+        f"Risco sugerido: {risk_level}",
+    ]
+    if files:
+        lines.append("Arquivos sugeridos: " + ", ".join(files[:20]))
+    if funcs:
+        lines.append("Funções sugeridas: " + ", ".join(funcs[:20]))
+    return "\n".join(lines).strip()
+
+def _extract_patch_governance_diff_preview(text_value: str) -> str:
+    txt = str(text_value or "")
+    m = re.search(r"```diff\s*(.*?)```", txt, flags=re.IGNORECASE | re.DOTALL)
+    if m:
+        return str(m.group(1) or "").strip()[:6000]
+    m = re.search(r"diff\s*preview\s*[:\-]?\s*(.*)", txt, flags=re.IGNORECASE | re.DOTALL)
+    if m:
+        return str(m.group(1) or "").strip()[:4000]
+    return ""
+
+def _finalize_patch_governance_runtime_fields(
+    ctx: Optional[Dict[str, Any]],
+    text_value: str,
+) -> Dict[str, Any]:
+    c = dict(ctx or {})
+    if not bool(c.get("proposal_only")):
+        return {
+            "patch_mode": "",
+            "write_allowed": False,
+            "target_files": [],
+            "target_functions": [],
+            "diff_preview": "",
+            "risk_level": "",
+            "human_approval_required": False,
+            "human_approved": False,
+            "rollback_plan": "",
+            "audit_receipt_id": "",
+            "patch_proposal_ready": False,
+            "governance_trace": [],
+        }
+    diff_preview = _extract_patch_governance_diff_preview(text_value)
+    if not diff_preview:
+        scope_bits: List[str] = []
+        if c.get("target_files"):
+            scope_bits.append("files=" + ", ".join(list(c.get("target_files") or [])[:10]))
+        if c.get("target_functions"):
+            scope_bits.append("functions=" + ", ".join(list(c.get("target_functions") or [])[:10]))
+        diff_preview = "\n".join([
+            "# proposal-only",
+            "# diff preview pendente de refinamento pelo agente",
+            *(scope_bits or ["# scope não explicitado pelo usuário"]),
+        ]).strip()
+    return {
+        "patch_mode": "proposal_only",
+        "write_allowed": False,
+        "target_files": list(c.get("target_files") or []),
+        "target_functions": list(c.get("target_functions") or []),
+        "diff_preview": str(diff_preview or "").strip()[:6000],
+        "risk_level": str(c.get("risk_level") or "medium"),
+        "human_approval_required": True,
+        "human_approved": False,
+        "rollback_plan": str(c.get("rollback_plan") or "").strip(),
+        "audit_receipt_id": str(c.get("audit_receipt_id") or "").strip(),
+        "patch_proposal_ready": bool(str(text_value or "").strip()),
+        "governance_trace": [
+            "patch_governance:proposal_only",
+            f"patch_governance:risk:{str(c.get('risk_level') or 'medium')}",
+            f"patch_governance:files:{len(list(c.get('target_files') or []))}",
+            f"patch_governance:functions:{len(list(c.get('target_functions') or []))}",
+        ],
+    }
+
+def _apply_patch_governance_fields_to_receipt(
+    receipt: Optional[Dict[str, Any]],
+    runtime_result: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    r = dict(receipt or {})
+    rr = dict(runtime_result or {})
+    r["patch_mode"] = str(rr.get("patch_mode") or "")
+    r["write_allowed"] = bool(rr.get("write_allowed"))
+    r["target_files"] = list(rr.get("target_files") or [])
+    r["target_functions"] = list(rr.get("target_functions") or [])
+    r["diff_preview"] = str(rr.get("diff_preview") or "")
+    r["risk_level"] = str(rr.get("risk_level") or "")
+    r["human_approval_required"] = bool(rr.get("human_approval_required"))
+    r["human_approved"] = bool(rr.get("human_approved"))
+    r["rollback_plan"] = str(rr.get("rollback_plan") or "")
+    r["audit_receipt_id"] = str(rr.get("audit_receipt_id") or "")
+    r["patch_proposal_ready"] = bool(rr.get("patch_proposal_ready"))
+    return r
+
+
+
+def _github_governance_context_is_approved_apply(ctx: Optional[Dict[str, Any]]) -> bool:
+    c = dict(ctx or {})
+    return (
+        str(c.get("patch_mode") or "").strip().lower() == "approved_apply"
+        and bool(c.get("write_allowed"))
+        and bool(c.get("human_approved"))
+    )
+
+def _github_build_governance_blocked_result(
+    *,
+    action: str,
+    governance: Optional[Dict[str, Any]] = None,
+    repo: Optional[str] = None,
+    branch: Optional[str] = None,
+    path: Optional[str] = None,
+) -> Dict[str, Any]:
+    c = dict(governance or {})
+    patch_mode = str(c.get("patch_mode") or "").strip() or "proposal_only"
+    write_allowed = bool(c.get("write_allowed"))
+    human_approved = bool(c.get("human_approved"))
+    human_approval_required = bool(c.get("human_approval_required", True))
+    approval_id = str(c.get("approval_id") or c.get("audit_receipt_id") or "").strip()
+    reasons: List[str] = []
+    if patch_mode.lower() != "approved_apply":
+        reasons.append("patch_mode_not_approved_apply")
+    if not write_allowed:
+        reasons.append("write_not_allowed")
+    if not human_approved:
+        reasons.append("human_approval_missing")
+    result: Dict[str, Any] = {
+        "handled": True,
+        "success": False,
+        "provider": "github",
+        "message": (
+            "AÇÃO BLOQUEADA PELA GOVERNANÇA CENTRAL DE ESCRITA.\n"
+            f"- action: {action}\n"
+            f"- reasons: {', '.join(reasons) if reasons else 'governance_block'}"
+        ),
+        "governance_blocked": True,
+        "governance_action": action,
+        "patch_mode": patch_mode,
+        "write_allowed": write_allowed,
+        "human_approval_required": human_approval_required,
+        "human_approved": human_approved,
+        "approval_id": approval_id,
+        "audit_receipt_id": str(c.get("audit_receipt_id") or "").strip(),
+        "risk_level": str(c.get("risk_level") or "").strip(),
+    }
+    if repo:
+        result["repo"] = repo
+    if branch:
+        result["branch"] = branch
+    if path:
+        result["path"] = path
+    return result
+
+def _github_enforce_governed_write(
+    *,
+    action: str,
+    governance: Optional[Dict[str, Any]] = None,
+    repo: Optional[str] = None,
+    branch: Optional[str] = None,
+    path: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    if _github_governance_context_is_approved_apply(governance):
+        return None
+    return _github_build_governance_blocked_result(
+        action=action,
+        governance=governance,
+        repo=repo,
+        branch=branch,
+        path=path,
+    )
+
 def execute_agent_runtime(
     agent_row: Any,
     message: str,
@@ -11168,6 +11512,15 @@ def execute_agent_runtime(
     execution_id = new_id()
     agent_name = _agent_attr(agent_row, "name", None) or "Agent"
     agent_slug = _canonical_dispatch_specialist_slug(agent_name) or "agent"
+    file_ctx = _build_file_context_block(citations)
+    files_used = list(file_ctx.get("files_used") or [])
+    file_context_injected = bool(file_ctx.get("file_context_injected"))
+    file_context_chars = int(file_ctx.get("file_context_chars") or 0)
+    file_evidence_required = bool(file_ctx.get("file_evidence_required"))
+    file_context_block = str(file_ctx.get("file_context_block") or "")
+    file_evidence_count = int(file_ctx.get("file_evidence_count") or 0)
+    patch_governance_ctx = _build_patch_governance_request_context(message)
+
     if agent_row is None:
         return {
             "ok": False,
@@ -11184,8 +11537,23 @@ def execute_agent_runtime(
             "runtime_execution_id": execution_id,
             "executor_agent": agent_name,
             "execution_trace": [f"execute_agent_runtime:missing:{agent_slug}"],
-            "files_used": [],
+            "files_used": files_used,
+            "file_context_injected": file_context_injected,
+            "file_context_chars": file_context_chars,
+            "file_evidence_required": file_evidence_required,
+            "file_evidence_count": file_evidence_count,
             "runtime_mode": "direct_agent_runtime",
+            "patch_mode": governance_fields.get("patch_mode"),
+            "write_allowed": governance_fields.get("write_allowed"),
+            "target_files": list(governance_fields.get("target_files") or []),
+            "target_functions": list(governance_fields.get("target_functions") or []),
+            "diff_preview": governance_fields.get("diff_preview"),
+            "risk_level": governance_fields.get("risk_level"),
+            "human_approval_required": governance_fields.get("human_approval_required"),
+            "human_approved": governance_fields.get("human_approved"),
+            "rollback_plan": governance_fields.get("rollback_plan"),
+            "audit_receipt_id": governance_fields.get("audit_receipt_id"),
+            "patch_proposal_ready": governance_fields.get("patch_proposal_ready"),
         }
 
     system_prompt = str(_agent_attr(agent_row, "system_prompt", "") or "").strip()
@@ -11205,12 +11573,19 @@ def execute_agent_runtime(
         temperature = None
 
     proxy_agent = type("RuntimeDispatchAgentProxy", (), {"name": agent_name})()
-    user_prompt = user_prompt_override or _build_agent_prompt(
+    user_prompt_core = user_prompt_override or _build_agent_prompt(
         proxy_agent,
         message,
         has_team,
         list(mention_tokens or []),
     )
+    if file_context_block:
+        user_prompt = (
+            f"{file_context_block}\n\n"
+            f"PEDIDO DO USUÁRIO:\n{str(user_prompt_core or '').strip()}"
+        ).strip()
+    else:
+        user_prompt = str(user_prompt_core or "").strip()
 
     ans_obj = _openai_answer(
         user_prompt,
@@ -11225,14 +11600,17 @@ def execute_agent_runtime(
     text = ""
     if isinstance(ans_obj, dict):
         text = str(ans_obj.get("text") or "")
-    files_used = []
-    for c in list(citations or []):
-        fn = str(c.get("filename") or c.get("file_id") or "").strip()
-        if fn:
-            files_used.append(fn)
-    files_used = list(dict.fromkeys(files_used))
 
     if text.strip():
+        execution_trace = [f"execute_agent_runtime:ok:{agent_slug}"]
+        if file_context_injected:
+            execution_trace.append(f"file_context:injected:{file_context_chars}:{file_evidence_count}")
+        elif file_evidence_required:
+            execution_trace.append(f"file_context:missing_content:{len(files_used)}")
+        else:
+            execution_trace.append("file_context:none")
+        governance_fields = _finalize_patch_governance_runtime_fields(patch_governance_ctx, text)
+        execution_trace.extend(list(governance_fields.get("governance_trace") or []))
         return {
             "ok": True,
             "text": text,
@@ -11240,8 +11618,12 @@ def execute_agent_runtime(
             "ans_obj": ans_obj,
             "runtime_execution_id": execution_id,
             "executor_agent": agent_name,
-            "execution_trace": [f"execute_agent_runtime:ok:{agent_slug}"],
+            "execution_trace": execution_trace,
             "files_used": files_used,
+            "file_context_injected": file_context_injected,
+            "file_context_chars": file_context_chars,
+            "file_evidence_required": file_evidence_required,
+            "file_evidence_count": file_evidence_count,
             "runtime_mode": "direct_agent_runtime",
         }
 
@@ -11256,6 +11638,16 @@ def execute_agent_runtime(
     if not error:
         error = "agent_runtime_empty_response"
 
+    execution_trace = [f"execute_agent_runtime:fail:{agent_slug}:{error}"]
+    if file_context_injected:
+        execution_trace.append(f"file_context:injected:{file_context_chars}:{file_evidence_count}")
+    elif file_evidence_required:
+        execution_trace.append(f"file_context:missing_content:{len(files_used)}")
+    else:
+        execution_trace.append("file_context:none")
+
+    governance_fields = _finalize_patch_governance_runtime_fields(patch_governance_ctx, "")
+    execution_trace.extend(list(governance_fields.get("governance_trace") or []))
     return {
         "ok": False,
         "text": "",
@@ -11263,11 +11655,322 @@ def execute_agent_runtime(
         "ans_obj": ans_obj if isinstance(ans_obj, dict) else {},
         "runtime_execution_id": execution_id,
         "executor_agent": agent_name,
-        "execution_trace": [f"execute_agent_runtime:fail:{agent_slug}:{error}"],
+        "execution_trace": execution_trace,
         "files_used": files_used,
+        "file_context_injected": file_context_injected,
+        "file_context_chars": file_context_chars,
+        "file_evidence_required": file_evidence_required,
+        "file_evidence_count": file_evidence_count,
         "runtime_mode": "direct_agent_runtime",
+        "patch_mode": governance_fields.get("patch_mode"),
+        "write_allowed": governance_fields.get("write_allowed"),
+        "target_files": list(governance_fields.get("target_files") or []),
+        "target_functions": list(governance_fields.get("target_functions") or []),
+        "diff_preview": governance_fields.get("diff_preview"),
+        "risk_level": governance_fields.get("risk_level"),
+        "human_approval_required": governance_fields.get("human_approval_required"),
+        "human_approved": governance_fields.get("human_approved"),
+        "rollback_plan": governance_fields.get("rollback_plan"),
+        "audit_receipt_id": governance_fields.get("audit_receipt_id"),
+        "patch_proposal_ready": governance_fields.get("patch_proposal_ready"),
     }
 
+
+def _build_team_runtime_history(history: Optional[List[Dict[str, str]]] = None) -> List[Dict[str, str]]:
+    out: List[Dict[str, str]] = []
+    for item in list(history or [])[-24:]:
+        try:
+            role = str((item or {}).get("role") or "").strip().lower()
+            content = str((item or {}).get("content") or "")
+        except Exception:
+            continue
+        if not role or not content:
+            continue
+        if role == "assistant":
+            # evita contaminação cruzada entre especialistas durante a fanout mínima
+            continue
+        out.append({"role": role, "content": content})
+    return out
+
+
+def _team_runtime_order(target_agents: Optional[List[Any]] = None) -> List[Any]:
+    ordered: List[Any] = []
+    seen: set = set()
+    preferred = ["chris", "orion", "orkio"]
+
+    def _append_agent(candidate: Any) -> None:
+        if not candidate:
+            return
+        cid = _agent_attr(candidate, "id", None) or _agent_attr(candidate, "name", None)
+        if cid in seen:
+            return
+        ordered.append(candidate)
+        seen.add(cid)
+
+    rows = list(target_agents or [])
+    for slug in preferred:
+        for ag in rows:
+            if _canonical_dispatch_specialist_slug(_agent_attr(ag, "name", None)) == slug:
+                _append_agent(ag)
+                break
+    for ag in rows:
+        _append_agent(ag)
+    return ordered
+
+
+def _build_team_consolidation_prompt(
+    user_text: str,
+    member_results: Optional[List[Dict[str, Any]]] = None,
+) -> str:
+    output_type = _infer_team_output_type(user_text)
+    style_hint = {
+        "summary": "Entregue um resumo curto e objetivo.",
+        "executive_summary": "Entregue um resumo executivo estruturado para decisão.",
+        "full_report": "Entregue um relatório completo, bem estruturado, com seções claras.",
+    }.get(output_type, "Entregue uma resposta final coordenada, clara e útil.")
+
+    contribution_blocks: List[str] = []
+    for item in list(member_results or []):
+        name = str(item.get("agent_name") or "Agent").strip() or "Agent"
+        body = str(item.get("text") or "").strip()
+        if body:
+            contribution_blocks.append(f"[{name}]\n{body}")
+
+    contributions = "\n\n".join(contribution_blocks).strip() or "Nenhuma contribuição anterior disponível."
+
+    return (
+        "Você é Orkio. Esta é uma missão em equipe. "
+        "Consolide as contribuições recebidas e entregue UMA resposta final única. "
+        "Não diga que não pode agir em equipe se já houver contribuições disponíveis. "
+        "Não invente participantes ausentes. Preserve clareza, síntese e autoria institucional.\n\n"
+        f"Pedido do usuário:\n{str(user_text or '').strip()}\n\n"
+        f"Contribuições da equipe:\n{contributions}\n\n"
+        f"{style_hint}"
+    )
+
+
+def execute_team_fanout(
+    target_agents: Optional[List[Any]],
+    message: str,
+    *,
+    history: Optional[List[Dict[str, str]]] = None,
+    citations: Optional[List[Dict[str, Any]]] = None,
+    runtime_overlay: str = "",
+    founder_guidance: str = "",
+    mention_tokens: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    execution_id = new_id()
+    ordered_agents = _team_runtime_order(target_agents)
+    participants = [_dispatch_agent_display_name(_agent_attr(ag, "name", None) or "Agent") for ag in ordered_agents]
+    participant_statuses: Dict[str, str] = {}
+    member_results: List[Dict[str, Any]] = []
+    execution_trace: List[str] = [f"execute_team_fanout:start:{len(ordered_agents)}"]
+    files_used: List[str] = []
+    orkio_row = None
+    orkio_result: Optional[Dict[str, Any]] = None
+    file_context_injected = False
+    file_context_chars = 0
+    file_evidence_required = False
+    file_evidence_count = 0
+    patch_mode = ""
+    write_allowed = False
+    target_files: List[str] = []
+    target_functions: List[str] = []
+    diff_preview = ""
+    risk_level = ""
+    human_approval_required = False
+    human_approved = False
+    rollback_plan = ""
+    audit_receipt_id = ""
+    patch_proposal_ready = False
+
+    team_history = _build_team_runtime_history(history)
+
+    for ag in ordered_agents:
+        agent_name = _dispatch_agent_display_name(_agent_attr(ag, "name", None) or "Agent")
+        agent_slug = _canonical_dispatch_specialist_slug(agent_name)
+        if agent_slug == "orkio":
+            orkio_row = ag
+            continue
+
+        result = execute_agent_runtime(
+            ag,
+            message,
+            history=team_history,
+            citations=list(citations or []),
+            runtime_overlay=runtime_overlay,
+            founder_guidance=founder_guidance,
+            has_team=True,
+            mention_tokens=mention_tokens,
+        )
+        ok = bool(result.get("ok")) and bool(str(result.get("text") or "").strip())
+        participant_statuses[agent_name] = "executed" if ok else "failed"
+        execution_trace.extend(list(result.get("execution_trace") or []))
+        files_used.extend(list(result.get("files_used") or []))
+        file_context_injected = bool(result.get("file_context_injected")) or file_context_injected
+        try:
+            file_context_chars = max(file_context_chars, int(result.get("file_context_chars") or 0))
+        except Exception:
+            pass
+        file_evidence_required = bool(result.get("file_evidence_required")) or file_evidence_required
+        try:
+            file_evidence_count = max(file_evidence_count, int(result.get("file_evidence_count") or 0))
+        except Exception:
+            pass
+        patch_mode = str(result.get("patch_mode") or patch_mode or "")
+        write_allowed = bool(result.get("write_allowed")) or write_allowed
+        target_files.extend(list(result.get("target_files") or []))
+        target_functions.extend(list(result.get("target_functions") or []))
+        diff_preview = str(result.get("diff_preview") or diff_preview or "")
+        risk_level = str(result.get("risk_level") or risk_level or "")
+        human_approval_required = bool(result.get("human_approval_required")) or human_approval_required
+        human_approved = bool(result.get("human_approved")) or human_approved
+        rollback_plan = str(result.get("rollback_plan") or rollback_plan or "")
+        audit_receipt_id = str(result.get("audit_receipt_id") or audit_receipt_id or "")
+        patch_proposal_ready = bool(result.get("patch_proposal_ready")) or patch_proposal_ready
+        member_results.append(
+            {
+                "agent_name": agent_name,
+                "agent_slug": agent_slug,
+                "ok": ok,
+                "text": str(result.get("text") or "").strip(),
+                "runtime_execution_id": result.get("runtime_execution_id"),
+                "error": str(result.get("error") or ""),
+            }
+        )
+
+    if orkio_row is None:
+        orkio_row = next((ag for ag in ordered_agents if _canonical_dispatch_specialist_slug(_agent_attr(ag, "name", None)) == "orkio"), None)
+
+    if orkio_row is not None:
+        orkio_prompt = _build_team_consolidation_prompt(message, member_results)
+        orkio_result = execute_agent_runtime(
+            orkio_row,
+            message,
+            history=team_history,
+            citations=list(citations or []),
+            runtime_overlay=runtime_overlay,
+            founder_guidance=founder_guidance,
+            has_team=True,
+            mention_tokens=mention_tokens,
+            user_prompt_override=orkio_prompt,
+        )
+        orkio_ok = bool(orkio_result.get("ok")) and bool(str(orkio_result.get("text") or "").strip())
+        participant_statuses["Orkio"] = "aggregated" if orkio_ok else "failed"
+        execution_trace.extend(list(orkio_result.get("execution_trace") or []))
+        files_used.extend(list(orkio_result.get("files_used") or []))
+        file_context_injected = bool(orkio_result.get("file_context_injected")) or file_context_injected
+        try:
+            file_context_chars = max(file_context_chars, int(orkio_result.get("file_context_chars") or 0))
+        except Exception:
+            pass
+        file_evidence_required = bool(orkio_result.get("file_evidence_required")) or file_evidence_required
+        try:
+            file_evidence_count = max(file_evidence_count, int(orkio_result.get("file_evidence_count") or 0))
+        except Exception:
+            pass
+        patch_mode = str(orkio_result.get("patch_mode") or patch_mode or "")
+        write_allowed = bool(orkio_result.get("write_allowed")) or write_allowed
+        target_files.extend(list(orkio_result.get("target_files") or []))
+        target_functions.extend(list(orkio_result.get("target_functions") or []))
+        diff_preview = str(orkio_result.get("diff_preview") or diff_preview or "")
+        risk_level = str(orkio_result.get("risk_level") or risk_level or "")
+        human_approval_required = bool(orkio_result.get("human_approval_required")) or human_approval_required
+        human_approved = bool(orkio_result.get("human_approved")) or human_approved
+        rollback_plan = str(orkio_result.get("rollback_plan") or rollback_plan or "")
+        audit_receipt_id = str(orkio_result.get("audit_receipt_id") or audit_receipt_id or "")
+        patch_proposal_ready = bool(orkio_result.get("patch_proposal_ready")) or patch_proposal_ready
+    else:
+        participant_statuses["Orkio"] = "missing"
+
+    files_used = _dedupe_nonempty_strs(files_used)
+    target_files = _dedupe_nonempty_strs(target_files)
+    target_functions = _dedupe_nonempty_strs(target_functions)
+
+    final_text = ""
+    synthetic_fallback = False
+    fallback_reason = ""
+    if orkio_result and bool(orkio_result.get("ok")) and str(orkio_result.get("text") or "").strip():
+        final_text = str(orkio_result.get("text") or "").strip()
+    else:
+        member_blocks = [
+            f"[{item.get('agent_name')}]\n{str(item.get('text') or '').strip()}"
+            for item in member_results
+            if str(item.get("text") or "").strip()
+        ]
+        final_text = "\n\n".join(member_blocks).strip()
+        synthetic_fallback = True
+        fallback_reason = "team_orchestrator_runtime_unavailable" if final_text else "team_fanout_unavailable"
+
+    dispatch_executed = bool(final_text.strip()) and any(status in {"executed", "aggregated"} for status in participant_statuses.values())
+
+    return {
+        "ok": bool(final_text.strip()),
+        "text": final_text,
+        "dispatch_executed": dispatch_executed,
+        "synthetic_fallback": synthetic_fallback,
+        "fallback_reason": fallback_reason,
+        "runtime_execution_id": execution_id,
+        "executor_agent": "Orkio",
+        "execution_trace": execution_trace,
+        "files_used": files_used,
+        "file_context_injected": file_context_injected,
+        "file_context_chars": file_context_chars,
+        "file_evidence_required": file_evidence_required,
+        "file_evidence_count": file_evidence_count,
+        "participants": participants or ["Orkio", "Chris", "Orion"],
+        "participant_statuses": participant_statuses,
+        "final_speaker": "Orkio" if participant_statuses.get("Orkio") in {"aggregated", "failed"} else (participants[-1] if participants else "Orkio"),
+        "mission_type": "team_analysis",
+        "output_type": _infer_team_output_type(message),
+        "runtime_mode": "team_fanout_runtime",
+        "patch_mode": patch_mode,
+        "write_allowed": write_allowed,
+        "target_files": target_files,
+        "target_functions": target_functions,
+        "diff_preview": diff_preview,
+        "risk_level": risk_level,
+        "human_approval_required": human_approval_required,
+        "human_approved": human_approved,
+        "rollback_plan": rollback_plan,
+        "audit_receipt_id": audit_receipt_id,
+        "patch_proposal_ready": patch_proposal_ready,
+    }
+
+
+def _apply_team_runtime_receipt(
+    receipt: Optional[Dict[str, Any]],
+    *,
+    user_text: str,
+    target_agents: Optional[List[str]] = None,
+    team_result: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    r = _apply_team_mission_receipt(
+        receipt,
+        user_text=user_text,
+        target_agents=target_agents,
+    )
+    tr = dict(team_result or {})
+    r["answer_source"] = "team_runtime_fanout"
+    r["dispatch_attempted"] = True
+    r["dispatch_executed"] = bool(tr.get("dispatch_executed"))
+    r["synthetic_fallback"] = bool(tr.get("synthetic_fallback"))
+    r["fallback_used"] = bool(tr.get("synthetic_fallback"))
+    r["fallback_reason"] = str(tr.get("fallback_reason") or "")
+    r["runtime_execution_id"] = tr.get("runtime_execution_id")
+    r["executor_agent"] = tr.get("executor_agent") or "Orkio"
+    r["execution_trace"] = list(tr.get("execution_trace") or [])
+    r["files_used"] = list(tr.get("files_used") or [])
+    r["file_context_injected"] = bool(tr.get("file_context_injected"))
+    r["file_context_chars"] = int(tr.get("file_context_chars") or 0)
+    r["file_evidence_required"] = bool(tr.get("file_evidence_required"))
+    r["file_evidence_count"] = int(tr.get("file_evidence_count") or 0)
+    r["participants"] = list(tr.get("participants") or r.get("participants") or [])
+    r["participant_statuses"] = dict(tr.get("participant_statuses") or {})
+    r["final_speaker"] = str(tr.get("final_speaker") or r.get("final_speaker") or "Orkio")
+    r["visible_agent"] = r["final_speaker"]
+    r = _apply_patch_governance_fields_to_receipt(r, tr)
+    return r
 
 
 
@@ -13047,9 +13750,12 @@ def _build_execution_result_payload(result: Dict[str, Any]) -> str:
     return "\n".join(parts)
 
 
-def _github_create_file_capability(*, path: str, content: str, branch: Optional[str] = None, repo_target: Optional[str] = None, user_text: Optional[str] = None, trace_id: Optional[str] = None) -> Dict[str, Any]:
+def _github_create_file_capability(*, path: str, content: str, branch: Optional[str] = None, repo_target: Optional[str] = None, user_text: Optional[str] = None, trace_id: Optional[str] = None, governance: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     repo, default_branch, token, repo_kind = _github_resolve_repo_branch(branch=branch, repo_target=repo_target, user_text=user_text)
     branch = default_branch
+    blocked = _github_enforce_governed_write(action="create_file", governance=governance, repo=repo, branch=branch, path=path)
+    if blocked:
+        return blocked
     cache_key = _github_action_cache_key(
         "create_file",
         repo,
@@ -13193,8 +13899,11 @@ def _github_wants_pr(user_text: str) -> bool:
         return False
     return any(k in low for k in ("pull request", "abrir pr", "abra pr", "open pr", "crie pr", "create pr"))
 
-def _github_create_branch_capability(*, branch: str, repo_target: Optional[str] = None, user_text: Optional[str] = None, trace_id: Optional[str] = None) -> Dict[str, Any]:
+def _github_create_branch_capability(*, branch: str, repo_target: Optional[str] = None, user_text: Optional[str] = None, trace_id: Optional[str] = None, governance: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     repo, base_branch, token, repo_kind = _github_resolve_repo_branch(repo_target=repo_target, user_text=user_text)
+    blocked = _github_enforce_governed_write(action="create_branch", governance=governance, repo=repo, branch=branch)
+    if blocked:
+        return blocked
 
     branch = re.sub(r"^refs/heads/", "", (branch or "").strip())
     if not branch:
@@ -14202,8 +14911,11 @@ def _github_list_files_capability(*, branch: str, trace_id: Optional[str] = None
     files = [f for f in files if f]
     return {"handled": True, "success": True, "provider": "github", "repo": repo, "branch": branch, "files": files, "message": "Arquivos listados com confirmação operacional."}
 
-def _github_update_file_capability(*, path: str, content: str, branch: Optional[str] = None, repo_target: Optional[str] = None, user_text: Optional[str] = None, mode: str = "replace", trace_id: Optional[str] = None) -> Dict[str, Any]:
+def _github_update_file_capability(*, path: str, content: str, branch: Optional[str] = None, repo_target: Optional[str] = None, user_text: Optional[str] = None, mode: str = "replace", trace_id: Optional[str] = None, governance: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     repo, branch, token, repo_kind = _github_resolve_repo_branch(branch=branch, repo_target=repo_target, user_text=user_text)
+    blocked = _github_enforce_governed_write(action="update_file", governance=governance, repo=repo, branch=branch, path=path)
+    if blocked:
+        return blocked
     cache_key = _github_action_cache_key(
         "update_file",
         repo,
@@ -14321,8 +15033,11 @@ def _github_get_commit_tree_sha(repo: str, commit_sha: str) -> tuple[str, Dict[s
     return tree_sha, body
 
 
-def _github_commit_batch_capability(*, changes: List[Dict[str, str]], branch: Optional[str] = None, repo_target: Optional[str] = None, user_text: Optional[str] = None, title: Optional[str] = None, trace_id: Optional[str] = None) -> Dict[str, Any]:
+def _github_commit_batch_capability(*, changes: List[Dict[str, str]], branch: Optional[str] = None, repo_target: Optional[str] = None, user_text: Optional[str] = None, title: Optional[str] = None, trace_id: Optional[str] = None, governance: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     repo, branch, token, repo_kind = _github_resolve_repo_branch(branch=branch, repo_target=repo_target, user_text=user_text)
+    blocked = _github_enforce_governed_write(action="batch_commit", governance=governance, repo=repo, branch=branch)
+    if blocked:
+        return blocked
     if not _github_write_runtime_enabled():
         return {"handled": True, "success": False, "provider": "github", "message": "GitHub write runtime desabilitado por ambiente."}
     if branch == (_clean_env(os.getenv("GITHUB_BRANCH", "main"), default="main") or "main") and not _github_safe_main_write_allowed():
@@ -14424,8 +15139,11 @@ def _github_commit_batch_capability(*, changes: List[Dict[str, str]], branch: Op
         "message": "Commit em lote executado com confirmação operacional.",
     }
 
-def _github_create_pull_request_capability(*, head: str, base: str, title: str, repo_target: Optional[str] = None, user_text: Optional[str] = None, body: Optional[str] = None, trace_id: Optional[str] = None) -> Dict[str, Any]:
+def _github_create_pull_request_capability(*, head: str, base: str, title: str, repo_target: Optional[str] = None, user_text: Optional[str] = None, body: Optional[str] = None, trace_id: Optional[str] = None, governance: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     repo, _, token, repo_kind = _github_resolve_repo_branch(repo_target=repo_target, user_text=user_text)
+    blocked = _github_enforce_governed_write(action="open_pr", governance=governance, repo=repo, branch=head or None)
+    if blocked:
+        return blocked
     head = re.sub(r"^refs/heads/", "", (head or "").strip())
     base = re.sub(r"^refs/heads/", "", (base or "").strip())
     cache_key = _github_action_cache_key(
@@ -15058,6 +15776,15 @@ def _dispatch_governed_github_write(
 
     allowed_actions = set(approval.get("actions_allowed") or [])
     trace = trace_id or str(approval.get("approval_id") or "")
+    governance_ctx = {
+        "patch_mode": str(approval.get("patch_mode") or "proposal_only"),
+        "write_allowed": bool(approval.get("write_allowed")),
+        "human_approval_required": True,
+        "human_approved": bool(approval.get("human_approved")),
+        "approval_id": str(approval.get("approval_id") or ""),
+        "audit_receipt_id": str(approval.get("approval_id") or ""),
+        "risk_level": str(approval.get("risk_level") or "proposal_only"),
+    }
 
     def _ensure_allowed(*options: str) -> Optional[Dict[str, Any]]:
         if any(opt in allowed_actions for opt in options):
@@ -15067,6 +15794,13 @@ def _dispatch_governed_github_write(
             "text": f"AÇÃO BLOQUEADA PELA POLÍTICA OPERACIONAL.\n- motivo: ação_sem_autorização_explícita\n- required_any_of: {joined}",
             "execution_result": None,
         }
+
+    if not _github_governance_context_is_approved_apply(governance_ctx):
+        blocked = _github_build_governance_blocked_result(
+            action="github_write_dispatch",
+            governance=governance_ctx,
+        )
+        return {"text": blocked.get("message"), "execution_result": blocked}
 
     try:
         normalized: Optional[Dict[str, Any]] = None
@@ -15093,6 +15827,7 @@ def _dispatch_governed_github_write(
                 repo_target=str(branch_req.get("repo_target") or "").strip() or None,
                 user_text=user_text,
                 trace_id=trace,
+                governance=governance_ctx,
             )
 
         elif req_flags.get("create_file"):
@@ -15109,6 +15844,7 @@ def _dispatch_governed_github_write(
                 repo_target=str(create_req.get("repo_target") or "").strip() or None,
                 user_text=user_text,
                 trace_id=trace,
+                governance=governance_ctx,
             )
 
         elif req_flags.get("update_file"):
@@ -15129,6 +15865,7 @@ def _dispatch_governed_github_write(
                 user_text=user_text,
                 mode=str(update_req.get("mode") or "replace"),
                 trace_id=trace,
+                governance=governance_ctx,
             )
 
         elif req_flags.get("batch_commit"):
@@ -15148,6 +15885,7 @@ def _dispatch_governed_github_write(
                 user_text=user_text,
                 title=str(batch_req.get("title") or "").strip() or None,
                 trace_id=trace,
+                governance=governance_ctx,
             )
 
         elif req_flags.get("apply_patch"):
@@ -15173,6 +15911,7 @@ def _dispatch_governed_github_write(
                 user_text=user_text,
                 title=str(synthetic_batch.get("title") or "").strip() or None,
                 trace_id=trace,
+                governance=governance_ctx,
             )
 
         elif req_flags.get("open_pr"):
@@ -15204,6 +15943,7 @@ def _dispatch_governed_github_write(
                 user_text=user_text,
                 body=str(preflight.get("body") or "").strip() or None,
                 trace_id=trace,
+                governance=governance_ctx,
             )
 
         if isinstance(normalized, dict) and normalized.get("handled"):
@@ -16868,8 +17608,10 @@ def chat(
                 should_execute_runtime = True
         except Exception:
             pass
+    team_runtime_requested = bool(should_execute_runtime and has_team and len(target_agents) > 1)
+    team_runtime_result: Optional[Dict[str, Any]] = None
     runtime_primary_agent = None
-    if should_execute_runtime:
+    if should_execute_runtime and not team_runtime_requested:
         try:
             runtime_primary_agent = _pick_runtime_primary_agent(target_agents, requested_names, runtime_enrichment)
         except Exception:
@@ -16891,6 +17633,106 @@ def chat(
                 runtime_enrichment["dag_snapshot"] = dag_snapshot_live
         except Exception:
             pass
+
+    if team_runtime_requested:
+        team_history_seed: List[Dict[str, str]] = []
+        try:
+            for pm in prev[-24:]:
+                role = "assistant" if pm.role == "assistant" else ("system" if pm.role == "system" else "user")
+                team_history_seed.append({"role": role, "content": (pm.content or "")})
+        except Exception:
+            team_history_seed = []
+        runtime_overlay_team = (runtime_enrichment.get("system_overlay") if runtime_enrichment else "") or ""
+        team_runtime_result = execute_team_fanout(
+            target_agents,
+            inp.message,
+            history=team_history_seed,
+            citations=[],
+            runtime_overlay=runtime_overlay_team,
+            founder_guidance=active_founder_guidance,
+            mention_tokens=mention_tokens,
+        )
+        dispatch_routing_receipt = _apply_team_runtime_receipt(
+            dispatch_routing_receipt,
+            user_text=inp.message,
+            target_agents=[_agent_attr(a, "name", None) or "" for a in target_agents],
+            team_result=team_runtime_result,
+        )
+        answer = str(team_runtime_result.get("text") or "").strip()
+        if not answer:
+            answer = _build_team_mission_answer_text(
+                inp.message,
+                target_agents=list(dispatch_routing_receipt.get("participants") or []),
+            )
+        team_signer_name = str(dispatch_routing_receipt.get("final_speaker") or team_runtime_result.get("final_speaker") or "Orkio")
+        team_signer_agent = _resolve_dispatch_agent_row(alias_to_agent, team_signer_name)
+        team_signer_agent_id = _agent_attr(team_signer_agent, "id", None)
+        team_signer_voice_id = resolve_agent_voice(team_signer_agent) if team_signer_agent else None
+        team_signer_avatar_url = _agent_attr(team_signer_agent, "avatar_url", None)
+        team_ans_obj = dict(team_runtime_result.get("ans_obj") or {"text": answer, "usage": None, "model": "team_runtime_fanout"})
+        m_ass = Message(
+            id=new_id(),
+            org_slug=org,
+            thread_id=tid,
+            role="assistant",
+            content=answer,
+            agent_id=team_signer_agent_id,
+            agent_name=team_signer_name,
+            created_at=now_ts(),
+        )
+        db.add(m_ass)
+        db.commit()
+        try:
+            _emit_runtime_readonly_receipts(
+                trace_id=getattr(inp, "trace_id", None),
+                message_id=getattr(m_ass, "id", None),
+                thread_id=tid,
+                org=org,
+                user_id=uid,
+                visible_agent=team_signer_name,
+                signer=team_signer_name,
+                user_text=inp.message,
+                runtime_enrichment=runtime_enrichment,
+                execution_result=None,
+                source="api_chat",
+                receipt_phase="final_after_persistence",
+            )
+        except Exception:
+            pass
+        try:
+            tracked_total_usd = _track_cost(db, org, uid, tid, m_ass.id, team_signer_agent, team_ans_obj, inp.message, answer, streaming=False)
+            _wallet_debit_for_chat_usage(
+                db,
+                org,
+                user,
+                amount_usd=tracked_total_usd,
+                route="/api/chat",
+                action_key=f"chat:{m_ass.id}",
+                thread_id=tid,
+                message_id=m_ass.id,
+                agent_id=team_signer_agent_id,
+                usage_meta={"client_message_id": getattr(inp, "client_message_id", None), "streaming": False, "team_runtime": True},
+            )
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            logger.exception("WALLET_DEBIT_CHAT_TEAM_RUNTIME_FAILED")
+        return {
+            "thread_id": tid,
+            "answer": answer,
+            "citations": [],
+            "agent_id": team_signer_agent_id,
+            "agent_name": team_signer_name,
+            "voice_id": team_signer_voice_id,
+            "avatar_url": team_signer_avatar_url,
+            "runtime_hints": (
+                (lambda _rh: (dict(_rh, capabilities=_get_runtime_capability_registry(db=db, org=org)) if isinstance(_rh, dict) else {"capabilities": _get_runtime_capability_registry(db=db, org=org)}))(
+                    runtime_enrichment.get("runtime_hints") if runtime_enrichment else None
+                )
+            ),
+        }
 
     for agent in target_agents:
 
@@ -17092,6 +17934,15 @@ def chat(
                                 dispatch_routing_receipt["executor_agent"] = direct_runtime_result.get("executor_agent")
                                 dispatch_routing_receipt["execution_trace"] = list(direct_runtime_result.get("execution_trace") or [])
                                 dispatch_routing_receipt["files_used"] = list(direct_runtime_result.get("files_used") or [])
+
+                                dispatch_routing_receipt["file_context_injected"] = bool(direct_runtime_result.get("file_context_injected"))
+
+                                dispatch_routing_receipt["file_context_chars"] = int(direct_runtime_result.get("file_context_chars") or 0)
+
+                                dispatch_routing_receipt["file_evidence_required"] = bool(direct_runtime_result.get("file_evidence_required"))
+
+                                dispatch_routing_receipt["file_evidence_count"] = int(direct_runtime_result.get("file_evidence_count") or 0)
+                                dispatch_routing_receipt = _apply_patch_governance_fields_to_receipt(dispatch_routing_receipt, direct_runtime_result)
                                 capability_inventory_answer = None
                             else:
                                 dispatch_routing_receipt["synthetic_fallback"] = True
@@ -17102,6 +17953,14 @@ def chat(
                                 dispatch_routing_receipt["executor_agent"] = direct_runtime_result.get("executor_agent")
                                 dispatch_routing_receipt["execution_trace"] = list(direct_runtime_result.get("execution_trace") or [])
                                 dispatch_routing_receipt["files_used"] = list(direct_runtime_result.get("files_used") or [])
+
+                                dispatch_routing_receipt["file_context_injected"] = bool(direct_runtime_result.get("file_context_injected"))
+
+                                dispatch_routing_receipt["file_context_chars"] = int(direct_runtime_result.get("file_context_chars") or 0)
+
+                                dispatch_routing_receipt["file_evidence_required"] = bool(direct_runtime_result.get("file_evidence_required"))
+
+                                dispatch_routing_receipt["file_evidence_count"] = int(direct_runtime_result.get("file_evidence_count") or 0)
                                 capability_inventory_answer = _build_direct_agent_message_answer_text(
                                     inp.message,
                                     target_agent=direct_target,
@@ -17201,6 +18060,15 @@ def chat(
                                 dispatch_routing_receipt["executor_agent"] = direct_runtime_result.get("executor_agent")
                                 dispatch_routing_receipt["execution_trace"] = list(direct_runtime_result.get("execution_trace") or [])
                                 dispatch_routing_receipt["files_used"] = list(direct_runtime_result.get("files_used") or [])
+
+                                dispatch_routing_receipt["file_context_injected"] = bool(direct_runtime_result.get("file_context_injected"))
+
+                                dispatch_routing_receipt["file_context_chars"] = int(direct_runtime_result.get("file_context_chars") or 0)
+
+                                dispatch_routing_receipt["file_evidence_required"] = bool(direct_runtime_result.get("file_evidence_required"))
+
+                                dispatch_routing_receipt["file_evidence_count"] = int(direct_runtime_result.get("file_evidence_count") or 0)
+                                dispatch_routing_receipt = _apply_patch_governance_fields_to_receipt(dispatch_routing_receipt, direct_runtime_result)
                                 capability_inventory_answer = None
                             else:
                                 dispatch_routing_receipt["synthetic_fallback"] = True
@@ -17211,6 +18079,14 @@ def chat(
                                 dispatch_routing_receipt["executor_agent"] = direct_runtime_result.get("executor_agent")
                                 dispatch_routing_receipt["execution_trace"] = list(direct_runtime_result.get("execution_trace") or [])
                                 dispatch_routing_receipt["files_used"] = list(direct_runtime_result.get("files_used") or [])
+
+                                dispatch_routing_receipt["file_context_injected"] = bool(direct_runtime_result.get("file_context_injected"))
+
+                                dispatch_routing_receipt["file_context_chars"] = int(direct_runtime_result.get("file_context_chars") or 0)
+
+                                dispatch_routing_receipt["file_evidence_required"] = bool(direct_runtime_result.get("file_evidence_required"))
+
+                                dispatch_routing_receipt["file_evidence_count"] = int(direct_runtime_result.get("file_evidence_count") or 0)
                                 capability_inventory_answer = _build_direct_agent_message_answer_text(
                                     inp.message,
                                     target_agent=delegated_target,
@@ -17409,6 +18285,14 @@ def chat(
             dispatch_routing_receipt["executor_agent"] = direct_runtime_result.get("executor_agent")
             dispatch_routing_receipt["execution_trace"] = list(direct_runtime_result.get("execution_trace") or [])
             dispatch_routing_receipt["files_used"] = list(direct_runtime_result.get("files_used") or [])
+
+            dispatch_routing_receipt["file_context_injected"] = bool(direct_runtime_result.get("file_context_injected"))
+
+            dispatch_routing_receipt["file_context_chars"] = int(direct_runtime_result.get("file_context_chars") or 0)
+
+            dispatch_routing_receipt["file_evidence_required"] = bool(direct_runtime_result.get("file_evidence_required"))
+
+            dispatch_routing_receipt["file_evidence_count"] = int(direct_runtime_result.get("file_evidence_count") or 0)
             dispatch_routing_receipt["final_speaker"] = direct_runtime_target or dispatch_routing_receipt.get("final_speaker") or final_signer_agent_name
             dispatch_routing_receipt["visible_agent"] = direct_runtime_target or dispatch_routing_receipt.get("visible_agent") or final_signer_agent_name
         elif direct_runtime_requested and not (direct_runtime_result and direct_runtime_result.get("ok")):
@@ -21794,9 +22678,11 @@ async def chat_stream(
 
     # PATCH27_12AK — execution-first collapse for SSE
     should_execute_runtime = _should_execute_runtime_from_enrichment(runtime_enrichment)
+    team_runtime_requested = bool(should_execute_runtime and has_team and len(target_agents) > 1)
+    team_runtime_result: Optional[Dict[str, Any]] = None
     runtime_primary_agent = None
 
-    if should_execute_runtime:
+    if should_execute_runtime and not team_runtime_requested:
         try:
             runtime_primary_agent = _pick_runtime_primary_agent(target_agents, requested_names, runtime_enrichment)
         except Exception:
@@ -22017,6 +22903,16 @@ async def chat_stream(
     _release_db_session(db)
 
     async def gen():
+        nonlocal _stream_final_text
+        nonlocal _stream_final_agent_id
+        nonlocal _stream_final_agent_name
+        nonlocal _stream_final_voice_id
+        nonlocal _stream_final_avatar_url
+        nonlocal _stream_assistant_persisted
+        nonlocal _stream_assistant_message_id
+        nonlocal _stream_assistant_persist_error
+        nonlocal _stream_done_debug
+
         dispatch_routing_receipt_stream = dict(dispatch_routing_receipt_stream_seed or {})
         block_roster_fallback_stream = bool(block_roster_fallback_stream_seed)
 
@@ -22047,8 +22943,182 @@ async def chat_stream(
 
         try:
             stream_history_seed = list(prev_history_seed)
+            if team_runtime_requested:
+                runtime_overlay_team = (runtime_enrichment.get("system_overlay") if runtime_enrichment else "") or ""
+                team_runtime_result = execute_team_fanout(
+                    target_agents,
+                    message,
+                    history=stream_history_seed,
+                    citations=[],
+                    runtime_overlay=runtime_overlay_team,
+                    founder_guidance=active_founder_guidance,
+                    mention_tokens=mention_tokens,
+                )
+                dispatch_routing_receipt_stream = _apply_team_runtime_receipt(
+                    dispatch_routing_receipt_stream,
+                    user_text=message,
+                    target_agents=[_agent_attr(a, "name", None) or "" for a in target_agents],
+                    team_result=team_runtime_result,
+                )
+                team_signer_name = str(dispatch_routing_receipt_stream.get("final_speaker") or team_runtime_result.get("final_speaker") or "Orkio")
+                team_signer_agent = _resolve_dispatch_agent_row(alias_to_agent, team_signer_name)
+                team_signer_agent_id = _agent_attr(team_signer_agent, "id", None)
+                team_signer_voice_id = resolve_agent_voice(team_signer_agent) if team_signer_agent else None
+                team_signer_avatar_url = _agent_attr(team_signer_agent, "avatar_url", None)
+                _stream_final_text = str(team_runtime_result.get("text") or "").strip()
+                if not _stream_final_text:
+                    _stream_final_text = _build_team_mission_answer_text(
+                        message,
+                        target_agents=list(dispatch_routing_receipt_stream.get("participants") or []),
+                    )
+                _stream_final_agent_id = team_signer_agent_id
+                _stream_final_agent_name = team_signer_name
+                _stream_final_voice_id = team_signer_voice_id
+                _stream_final_avatar_url = team_signer_avatar_url
+                _stream_done_debug = {
+                    "team_runtime_requested": True,
+                    "participants": list(team_runtime_result.get("participants") or []),
+                    "participant_statuses": dict(team_runtime_result.get("participant_statuses") or {}),
+                }
+                try:
+                    yield sse_execution(
+                        "team_fanout_started",
+                        "Missão em equipe iniciada",
+                        kind="system",
+                        scope="system",
+                        agent_id=team_signer_agent_id,
+                        agent_name=team_signer_name,
+                        detail="Chris, Orion e Orkio executando fanout mínimo real.",
+                        participants=list(team_runtime_result.get("participants") or []),
+                    )
+                    for _pname, _pstatus in dict(team_runtime_result.get("participant_statuses") or {}).items():
+                        yield sse_execution(
+                            "team_member_result",
+                            f"{_pname}: {_pstatus}",
+                            kind="system",
+                            scope="agent",
+                            agent_id=team_signer_agent_id,
+                            agent_name=team_signer_name,
+                            detail="Estado do subagente na missão em equipe.",
+                            participant=_pname,
+                            participant_status=_pstatus,
+                        )
+                except Exception:
+                    return
+                try:
+                    m_ass = _persist_stream_assistant_message(
+                        content=_stream_final_text,
+                        agent_id=_stream_final_agent_id,
+                        agent_name=_stream_final_agent_name,
+                    )
+                    m_ass_id = getattr(m_ass, "id", None)
+                    try:
+                        _emit_runtime_readonly_receipts(
+                            trace_id=trace_id,
+                            message_id=m_ass_id,
+                            thread_id=tid,
+                            org=org,
+                            user_id=uid,
+                            visible_agent=_stream_final_agent_name,
+                            signer=_stream_final_agent_name,
+                            user_text=message,
+                            runtime_enrichment=runtime_enrichment,
+                            execution_result=None,
+                            source="api_chat_stream",
+                            receipt_phase="final_after_persistence",
+                        )
+                    except Exception:
+                        pass
+                    try:
+                        tracked_total_usd = _track_cost(
+                            db=db,
+                            org=org,
+                            uid=uid,
+                            tid=tid,
+                            message_id=m_ass_id,
+                            agent=type("StreamTeamProxy", (), {"id": _stream_final_agent_id, "name": _stream_final_agent_name})(),
+                            ans_obj=dict(team_runtime_result.get("ans_obj") or {"text": _stream_final_text, "usage": None, "model": "team_runtime_fanout"}),
+                            user_msg=message,
+                            answer=_stream_final_text,
+                            streaming=True,
+                            estimated=False,
+                        )
+                        _wallet_debit_for_chat_usage(
+                            db,
+                            org,
+                            user,
+                            amount_usd=tracked_total_usd,
+                            route="/api/chat/stream",
+                            action_key=f"chat_stream:{m_ass_id}",
+                            thread_id=tid,
+                            message_id=m_ass_id,
+                            agent_id=_stream_final_agent_id,
+                            usage_meta={"trace_id": trace_id, "client_message_id": client_message_id, "streaming": True, "team_runtime": True, "final_signer_agent_name": _stream_final_agent_name},
+                        )
+                    except Exception:
+                        try:
+                            db.rollback()
+                        except Exception:
+                            pass
+                    try:
+                        _stream_assistant_message_id = m_ass_id
+                        _stream_assistant_persisted = bool(m_ass_id)
+                    except Exception:
+                        pass
+                    step = 140
+                    for i in range(0, len(_stream_final_text), step):
+                        if await request.is_disconnected():
+                            return
+                        chunk = _stream_final_text[i : i + step]
+                        yield sse_event(
+                            "chunk",
+                            {
+                                "agent_id": _stream_final_agent_id,
+                                "agent_name": _stream_final_agent_name,
+                                "executor_agent_id": _stream_final_agent_id,
+                                "executor_agent_name": _stream_final_agent_name,
+                                "content": chunk,
+                                "delta": chunk,
+                                "thread_id": tid,
+                                "trace_id": trace_id,
+                                "voice_id": _stream_final_voice_id,
+                                "avatar_url": _stream_final_avatar_url,
+                            },
+                        )
+                    yield sse_event(
+                        "agent_done",
+                        {
+                            "done": True,
+                            "agent_id": _stream_final_agent_id,
+                            "agent_name": _stream_final_agent_name,
+                            "executor_agent_id": _stream_final_agent_id,
+                            "executor_agent_name": _stream_final_agent_name,
+                            "thread_id": tid,
+                            "trace_id": trace_id,
+                            "voice_id": _stream_final_voice_id,
+                            "avatar_url": _stream_final_avatar_url,
+                        },
+                    )
+                except Exception as team_db_err:
+                    try:
+                        db.rollback()
+                    except Exception:
+                        pass
+                    _stream_assistant_persist_error = str(team_db_err)
+                    try:
+                        yield sse_execution(
+                            "assistant_persist_failed",
+                            "Falha ao persistir resposta da missão em equipe",
+                            kind="error",
+                            scope="agent",
+                            agent_id=_stream_final_agent_id,
+                            agent_name=_stream_final_agent_name,
+                            detail=str(team_db_err),
+                        )
+                    except Exception:
+                        return
             previous_agent_payload: Optional[Dict[str, Any]] = None
-            for ag in target_agents:
+            for ag in ([] if team_runtime_requested else target_agents):
                 if await request.is_disconnected():
                     return
 
