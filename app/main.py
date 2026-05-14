@@ -24099,6 +24099,10 @@ async def chat_stream(
 
         dispatch_routing_receipt_stream = dict(dispatch_routing_receipt_stream_seed or {})
         block_roster_fallback_stream = bool(block_roster_fallback_stream_seed)
+        direct_runtime_requested = False
+        direct_runtime_target = ""
+        direct_runtime_result: Optional[Dict[str, Any]] = None
+        direct_runtime_agent_row: Any = None
 
         # First status quickly
         try:
@@ -25020,7 +25024,12 @@ async def chat_stream(
                 execution_result = None
                 capability_inventory_answer = None
                 direct_runtime_result: Optional[Dict[str, Any]] = None
+                direct_runtime_requested = False
+                direct_runtime_target = ""
                 direct_runtime_agent_row: Any = None
+                # PATCH17_DIRECT_RUNTIME_SCOPE_GUARD — initialize stream locals before any conditional assignment
+                # Prevents UnboundLocalError when the approval follow-up path reaches timeout/fallback checks
+                # without entering the branch that sets direct_runtime_requested/direct_runtime_target.
                 # PATCH27_12AK — should_execute_runtime decidido antes do loop
                 force_governed_branch_dispatch = False
                 try:
