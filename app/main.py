@@ -24238,6 +24238,173 @@ async def chat_stream(
             return
 
 
+        # PATCH15: deterministic proposal-only fast-path.
+        # Patch governance requests must never enter generic Team/RAG/runtime before
+        # a proposal envelope is emitted, persisted, and closed with done.
+        if _is_patch_governance_request_message(message):
+            _patch_gov_ctx = _build_patch_governance_request_context(message)
+            _patch_original_text = (
+                "Proposta governada preparada em modo proposal-only. "
+                "Nenhuma escrita real será executada sem aprovação humana explícita."
+            )
+            _patch_clamp = _clamp_patch_governance_response(
+                message,
+                _patch_original_text,
+                runtime_result={},
+                governance_ctx=_patch_gov_ctx,
+            )
+            _stream_final_text = str(_patch_clamp.get("text") or "").strip()
+            _stream_patch_governance_fields = dict(_patch_clamp.get("governance") or {})
+            if not _stream_final_text:
+                _stream_final_text = _render_governed_patch_response(
+                    user_text=message,
+                    governance=_stream_patch_governance_fields,
+                    original_text=_patch_original_text,
+                )
+            _stream_final_agent_name = "Orion"
+            _stream_final_agent_id = (
+                _agent_attr(_resolve_dispatch_agent_row(alias_to_agent, _stream_final_agent_name), "id", None)
+                if isinstance(alias_to_agent, dict)
+                else None
+            )
+            _pending_from_governance = None
+            try:
+                _pending_from_governance = _github_write_ensure_pending_from_patch_governance(
+                    org=org,
+                    thread_id=tid,
+                    payload=user,
+                    user_text=message,
+                    governance=_stream_patch_governance_fields,
+                    db=None,
+                )
+            except Exception:
+                try:
+                    logger.exception(
+                        "PATCH_GOVERNANCE_FAST_PATH_PENDING_STORE_FAILED trace_id=%s thread_id=%s",
+                        trace_id,
+                        tid,
+                    )
+                except Exception:
+                    pass
+
+            if isinstance(dispatch_routing_receipt_stream, dict):
+                dispatch_routing_receipt_stream = _apply_patch_governance_fields_to_receipt(
+                    dispatch_routing_receipt_stream,
+                    _stream_patch_governance_fields,
+                )
+                dispatch_routing_receipt_stream["patch_governance_fast_path"] = True
+                dispatch_routing_receipt_stream["dispatch_attempted"] = True
+                dispatch_routing_receipt_stream["dispatch_executed"] = False
+                dispatch_routing_receipt_stream["synthetic_fallback"] = False
+                dispatch_routing_receipt_stream["final_speaker"] = _stream_final_agent_name
+                dispatch_routing_receipt_stream["visible_agent"] = _stream_final_agent_name
+                if isinstance(_pending_from_governance, dict) and _pending_from_governance:
+                    dispatch_routing_receipt_stream["pending_proposal_id"] = str(_pending_from_governance.get("proposal_id") or "")
+                    dispatch_routing_receipt_stream["pending_patch_id"] = str(_pending_from_governance.get("patch_id") or "")
+                    dispatch_routing_receipt_stream["approval_token_present"] = bool(str(_pending_from_governance.get("approval_token") or "").strip())
+
+            _stream_done_debug = {
+                "patch_governance_fast_path": True,
+                "pending_proposal_id": str((_pending_from_governance or {}).get("proposal_id") or ""),
+                "pending_patch_id": str((_pending_from_governance or {}).get("patch_id") or ""),
+                "patch_mode": "proposal_only",
+                "write_allowed": False,
+                "human_approval_required": True,
+                "human_approved": False,
+            }
+
+            try:
+                yield sse_execution(
+                    "patch_governance_fast_path",
+                    "Proposta governada preparada",
+                    kind="system",
+                    scope="system",
+                    agent_id=_stream_final_agent_id,
+                    agent_name=_stream_final_agent_name,
+                    detail="Pedido de patch interceptado antes de Team/RAG/runtime. Proposal-only emitido de forma determinística.",
+                    patch_mode="proposal_only",
+                    write_allowed=False,
+                    pending_proposal_id=str((_pending_from_governance or {}).get("proposal_id") or ""),
+                    pending_patch_id=str((_pending_from_governance or {}).get("patch_id") or ""),
+                )
+            except Exception:
+                return
+
+            try:
+                _persist_stream_assistant_message(
+                    content=_stream_final_text,
+                    agent_id=_stream_final_agent_id,
+                    agent_name=_stream_final_agent_name,
+                )
+            except Exception:
+                pass
+
+            _patch_step_size = 120
+            for _i in range(0, len(_stream_final_text), _patch_step_size):
+                if await request.is_disconnected():
+                    return
+                _chunk = _stream_final_text[_i:_i + _patch_step_size]
+                try:
+                    yield sse_event("chunk", {
+                        "agent_id": _stream_final_agent_id,
+                        "agent_name": _stream_final_agent_name,
+                        "content": _chunk,
+                        "delta": _chunk,
+                        "thread_id": tid,
+                        "trace_id": trace_id,
+                    })
+                except Exception:
+                    return
+
+            try:
+                yield sse_event("agent_done", {
+                    "done": True,
+                    "agent_id": _stream_final_agent_id,
+                    "agent_name": _stream_final_agent_name,
+                    "thread_id": tid,
+                    "trace_id": trace_id,
+                })
+                yield sse_event("done_diagnostics", _patch_diagnostics_snapshot({
+                    "thread_id": tid,
+                    "trace_id": trace_id,
+                    "patch_governance_fast_path": True,
+                    "assistant_persisted": bool(_stream_assistant_persisted),
+                    "assistant_message_id": _stream_assistant_message_id,
+                    "pending_proposal_id": str((_pending_from_governance or {}).get("proposal_id") or ""),
+                    "pending_patch_id": str((_pending_from_governance or {}).get("patch_id") or ""),
+                }))
+                yield sse_event("done", {
+                    "done": True,
+                    "thread_id": tid,
+                    "trace_id": trace_id,
+                    "patch_governance_fast_path": True,
+                    "final_text": _stream_final_text,
+                    "agent_id": _stream_final_agent_id,
+                    "agent_name": _stream_final_agent_name,
+                    "voice_id": _stream_final_voice_id,
+                    "avatar_url": _stream_final_avatar_url,
+                    "assistant_persisted": bool(_stream_assistant_persisted),
+                    "assistant_message_id": _stream_assistant_message_id,
+                    "patch_mode": "proposal_only",
+                    "write_allowed": False,
+                    "target_files": list(_stream_patch_governance_fields.get("target_files") or []),
+                    "target_functions": list(_stream_patch_governance_fields.get("target_functions") or []),
+                    "diff_preview": str(_stream_patch_governance_fields.get("diff_preview") or ""),
+                    "risk_level": str(_stream_patch_governance_fields.get("risk_level") or "medium"),
+                    "human_approval_required": True,
+                    "human_approved": False,
+                    "rollback_plan": str(_stream_patch_governance_fields.get("rollback_plan") or ""),
+                    "audit_receipt_id": str(_stream_patch_governance_fields.get("audit_receipt_id") or ""),
+                    "patch_proposal_ready": bool(_stream_patch_governance_fields.get("patch_proposal_ready", True)),
+                    "pending_proposal_id": str((_pending_from_governance or {}).get("proposal_id") or ""),
+                    "pending_patch_id": str((_pending_from_governance or {}).get("patch_id") or ""),
+                    **_patch_diagnostics_snapshot(),
+                })
+            except Exception:
+                return
+            return
+
+
         # Keepalive ticker
         KEEPALIVE_SECS = int(os.getenv("SSE_KEEPALIVE_SECONDS", "15") or 15)
         LLM_WAIT_POLL = 1.0
