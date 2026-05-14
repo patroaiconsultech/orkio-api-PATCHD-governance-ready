@@ -7922,6 +7922,224 @@ def _github_write_get_pending_proposal(org: str, thread_id: Optional[str], paylo
 
 
 
+def _github_parse_pending_proposal_from_visible_message(
+    *,
+    org: str,
+    thread_id: Optional[str],
+    payload: Optional[Dict[str, Any]],
+    content: str,
+    audit_receipt_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Recover a pending proposal from the persisted visible governance message.
+
+    This is a safety net for deploy/restart/stale-cache cases where the UI shows
+    a fresh PATCH GOVERNANCE RESPONSE, but the canonical pending table still
+    contains an older proposal. It never grants execution by itself; it only
+    rebuilds the pending record that still requires password approval.
+    """
+    text_body = str(content or "")
+    audit_id = str(audit_receipt_id or "").strip()
+    if not audit_id or audit_id not in text_body:
+        return None
+    if "PATCH GOVERNANCE RESPONSE" not in text_body:
+        return None
+    if "proposal_only" not in text_body:
+        return None
+
+    target_files: List[str] = []
+    # Prefer explicit "Arquivos alvo:" block.
+    m = re.search(r"Arquivos alvo:\s*(.*?)(?:\n\s*\n|Funções alvo:|Diff preview:|Risco:)", text_body, re.I | re.S)
+    if m:
+        block = str(m.group(1) or "")
+        for raw in block.splitlines():
+            item = raw.strip().lstrip("-").strip()
+            if item and "não explicitado" not in item.lower():
+                target_files.append(item)
+    # Fallback to diff preview marker: files=...
+    m2 = re.search(r"^\s*files\s*=\s*(.+?)\s*$", text_body, re.I | re.M)
+    if m2:
+        for part in str(m2.group(1) or "").split(","):
+            item = part.strip()
+            if item and item not in target_files:
+                target_files.append(item)
+
+    target_files = list(dict.fromkeys([p for p in target_files if p]))
+    patch_id = _github_normalize_patch_id(f"ORKIO_PATCH_{audit_id}")
+    now = now_ts()
+    user_id = str((payload or {}).get("sub") or "").strip() or "unknown"
+    return {
+        "proposal_id": f"prop_{new_id()[:12]}",
+        "patch_id": patch_id,
+        "approval_token": _github_generate_approval_token(),
+        "created_at": now,
+        "updated_at": now,
+        "expires_at": now + max(_GITHUB_WRITE_APPROVAL_TTL_SECONDS, 60),
+        "org_slug": str(org or "default"),
+        "thread_id": str(thread_id or "global"),
+        "user_id": user_id,
+        "requested_actions": ["create_branch", "apply_patch", "prepare_commit", "open_pr"],
+        "requested_paths": target_files,
+        "target_files": target_files,
+        "target_functions": [],
+        "diff_preview": "",
+        "audit_receipt_id": audit_id,
+        "status": "pending",
+        "proposed_for": _github_write_identity(payload),
+        "approval_required": True,
+        "approval_model": "password_modal_visible_message_recovery",
+        "token_model": "random_nonce_per_pending_proposal",
+    }
+
+
+def _github_write_get_pending_proposal_by_audit_receipt_id(
+    *,
+    org: str,
+    thread_id: Optional[str],
+    payload: Optional[Dict[str, Any]],
+    audit_receipt_id: str,
+    db: Optional[Session] = None,
+) -> Optional[Dict[str, Any]]:
+    """Resolve the pending proposal by the receipt id shown in the UI.
+
+    Order:
+    1. current in-memory pending entries;
+    2. dedicated pending table scan for same org/user/thread;
+    3. visible persisted message recovery, then backfill canonical pending store.
+    """
+    audit_id = str(audit_receipt_id or "").strip()
+    if not audit_id:
+        return None
+    _github_write_bootstrap_state()
+    user_id = str((payload or {}).get("sub") or "unknown").strip() or "unknown"
+    tid = str(thread_id or "global").strip() or "global"
+    now = now_ts()
+
+    with _github_write_lock:
+        for item in list((_github_write_pending_approval_state or {}).values()):
+            if not isinstance(item, dict):
+                continue
+            if str(item.get("audit_receipt_id") or "").strip() != audit_id:
+                continue
+            if str(item.get("org_slug") or org or "default") != str(org or "default"):
+                continue
+            if str(item.get("user_id") or user_id) != user_id:
+                continue
+            if str(item.get("thread_id") or tid) != tid:
+                continue
+            expires_at = int(item.get("expires_at") or 0)
+            if expires_at and expires_at < now:
+                continue
+            return dict(item)
+
+    session = db
+    owned = False
+    if session is None:
+        session = _github_pending_db_try_session()
+        owned = session is not None
+
+    if session is not None:
+        try:
+            _github_pending_db_ensure_schema(session)
+            rows = session.execute(
+                text(
+                    f"""
+                    SELECT proposal_json, expires_at
+                    FROM {_GITHUB_PENDING_DB_TABLE}
+                    WHERE org_slug = :org_slug
+                      AND user_id = :user_id
+                      AND (thread_id = :thread_id OR scope_kind = 'userwide')
+                    ORDER BY updated_at DESC
+                    LIMIT 50
+                    """
+                ),
+                {"org_slug": str(org or "default"), "user_id": user_id, "thread_id": tid},
+            ).fetchall()
+            for row in rows:
+                expires_at = int(row[1] or 0)
+                if expires_at and expires_at < now:
+                    continue
+                try:
+                    parsed = json.loads(row[0]) if row[0] else None
+                except Exception:
+                    parsed = None
+                if isinstance(parsed, dict) and str(parsed.get("audit_receipt_id") or "").strip() == audit_id:
+                    key = _github_write_pending_key(org, thread_id, payload)
+                    userwide_key = _github_write_user_approval_key(org, user_id)
+                    with _github_write_lock:
+                        _github_write_pending_approval_state[key] = dict(parsed)
+                        _github_write_pending_approval_state[userwide_key] = dict(parsed)
+                    return dict(parsed)
+
+            # Final recovery: the proposal is visible/persisted in chat but the
+            # pending table is stale. Rebuild pending from the exact visible
+            # assistant message containing this audit_receipt_id.
+            try:
+                msg = session.execute(
+                    select(Message)
+                    .where(
+                        Message.org_slug == str(org or "default"),
+                        Message.thread_id == tid,
+                        Message.role == "assistant",
+                        Message.content.contains(audit_id),
+                    )
+                    .order_by(Message.created_at.desc())
+                    .limit(1)
+                ).scalar_one_or_none()
+            except Exception:
+                msg = None
+            if msg is not None:
+                recovered = _github_parse_pending_proposal_from_visible_message(
+                    org=org,
+                    thread_id=thread_id,
+                    payload=payload,
+                    content=str(getattr(msg, "content", "") or ""),
+                    audit_receipt_id=audit_id,
+                )
+                if isinstance(recovered, dict) and recovered:
+                    key = _github_write_pending_key(org, thread_id, payload)
+                    userwide_key = _github_write_user_approval_key(org, user_id)
+                    with _github_write_lock:
+                        _github_write_pending_approval_state[key] = dict(recovered)
+                        _github_write_pending_approval_state[userwide_key] = dict(recovered)
+                    try:
+                        _github_pending_db_upsert(
+                            db=session,
+                            lookup_key=key,
+                            org_slug=str(org or "default"),
+                            user_id=user_id,
+                            thread_id=tid,
+                            scope_kind="thread",
+                            proposal=recovered,
+                        )
+                        _github_pending_db_upsert(
+                            db=session,
+                            lookup_key=userwide_key,
+                            org_slug=str(org or "default"),
+                            user_id=user_id,
+                            thread_id=None,
+                            scope_kind="userwide",
+                            proposal=recovered,
+                        )
+                        if owned:
+                            session.commit()
+                    except Exception:
+                        if owned:
+                            try:
+                                session.rollback()
+                            except Exception:
+                                pass
+                        logger.exception("GITHUB_PENDING_APPROVAL_AUDIT_RECOVERY_PERSIST_FAILED")
+                    return dict(recovered)
+        finally:
+            if owned:
+                try:
+                    session.close()
+                except Exception:
+                    pass
+    return None
+
+
+
 def _github_write_clear_pending_proposal(org: str, thread_id: Optional[str], payload: Optional[Dict[str, Any]], db: Optional[Session] = None) -> None:
     _github_write_bootstrap_state()
     key = _github_write_pending_key(org, thread_id, payload)
@@ -23220,6 +23438,17 @@ def governance_approve_patch(
 
     payload = dict(user or {})
     pending = _github_write_get_pending_proposal(org, tid, payload, db=db)
+    audit_filter_early = str(inp.audit_receipt_id or "").strip()
+    if audit_filter_early:
+        exact_pending = _github_write_get_pending_proposal_by_audit_receipt_id(
+            org=org,
+            thread_id=tid,
+            payload=payload,
+            audit_receipt_id=audit_filter_early,
+            db=db,
+        )
+        if isinstance(exact_pending, dict) and exact_pending:
+            pending = exact_pending
     if not isinstance(pending, dict) or not pending:
         text_out = (
             "PATCH APPROVAL RESPONSE\n\n"
@@ -23261,8 +23490,44 @@ def governance_approve_patch(
         }
 
     audit_filter = str(inp.audit_receipt_id or "").strip()
-    if audit_filter and str(pending.get("audit_receipt_id") or "").strip() and audit_filter != str(pending.get("audit_receipt_id") or "").strip():
-        raise HTTPException(status_code=409, detail="audit_receipt_id mismatch for pending proposal.")
+    pending_audit = str(pending.get("audit_receipt_id") or "").strip()
+    if audit_filter and pending_audit and audit_filter != pending_audit:
+        replacement = _github_write_get_pending_proposal_by_audit_receipt_id(
+            org=org,
+            thread_id=tid,
+            payload=payload,
+            audit_receipt_id=audit_filter,
+            db=db,
+        )
+        if isinstance(replacement, dict) and replacement:
+            pending = replacement
+            pending_audit = str(pending.get("audit_receipt_id") or "").strip()
+        else:
+            # Do not silently approve a different/stale proposal. Return a
+            # deterministic, user-visible governance error instead of 409-only
+            # modal failure.
+            text_out = (
+                "PATCH APPROVAL RESPONSE\n\n"
+                "- status: approval_context_mismatch\n"
+                f"- requested_audit_receipt_id: {audit_filter or 'n/d'}\n"
+                f"- pending_audit_receipt_id: {pending_audit or 'n/d'}\n"
+                "- write_allowed: false\n"
+                "- human_approved: false\n\n"
+                "Resultado:\n"
+                "A senha foi validada, mas a proposta pendente ativa não corresponde à proposta exibida. "
+                "Gere uma nova proposta e aprove pelo botão da própria mensagem."
+            )
+            return {
+                "ok": False,
+                "approved": False,
+                "status": "approval_context_mismatch",
+                "patch_mode": "proposal_only",
+                "write_allowed": False,
+                "human_approval_required": True,
+                "human_approved": False,
+                "thread_id": tid,
+                "message": text_out,
+            }
 
     auth_flags = {
         "patch_id": str(pending.get("patch_id") or ""),
@@ -31809,3 +32074,4 @@ def admin_reorder_landing_blocks(
         changed += 1
     db.commit()
     return {"ok": True, "changed": changed}
+
