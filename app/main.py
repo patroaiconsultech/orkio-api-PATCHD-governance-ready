@@ -5051,141 +5051,6 @@ def public_chat(inp: PublicChatIn, x_org_slug: Optional[str] = Header(default=No
 
 
 
-
-# ================================
-# AO-01 — Public plans + Enterprise request funnel
-# ================================
-
-class PublicEnterpriseRequestIn(BaseModel):
-    name: Optional[str] = None
-    email: Optional[str] = None
-    company: Optional[str] = None
-    phone: Optional[str] = None
-    segment: Optional[str] = None
-    challenge: Optional[str] = None
-    integrations: Optional[str] = None
-    plan_interest: Optional[str] = "enterprise"
-    urgency: Optional[str] = None
-    source: Optional[str] = "orkio_prechat"
-    context: Optional[Dict[str, Any]] = None
-
-@app.get("/api/public/plans")
-def public_plans():
-    return {
-        "ok": True,
-        "trial_days": 7,
-        "plans": [
-            {
-                "code": "essential",
-                "name": "Essencial",
-                "target": "Empresas que querem iniciar com agentes e automações principais.",
-                "features": [
-                    "Acesso ao Orkio OS",
-                    "Agentes base",
-                    "Diagnóstico inicial",
-                    "7 dias gratuitos"
-                ],
-                "cta": "Começar teste gratuito"
-            },
-            {
-                "code": "professional",
-                "name": "Professional",
-                "target": "Empresas que precisam de workflows, relatórios e inteligência operacional avançada.",
-                "features": [
-                    "Multiagentes",
-                    "Relatórios estratégicos",
-                    "Workflows avançados",
-                    "Acompanhamento de execução"
-                ],
-                "cta": "Solicitar plano Professional"
-            },
-            {
-                "code": "enterprise",
-                "name": "Enterprise / White Label",
-                "target": "Implantações personalizadas com integrações, governança ampliada e identidade da empresa.",
-                "features": [
-                    "Integrações com sistemas internos",
-                    "White label",
-                    "Governança avançada",
-                    "Implantação assistida pela PatroAI"
-                ],
-                "cta": "Solicitar proposta personalizada"
-            }
-        ]
-    }
-
-@app.post("/api/public/enterprise-request")
-def public_enterprise_request(inp: PublicEnterpriseRequestIn, x_org_slug: Optional[str] = Header(default=None), request: Request = None, db: Session = Depends(get_db)):
-    org = get_org(x_org_slug)
-    rid = new_id()
-    now = now_ts()
-    meta = {
-        "request_id": rid,
-        "source": inp.source or "orkio_prechat",
-        "name": inp.name,
-        "email": inp.email,
-        "company": inp.company,
-        "phone": inp.phone,
-        "segment": inp.segment,
-        "challenge": inp.challenge,
-        "integrations": inp.integrations,
-        "plan_interest": inp.plan_interest,
-        "urgency": inp.urgency,
-        "context": inp.context or {},
-    }
-
-    try:
-        lead = Lead(
-            id=rid,
-            org_slug=org,
-            name=(inp.name or "Lead Enterprise").strip(),
-            email=(inp.email or f"enterprise-{rid}@orkio.local").strip().lower(),
-            company=(inp.company or "Solicitação Enterprise").strip(),
-            role=(inp.plan_interest or "enterprise"),
-            segment=(inp.segment or None),
-            source=(inp.source or "orkio_prechat"),
-            ua=(request.headers.get("user-agent") if request else None),
-            created_at=now,
-        )
-        db.add(lead)
-        db.commit()
-    except Exception:
-        logger.exception("PUBLIC_ENTERPRISE_LEAD_PERSIST_FAILED")
-        try:
-            db.rollback()
-        except Exception:
-            pass
-
-    subject = f"Orkio Enterprise Request — {inp.company or inp.name or rid}"
-    body = "\n".join([
-        "Nova solicitação Enterprise / White Label recebida pelo pré-chat Orkio.",
-        "",
-        f"Nome: {inp.name or ''}",
-        f"E-mail: {inp.email or ''}",
-        f"Empresa: {inp.company or ''}",
-        f"Telefone: {inp.phone or ''}",
-        f"Segmento: {inp.segment or ''}",
-        f"Plano de interesse: {inp.plan_interest or ''}",
-        f"Urgência: {inp.urgency or ''}",
-        "",
-        f"Desafio: {inp.challenge or ''}",
-        f"Integrações desejadas: {inp.integrations or ''}",
-        "",
-        "Contexto:",
-        json.dumps(inp.context or {}, ensure_ascii=False, indent=2),
-    ])
-    try:
-        _send_resend_email(RESEND_INTERNAL_TO, subject, body)
-    except Exception:
-        logger.exception("PUBLIC_ENTERPRISE_EMAIL_FAILED")
-
-    try:
-        audit(db, org, None, "public.enterprise_request", request_id=rid, path="/api/public/enterprise-request", status_code=200, latency_ms=0, meta=meta)
-    except Exception:
-        pass
-
-    return {"ok": True, "request_id": rid, "message": "Solicitação recebida. A equipe PatroAI avaliará o escopo e retornará com uma proposta."}
-
 @app.get("/api/health")
 def health():
     return {"status": "ok", "db": "ok" if db_ok() else "down", "version": APP_VERSION, "rag": RAG_MODE}
@@ -33033,3 +32898,112 @@ def admin_reorder_landing_blocks(
         changed += 1
     db.commit()
     return {"ok": True, "changed": changed}
+
+
+# =========================
+# PUBLIC ORKIO PRECHAT / ENTERPRISE LEADS
+# Added for landing conversion flow.
+# Safe: no auth required, stores minimal context in memory and sends optional internal notification.
+# =========================
+
+_PUBLIC_PRECHAT_MEMORY: Dict[str, Dict[str, Any]] = {}
+
+
+class PublicPrechatIn(BaseModel):
+    source: Optional[str] = "orkio_public_prechat"
+    language: Optional[str] = "pt"
+    answers: Dict[str, Any] = Field(default_factory=dict)
+    messages: List[Dict[str, Any]] = Field(default_factory=list)
+    diagnosis: Optional[str] = ""
+    trial_days: Optional[int] = 7
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class PublicEnterpriseLeadIn(BaseModel):
+    source: Optional[str] = "orkio_public_prechat"
+    name: Optional[str] = ""
+    email: Optional[str] = ""
+    company: Optional[str] = ""
+    phone: Optional[str] = ""
+    interest_type: Optional[str] = "enterprise_white_label_integrations"
+    message: Optional[str] = ""
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+@app.post("/api/public/prechat")
+def public_prechat_capture(payload: PublicPrechatIn, request: Request):
+    prechat_id = "pre_" + uuid.uuid4().hex[:16]
+    now = now_ts()
+    item = {
+        "prechat_id": prechat_id,
+        "session_id": prechat_id,
+        "source": payload.source or "orkio_public_prechat",
+        "language": payload.language or "pt",
+        "answers": payload.answers or {},
+        "messages": payload.messages or [],
+        "diagnosis": payload.diagnosis or "",
+        "trial_days": int(payload.trial_days or 7),
+        "metadata": payload.metadata or {},
+        "ip": request.client.host if request.client else None,
+        "user_agent": request.headers.get("user-agent"),
+        "created_at": now,
+        "updated_at": now,
+    }
+    _PUBLIC_PRECHAT_MEMORY[prechat_id] = item
+    return {
+        "ok": True,
+        "prechat_id": prechat_id,
+        "session_id": prechat_id,
+        "trial_days": item["trial_days"],
+    }
+
+
+@app.get("/api/public/prechat/{prechat_id}")
+def public_prechat_get(prechat_id: str):
+    item = _PUBLIC_PRECHAT_MEMORY.get(str(prechat_id or "").strip())
+    if not item:
+        raise HTTPException(status_code=404, detail="Prechat context not found.")
+    return {"ok": True, "context": item}
+
+
+@app.post("/api/public/enterprise-lead")
+def public_enterprise_lead(payload: PublicEnterpriseLeadIn, request: Request):
+    now = now_ts()
+    lead_id = "lead_" + uuid.uuid4().hex[:16]
+    metadata = payload.metadata or {}
+    answers = metadata.get("answers") if isinstance(metadata, dict) else None
+
+    subject = "Solicitação Enterprise / White Label - Orkio OS"
+    body = "\n".join([
+        "Nova solicitação Enterprise / White Label recebida pela landing Orkio.",
+        "",
+        f"Lead ID: {lead_id}",
+        f"Nome: {payload.name or (answers or {}).get('name') or 'não informado'}",
+        f"E-mail: {payload.email or 'não informado'}",
+        f"Empresa: {payload.company or 'não informada'}",
+        f"Telefone: {payload.phone or 'não informado'}",
+        f"Interesse: {payload.interest_type or 'enterprise_white_label_integrations'}",
+        "",
+        "Mensagem / Diagnóstico:",
+        payload.message or "",
+        "",
+        "Metadados:",
+        json.dumps(metadata, ensure_ascii=False, indent=2),
+        "",
+        f"IP: {request.client.host if request.client else 'n/d'}",
+        f"User-Agent: {request.headers.get('user-agent') or 'n/d'}",
+        f"Criado em: {now}",
+    ])
+
+    sent = False
+    try:
+        sent = _send_resend_email(RESEND_INTERNAL_TO, subject, body)
+    except Exception:
+        logger.exception("PUBLIC_ENTERPRISE_LEAD_EMAIL_FAILED")
+
+    return {
+        "ok": True,
+        "lead_id": lead_id,
+        "email_sent": bool(sent),
+        "message": "Solicitação registrada para avaliação da equipe PatroAI.",
+    }
