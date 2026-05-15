@@ -23929,6 +23929,329 @@ def governance_approve_patch(
 
 
 
+
+
+def _github_normalize_executable_changes_from_approval(approval: Dict[str, Any]) -> List[Dict[str, str]]:
+    """Normalize a persisted executable patch artifact into GitHub batch changes.
+
+    Supported approval payload shapes:
+    - changes / file_changes / patch_changes / executable_changes: list[dict]
+    - files: dict[path, content] or list[dict]
+    - artifact: {"changes": [...]} / {"files": {...}}
+
+    This function deliberately does NOT apply free-form diff_preview text. Unified
+    diffs require a separate patch applier; here we only execute explicit
+    path+content artifacts to avoid corrupt partial writes.
+    """
+    approval = dict(approval or {})
+    candidates: List[Any] = []
+
+    for key in ("changes", "file_changes", "patch_changes", "executable_changes"):
+        value = approval.get(key)
+        if isinstance(value, list):
+            candidates.extend(value)
+
+    files_value = approval.get("files")
+    if isinstance(files_value, dict):
+        for path, content in files_value.items():
+            candidates.append({"path": path, "content": content, "mode": "replace"})
+    elif isinstance(files_value, list):
+        candidates.extend(files_value)
+
+    artifact = approval.get("artifact")
+    if isinstance(artifact, dict):
+        artifact_changes = artifact.get("changes")
+        if isinstance(artifact_changes, list):
+            candidates.extend(artifact_changes)
+        artifact_files = artifact.get("files")
+        if isinstance(artifact_files, dict):
+            for path, content in artifact_files.items():
+                candidates.append({"path": path, "content": content, "mode": "replace"})
+        elif isinstance(artifact_files, list):
+            candidates.extend(artifact_files)
+
+    normalized: List[Dict[str, str]] = []
+    seen_paths: set[str] = set()
+
+    for raw in candidates:
+        if not isinstance(raw, dict):
+            continue
+        path = str(raw.get("path") or raw.get("file_path") or raw.get("filename") or "").strip()
+        if not path or not _github_safe_path(path):
+            continue
+
+        mode = str(raw.get("mode") or raw.get("operation") or raw.get("action") or "replace").strip().lower()
+        if mode in {"create", "add", "update", "modify", "replace", "upsert"}:
+            mode = "replace"
+        elif mode in {"delete", "remove"}:
+            mode = "delete"
+        else:
+            mode = "replace"
+
+        change: Dict[str, str] = {"path": path, "mode": mode}
+        if mode != "delete":
+            if "content" in raw:
+                content = raw.get("content")
+            elif "new_content" in raw:
+                content = raw.get("new_content")
+            elif "body" in raw:
+                content = raw.get("body")
+            else:
+                continue
+            if content is None:
+                continue
+            change["content"] = str(content)
+        if path in seen_paths:
+            normalized = [c for c in normalized if c.get("path") != path]
+        seen_paths.add(path)
+        normalized.append(change)
+
+    return normalized[:100]
+
+
+def _github_repo_target_for_changes(changes: List[Dict[str, str]], approval: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    approval = dict(approval or {})
+    explicit = str(approval.get("repo_target") or approval.get("repository_target") or "").strip().lower()
+    if explicit in {"frontend", "web"}:
+        return "frontend"
+    if explicit in {"backend", "api"}:
+        return "backend"
+
+    paths = [str(c.get("path") or "") for c in list(changes or [])]
+    frontend_markers = ("src/", "public/", "index.html", "package.json", "vite.config", "tailwind.config", "postcss.config")
+    backend_markers = ("app/", "alembic/", "requirements", "pyproject.toml", "Dockerfile")
+    if paths and all(p.startswith(frontend_markers) or p in {"package.json", "package-lock.json", "index.html"} for p in paths):
+        return "frontend"
+    if paths and all(p.startswith(backend_markers) or p.endswith(".py") for p in paths):
+        return "backend"
+    if any(p.endswith((".jsx", ".tsx", ".ts")) or p.startswith("src/") for p in paths):
+        return "frontend"
+    if any(p.endswith(".py") or p.startswith("app/") or p.startswith("alembic/") for p in paths):
+        return "backend"
+    return None
+
+
+def _github_governed_transactional_artifact_execution(
+    *,
+    org: str,
+    thread_id: str,
+    payload: Dict[str, Any],
+    approval: Dict[str, Any],
+    audit_receipt_id: str = "",
+    trace_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Execute an approved explicit path+content artifact as a governed PR.
+
+    Safety boundaries:
+    - never writes directly to main;
+    - only accepts normalized path+content/delete changes;
+    - rejects unsafe paths;
+    - creates branch + batch commit + PR with governance metadata.
+    """
+    approval = dict(approval or {})
+    trace_id = trace_id or new_id()
+    patch_id = str(approval.get("patch_id") or "ORKIO_PATCH").strip()
+    approval_id = str(approval.get("approval_id") or "").strip()
+    audit_id = str(audit_receipt_id or approval.get("audit_receipt_id") or "").strip()
+
+    changes = _github_normalize_executable_changes_from_approval(approval)
+    if not changes:
+        return _github_governed_minimal_artifact_execution(
+            org=org,
+            thread_id=thread_id,
+            payload=payload,
+            approval=approval,
+            audit_receipt_id=audit_id,
+            trace_id=trace_id,
+        )
+
+    unsafe_paths = [str(c.get("path") or "") for c in changes if not _github_safe_path(str(c.get("path") or ""))]
+    if unsafe_paths:
+        return {
+            "ok": False,
+            "status": "execution_blocked_unsafe_paths",
+            "patch_mode": "approved_apply",
+            "write_allowed": False,
+            "human_approved": True,
+            "approval_id": approval_id,
+            "patch_id": patch_id,
+            "audit_receipt_id": audit_id,
+            "files_written": [],
+            "unsafe_paths": unsafe_paths,
+            "branch_created": False,
+            "commit_created": False,
+            "pull_request_opened": False,
+        }
+
+    repo_target = _github_repo_target_for_changes(changes, approval)
+    repo_hint_text = " ".join([str(c.get("path") or "") for c in changes] + [patch_id])
+    repo, base_branch, _, repo_kind = _github_resolve_repo_branch(repo_target=repo_target, user_text=repo_hint_text)
+    if not repo:
+        return {
+            "ok": False,
+            "status": "execution_blocked_github_repo_config_invalid",
+            "patch_mode": "approved_apply",
+            "write_allowed": False,
+            "human_approved": True,
+            "approval_id": approval_id,
+            "patch_id": patch_id,
+            "audit_receipt_id": audit_id,
+            "repo": "n/d",
+            "repo_kind": repo_kind,
+            "repo_target": repo_target or "",
+            "branch": "n/d",
+            "base_branch": base_branch,
+            "files_written": [],
+            "branch_created": False,
+            "commit_created": False,
+            "pull_request_opened": False,
+            "repo_config": _github_repo_config_diagnostics(repo_target=repo_target),
+        }
+
+    suffix = re.sub(r"[^a-zA-Z0-9]+", "-", (audit_id or patch_id)[-12:]).strip("-").lower() or uuid.uuid4().hex[:8]
+    branch = _github_generated_branch_name(f"orkio/governed-apply-{suffix}")
+
+    governance = {
+        "patch_mode": "approved_apply",
+        "write_allowed": True,
+        "human_approval_required": True,
+        "human_approved": True,
+        "approval_id": approval_id,
+        "patch_id": patch_id,
+        "audit_receipt_id": audit_id,
+        "risk_level": str(approval.get("risk_level") or "medium"),
+    }
+
+    branch_result = _github_create_branch_capability(
+        branch=branch,
+        repo_target=repo_target,
+        user_text=repo_hint_text,
+        trace_id=trace_id,
+        governance=governance,
+    )
+    if not bool(branch_result.get("success")):
+        return {
+            "ok": False,
+            "status": "execution_failed_create_branch",
+            "patch_mode": "approved_apply",
+            "write_allowed": False,
+            "human_approved": True,
+            "approval_id": approval_id,
+            "patch_id": patch_id,
+            "audit_receipt_id": audit_id,
+            "repo": repo or branch_result.get("repo"),
+            "branch": branch,
+            "base_branch": base_branch,
+            "files_written": [],
+            "branch_created": False,
+            "commit_created": False,
+            "pull_request_opened": False,
+            "provider_result": branch_result,
+            "provider_message": branch_result.get("message"),
+            "provider_status": branch_result.get("status"),
+            "repo_config": _github_repo_config_diagnostics(repo_target=repo_target),
+        }
+
+    receipt_path = f"orkio-governance/{re.sub(r'[^A-Za-z0-9_.-]+', '-', patch_id).strip('-') or 'patch'}.execution.json"
+    receipt = {
+        "status": "execution_source_changes_committed",
+        "org_slug": org,
+        "thread_id": thread_id,
+        "approval_id": approval_id,
+        "patch_id": patch_id,
+        "audit_receipt_id": audit_id,
+        "patch_mode": "approved_apply",
+        "human_approved": True,
+        "write_allowed": True,
+        "repo": repo,
+        "repo_kind": repo_kind,
+        "base_branch": base_branch,
+        "target_files": [str(c.get("path") or "") for c in changes],
+        "trace_id": trace_id,
+        "created_at": now_ts(),
+    }
+    commit_changes = list(changes) + [
+        {"path": receipt_path, "mode": "replace", "content": json.dumps(receipt, ensure_ascii=False, indent=2) + "\n"}
+    ]
+
+    commit_result = _github_commit_batch_capability(
+        changes=commit_changes,
+        branch=branch,
+        repo_target=repo_target,
+        user_text=repo_hint_text,
+        title=f"orkio: governed apply {patch_id}",
+        trace_id=trace_id,
+        governance=governance,
+    )
+    if not bool(commit_result.get("success")):
+        return {
+            "ok": False,
+            "status": "execution_failed_commit_changes",
+            "patch_mode": "approved_apply",
+            "write_allowed": False,
+            "human_approved": True,
+            "approval_id": approval_id,
+            "patch_id": patch_id,
+            "audit_receipt_id": audit_id,
+            "repo": repo or commit_result.get("repo"),
+            "branch": branch,
+            "base_branch": base_branch,
+            "files_written": [],
+            "branch_created": True,
+            "commit_created": False,
+            "pull_request_opened": False,
+            "branch_result": branch_result,
+            "provider_result": commit_result,
+            "provider_message": commit_result.get("message"),
+        }
+
+    pr_body = (
+        "Governed patch execution generated by ORKIO.\n\n"
+        f"- approval_id: {approval_id or 'n/d'}\n"
+        f"- patch_id: {patch_id or 'n/d'}\n"
+        f"- audit_receipt_id: {audit_id or 'n/d'}\n"
+        f"- repo: {repo}\n"
+        f"- base_branch: {base_branch}\n"
+        f"- files_changed: {', '.join(str(c.get('path') or '') for c in changes) or 'n/d'}\n\n"
+        "This PR was created from an explicit executable artifact after human approval."
+    )
+    pr_result = _github_create_pull_request_capability(
+        head=branch,
+        base=base_branch,
+        title=f"ORKIO governed apply: {patch_id}",
+        repo_target=repo_target,
+        user_text=repo_hint_text,
+        body=pr_body,
+        trace_id=trace_id,
+        governance=governance,
+    )
+
+    pr_ok = bool(pr_result.get("success"))
+    return {
+        "ok": bool(commit_result.get("success")),
+        "status": "execution_completed_source_pr_opened" if pr_ok else "execution_completed_source_committed_pr_blocked",
+        "patch_mode": "approved_apply",
+        "write_allowed": False,
+        "human_approved": True,
+        "approval_id": approval_id,
+        "patch_id": patch_id,
+        "audit_receipt_id": audit_id,
+        "repo": commit_result.get("repo") or repo,
+        "repo_kind": repo_kind,
+        "branch": branch,
+        "base_branch": base_branch,
+        "branch_created": True,
+        "files_written": list(commit_result.get("files") or [str(c.get("path") or "") for c in commit_changes]),
+        "commit_created": True,
+        "commit_sha": commit_result.get("commit_sha"),
+        "pull_request_opened": pr_ok,
+        "pull_request_url": pr_result.get("url") or pr_result.get("html_url") or pr_result.get("pull_request_url"),
+        "branch_result": branch_result,
+        "commit_result": commit_result,
+        "pr_result": pr_result,
+    }
+
+
 def _github_governed_minimal_artifact_execution(
     *,
     org: str,
@@ -24285,23 +24608,15 @@ def governance_execute_approved_patch(
         response_payload["message"] = text_out
         return response_payload
 
-    text_out = (
-        "GOVERNED PATCH EXECUTION RESPONSE\n\n"
-        "- status: execution_blocked_executor_not_wired\n"
-        f"- approval_id: {approval.get('approval_id') or 'n/d'}\n"
-        f"- patch_id: {approval.get('patch_id') or 'n/d'}\n"
-        "- patch_mode: approved_apply\n"
-        "- write_allowed: false\n"
-        "- human_approved: true\n"
-        "- branch_created: false\n"
-        "- files_written: nenhum\n"
-        "- commit_created: false\n"
-        "- pull_request_opened: false\n\n"
-        "Resultado:\n"
-        "A aprovação e o artifact foram reconhecidos, mas o executor GitHub transacional ainda não está conectado "
-        "a este hotfix. Nenhuma escrita real foi executada. Este turno foi finalizado como bloqueio governado, "
-        "sem resposta narrativa e sem estado fantasma de aplicação."
+    execution_result = _github_governed_transactional_artifact_execution(
+        org=org,
+        thread_id=tid,
+        payload=payload,
+        approval=approval,
+        audit_receipt_id=approval_audit,
+        trace_id=getattr(inp, "trace_id", None) or new_id(),
     )
+    text_out = _github_render_governed_execution_result(execution_result)
     try:
         msg = Message(
             id=new_id(),
@@ -24320,22 +24635,10 @@ def governance_execute_approved_patch(
     except Exception:
         try: db.rollback()
         except Exception: pass
-    return {
-        "ok": False,
-        "status": "execution_blocked_executor_not_wired",
-        "patch_mode": "approved_apply",
-        "write_allowed": False,
-        "human_approved": True,
-        "approval_id": approval.get("approval_id"),
-        "patch_id": approval.get("patch_id"),
-        "audit_receipt_id": approval_audit,
-        "thread_id": tid,
-        "branch_created": False,
-        "files_written": [],
-        "commit_created": False,
-        "pull_request_opened": False,
-        "message": text_out,
-    }
+    response_payload = dict(execution_result)
+    response_payload["thread_id"] = tid
+    response_payload["message"] = text_out
+    return response_payload
 
 
 
