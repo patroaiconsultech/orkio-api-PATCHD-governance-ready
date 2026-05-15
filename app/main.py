@@ -12304,7 +12304,72 @@ def _extract_patch_governance_diff_preview(text_value: str) -> str:
         return str(m.group(1) or "").strip()[:4000]
     return ""
 
-def _extract_patch_governance_executable_artifact(text_value: str) -> Dict[str, Any]:
+def _normalize_patch_governance_source_path(path: str) -> str:
+    """Normalize common frontend file aliases into repository-relative paths.
+
+    The chat/UI often refers to AppConsole.jsx without the current src/routes
+    prefix. Keep this small and explicit so governed execution writes to the
+    intended source file instead of creating a duplicate at src/AppConsole.jsx.
+    """
+    p = str(path or "").strip().replace("\\", "/").lstrip("/")
+    while p.startswith("./"):
+        p = p[2:]
+    if not p:
+        return ""
+    name = p.rsplit("/", 1)[-1]
+    if name in {"AppConsole.jsx", "AuthPage.jsx"} and not p.startswith("src/routes/"):
+        return f"src/routes/{name}"
+    return p
+
+
+def _github_build_safe_fallback_executable_artifact(ctx: Optional[Dict[str, Any]], text_value: str) -> Dict[str, Any]:
+    """Build a minimal source artifact when the agent failed to emit JSON.
+
+    This does not invent a broad refactor. It creates a harmless append-only
+    source marker in the explicitly requested file so the governed chain can
+    exercise a real source commit after human approval. A richer agent-generated
+    JSON artifact still takes precedence whenever present.
+    """
+    c = dict(ctx or {})
+    requested_files = [
+        _normalize_patch_governance_source_path(str(x or ""))
+        for x in list(c.get("target_files") or [])
+        if str(x or "").strip()
+    ]
+    requested_files = [p for p in dict.fromkeys(requested_files) if p and not p.startswith("/") and ".." not in p]
+    if not requested_files:
+        return {
+            "executable_artifact_ready": False,
+            "executable_files": [],
+            "patch_artifact_id": "",
+            "diff_hash": "",
+            "artifact_parse_errors": ["fallback_no_target_file"],
+        }
+
+    path = requested_files[0]
+    audit_id = str(c.get("audit_receipt_id") or "").strip() or hashlib.sha256(str(text_value or "").encode("utf-8", errors="ignore")).hexdigest()[:12]
+    content = (
+        "\n"
+        "/*\n"
+        f" * ORKIO governed source touchpoint: {audit_id}\n"
+        " * Purpose: executable artifact fallback for approved UX feedback/onboarding patch.\n"
+        " * This marker is intentionally non-invasive and confirms the governed\n"
+        " * approval -> source commit -> PR pipeline before larger UI changes.\n"
+        " */\n"
+    )
+    safe_files = [{"path": path, "mode": "append", "content": content}]
+    digest_src = json.dumps(safe_files, ensure_ascii=False, sort_keys=True)
+    digest = hashlib.sha256(digest_src.encode("utf-8", errors="ignore")).hexdigest()
+    return {
+        "executable_artifact_ready": True,
+        "executable_files": safe_files,
+        "patch_artifact_id": digest[:16],
+        "diff_hash": digest,
+        "artifact_parse_errors": ["fallback_executable_artifact_used"],
+    }
+
+
+def _extract_patch_governance_executable_artifact(text_value: str, ctx: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Parse a governed executable artifact from the agent response.
 
     Accepted shape:
@@ -12315,7 +12380,9 @@ def _extract_patch_governance_executable_artifact(text_value: str) -> Dict[str, 
 
     This parser is intentionally strict: it only accepts relative safe paths and
     text content. It never executes code; it only turns a human-approved proposal
-    into a GitHub batch commit payload.
+    into a GitHub batch commit payload. If the agent still fails to emit JSON
+    but the request has a clear target file, a minimal append-only fallback
+    artifact is produced to prove source commit capability under approval.
     """
     txt = str(text_value or "")
     candidates: List[str] = []
@@ -12342,7 +12409,7 @@ def _extract_patch_governance_executable_artifact(text_value: str) -> Dict[str, 
         for item in files:
             if not isinstance(item, dict):
                 continue
-            path = str(item.get("path") or "").strip()
+            path = _normalize_patch_governance_source_path(str(item.get("path") or "").strip())
             mode = str(item.get("mode") or "replace").strip().lower() or "replace"
             content = str(item.get("content") or "")
             if not path or path.startswith("/") or "\\" in path or ".." in path:
@@ -12360,6 +12427,12 @@ def _extract_patch_governance_executable_artifact(text_value: str) -> Dict[str, 
             safe_files.append({"path": path, "mode": mode, "content": content})
         if safe_files:
             break
+
+    if not safe_files:
+        fallback = _github_build_safe_fallback_executable_artifact(ctx, txt)
+        if bool(fallback.get("executable_artifact_ready")):
+            return fallback
+        errors.extend(list(fallback.get("artifact_parse_errors") or []))
 
     digest_src = json.dumps(safe_files, ensure_ascii=False, sort_keys=True)
     return {
@@ -12391,22 +12464,31 @@ def _finalize_patch_governance_runtime_fields(
             "governance_trace": [],
         }
     diff_preview = _extract_patch_governance_diff_preview(text_value)
-    executable_artifact = _extract_patch_governance_executable_artifact(text_value)
+    executable_artifact = _extract_patch_governance_executable_artifact(text_value, c)
     if not diff_preview:
         scope_bits: List[str] = []
         if c.get("target_files"):
             scope_bits.append("files=" + ", ".join(list(c.get("target_files") or [])[:10]))
         if c.get("target_functions"):
             scope_bits.append("functions=" + ", ".join(list(c.get("target_functions") or [])[:10]))
-        diff_preview = "\n".join([
-            "# proposal-only",
-            "# diff preview pendente de refinamento pelo agente",
-            *(scope_bits or ["# scope não explicitado pelo usuário"]),
-        ]).strip()
+        if bool(executable_artifact.get("executable_artifact_ready")):
+            source_paths = [str(item.get("path") or "") for item in list(executable_artifact.get("executable_files") or []) if isinstance(item, dict)]
+            diff_preview = "\n".join([
+                "# proposal-only",
+                "# executable artifact fallback ready",
+                *(scope_bits or ["# scope não explicitado pelo usuário"]),
+                "source_changes=" + ", ".join([p for p in source_paths if p]) if source_paths else "# source_changes=none",
+            ]).strip()
+        else:
+            diff_preview = "\n".join([
+                "# proposal-only",
+                "# diff preview pendente de refinamento pelo agente",
+                *(scope_bits or ["# scope não explicitado pelo usuário"]),
+            ]).strip()
     return {
         "patch_mode": "proposal_only",
         "write_allowed": False,
-        "target_files": list(c.get("target_files") or []),
+        "target_files": [_normalize_patch_governance_source_path(str(x or "")) for x in list(c.get("target_files") or []) if str(x or "").strip()],
         "target_functions": list(c.get("target_functions") or []),
         "diff_preview": str(diff_preview or "").strip()[:6000],
         "executable_artifact_ready": bool(executable_artifact.get("executable_artifact_ready")),
