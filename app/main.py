@@ -16759,6 +16759,67 @@ def _github_get_commit_tree_sha(repo: str, commit_sha: str) -> tuple[str, Dict[s
     return tree_sha, body
 
 
+
+def _github_is_critical_source_path(path: str) -> bool:
+    p = str(path or "").replace("\\", "/").strip().lstrip("/")
+    return p == "app/main.py" or p.endswith("/app/main.py")
+
+
+def _github_critical_source_guard(path: str, content: str, *, mode: str = "", trace_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Block catastrophic source overwrite for critical runtime files.
+
+    This guard intentionally protects app/main.py from being replaced by a
+    small patch fragment. It is not a formatter or linter; it is a blast-radius
+    limiter for governed auto-evolution.
+    """
+    if not _github_is_critical_source_path(path):
+        return None
+
+    raw = str(content or "")
+    compact = raw.strip()
+    try:
+        min_bytes = int(os.getenv("GITHUB_CRITICAL_APP_MAIN_MIN_BYTES", "5000") or "5000")
+    except Exception:
+        min_bytes = 5000
+
+    required_markers = [
+        "FastAPI",
+        "app = FastAPI",
+        "@app.get(\"/api/health\")",
+        "def health(",
+        "APP_VERSION",
+    ]
+    missing = [m for m in required_markers if m not in raw]
+    too_small = len(compact.encode("utf-8", errors="replace")) < max(min_bytes, 1)
+    fragment_like = compact.startswith(("# METATRON_", "@app.", "def "))
+
+    if too_small or missing or fragment_like:
+        _github_log(
+            "GITHUB_CRITICAL_SOURCE_GUARD_BLOCKED",
+            path=path,
+            mode=mode or "",
+            missing=",".join(missing),
+            size_bytes=len(compact.encode("utf-8", errors="replace")),
+            trace_id=trace_id or "",
+        )
+        return {
+            "handled": True,
+            "success": False,
+            "provider": "github",
+            "path": path,
+            "status": "critical_source_guard_blocked",
+            "message": (
+                "CRITICAL_SOURCE_GUARD_BLOCKED: app/main.py não pode ser escrito "
+                "com conteúdo parcial ou sem marcadores mínimos de FastAPI/health. "
+                "Use append/append_unique sobre o arquivo existente ou forneça o arquivo-fonte completo validado."
+            ),
+            "missing_markers": missing,
+            "size_bytes": len(compact.encode("utf-8", errors="replace")),
+        }
+
+    return None
+
+
 def _github_commit_batch_capability(*, changes: List[Dict[str, str]], branch: Optional[str] = None, repo_target: Optional[str] = None, user_text: Optional[str] = None, title: Optional[str] = None, trace_id: Optional[str] = None, governance: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     repo, branch, token, repo_kind = _github_resolve_repo_branch(branch=branch, repo_target=repo_target, user_text=user_text)
     blocked = _github_enforce_governed_write(action="batch_commit", governance=governance, repo=repo, branch=branch)
@@ -16777,7 +16838,7 @@ def _github_commit_batch_capability(*, changes: List[Dict[str, str]], branch: Op
         mode = str((item or {}).get("mode") or "replace").strip().lower() or "replace"
         if not path or path.startswith("/") or ".." in path or "\\" in path:
             return {"handled": True, "success": False, "provider": "github", "message": f"Caminho inseguro detectado no lote: '{path}'."}
-        if mode not in {"replace", "append"}:
+        if mode not in {"replace", "append", "append_unique"}:
             mode = "replace"
         normalized_changes.append({"path": path, "content": content, "mode": mode})
     if not normalized_changes:
@@ -16798,7 +16859,7 @@ def _github_commit_batch_capability(*, changes: List[Dict[str, str]], branch: Op
         mode = item["mode"]
         desired_content = item["content"]
         final_content = desired_content
-        if mode == "append":
+        if mode in {"append", "append_unique"}:
             status_get, body_get = _github_api_json("GET", f"https://api.github.com/repos/{repo}/contents/{path}?ref={branch}", None)
             if status_get != 200 or not isinstance(body_get, dict):
                 return {"handled": True, "success": False, "provider": "github", "repo": repo, "branch": branch, "path": path, "message": f"O arquivo '{path}' não existe na branch '{branch}' para operação append."}
@@ -16808,9 +16869,19 @@ def _github_commit_batch_capability(*, changes: List[Dict[str, str]], branch: Op
             except Exception:
                 existing_text = ""
             final_content = existing_text
-            if final_content and not final_content.endswith("\n"):
-                final_content += "\n"
-            final_content += desired_content
+            desired_clean = desired_content.strip()
+            if mode == "append_unique" and desired_clean and desired_clean in existing_text:
+                final_content = existing_text
+            else:
+                if final_content and not final_content.endswith("\n"):
+                    final_content += "\n"
+                final_content += desired_content
+
+        guarded = _github_critical_source_guard(path, final_content, mode=mode, trace_id=trace_id)
+        if guarded:
+            guarded.update({"repo": repo, "branch": branch})
+            return guarded
+
         tree_entries.append({
             "path": path,
             "mode": "100644",
@@ -24289,6 +24360,38 @@ def governance_approve_patch(
 
 
 
+
+def _github_infer_executable_file_mode(item: Dict[str, Any], diff_preview: str = "") -> str:
+    """Infer a safe source-application mode for governed executable artifacts.
+
+    Historical failure mode:
+    - a proposal artifact contained only a tiny source fragment;
+    - the mode was missing or lost during persistence;
+    - the executor defaulted to replace and overwrote app/main.py.
+
+    Safe default:
+    - unified-diff/source fragments default to append_unique;
+    - explicit replace remains possible, but critical-file guards validate it later.
+    """
+    raw_mode = str((item or {}).get("mode") or "").strip().lower()
+    if raw_mode:
+        return raw_mode
+
+    content = str((item or {}).get("content") or "")
+    diff = str(diff_preview or "").strip()
+    content_head = content.lstrip()[:240]
+    looks_like_unified_diff = diff.startswith("--- a/") and "\n+++ b/" in diff
+    looks_like_fragment = (
+        content.startswith("\n")
+        or content_head.startswith("#")
+        or content_head.startswith("@app.")
+        or content_head.startswith("def ")
+    )
+    if looks_like_unified_diff or looks_like_fragment:
+        return "append_unique"
+    return "replace"
+
+
 def _github_governed_minimal_artifact_execution(
     *,
     org: str,
@@ -24400,11 +24503,11 @@ def _github_governed_minimal_artifact_execution(
         if not isinstance(item, dict):
             continue
         path = str(item.get("path") or "").strip()
-        mode = str(item.get("mode") or "replace").strip().lower() or "replace"
+        mode = _github_infer_executable_file_mode(item, diff_preview)
         content = str(item.get("content") or "")
         if not path or path.startswith("/") or "\\" in path or ".." in path:
             continue
-        if mode not in {"replace", "append"}:
+        if mode not in {"replace", "append", "append_unique"}:
             mode = "replace"
         if not content:
             continue
@@ -24829,6 +24932,7 @@ def _metatron_build_safe_comment_artifact(user_text: str = "") -> Dict[str, Any]
         "risk_level": "low",
         "rollback_plan": "Remover o comentário seguro da branch/PR governada; não há alteração funcional.",
         "constant_marker": marker,
+        "mode": "append_unique",
     }
 
 
@@ -24898,6 +25002,7 @@ def _metatron_build_self_evolution_artifact(user_text: str = "") -> Dict[str, An
         "executable_artifact_ready": True,
         "risk_level": "low",
         "rollback_plan": "Reverter a branch/PR governada; nenhuma escrita ocorre sem aprovação humana.",
+        "mode": "append_unique",
     }
 
 
