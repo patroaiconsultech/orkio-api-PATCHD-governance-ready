@@ -19,4 +19,4 @@ COPY . .
 # 1) apply Alembic migrations before the app starts
 # 2) fail fast if the database schema cannot be reconciled
 # 3) then start the API
-CMD ["sh","-c","alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080} --timeout-keep-alive ${UVICORN_TIMEOUT_KEEP_ALIVE:-75}"]
+CMD ["sh","-c","python scripts/preflight_alembic_version.py && alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port ${PORT:-8080} --timeout-keep-alive ${UVICORN_TIMEOUT_KEEP_ALIVE:-75}"]
