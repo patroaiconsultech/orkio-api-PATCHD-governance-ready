@@ -24695,8 +24695,9 @@ def _metatron_is_controlled_self_evolution_request(user_text: str) -> bool:
     if not txt.strip():
         return False
     markers = [
-        "self-evolution-test",
-        "/api/internal/self-evolution-test",
+        "self-evolution",
+        "self evolution",
+        "/api/internal/self-evolution",
         "autoevolução",
         "auto evolução",
         "proposta governada",
@@ -24708,26 +24709,95 @@ def _metatron_is_controlled_self_evolution_request(user_text: str) -> bool:
     return any(m in txt for m in markers)
 
 
-def _metatron_build_self_evolution_artifact() -> Dict[str, Any]:
+def _metatron_extract_internal_endpoint(user_text: str) -> str:
+    """Extract a safe /api/internal/... endpoint from the governance prompt.
+
+    This keeps the controlled fast-path deterministic while avoiding the old
+    hardcoded behavior that always generated /api/internal/self-evolution-test.
+    """
+    raw = str(user_text or "")
+    match = re.search(r"(/api/internal/[A-Za-z0-9_\-/]+)", raw)
+    endpoint = match.group(1).strip() if match else ""
+
+    if not endpoint:
+        txt = raw.lower()
+        if "self-evolution-health" in txt or "self evolution health" in txt:
+            endpoint = "/api/internal/self-evolution-health"
+        elif "self-evolution-test" in txt or "self evolution test" in txt:
+            endpoint = "/api/internal/self-evolution-test"
+
+    endpoint = endpoint.strip().rstrip(".,;:)]}")
+    if not endpoint.startswith("/api/internal/"):
+        endpoint = "/api/internal/self-evolution-test"
+
+    # Safety: only allow a conservative internal path shape.
+    if not re.fullmatch(r"/api/internal/[A-Za-z0-9_\-/]+", endpoint):
+        endpoint = "/api/internal/self-evolution-test"
+
+    return endpoint
+
+
+def _metatron_function_name_from_endpoint(endpoint: str) -> str:
+    tail = str(endpoint or "").rstrip("/").split("/")[-1] or "self-evolution-test"
+    fn = re.sub(r"[^A-Za-z0-9_]+", "_", tail).strip("_").lower()
+    if not fn:
+        fn = "self_evolution_test"
+    if fn[0].isdigit():
+        fn = f"internal_{fn}"
+    return fn
+
+
+def _metatron_build_self_evolution_artifact(user_text: str = "") -> Dict[str, Any]:
+    endpoint = _metatron_extract_internal_endpoint(user_text)
+    function_name = _metatron_function_name_from_endpoint(endpoint)
+    constant_marker = f"METATRON_{function_name.upper()}_ENDPOINT"
+    patch_kind = function_name.upper()
+
+    if endpoint == "/api/internal/self-evolution-health":
+        return_expr = (
+            "{\n"
+            "        \"status\": \"ok\",\n"
+            "        \"proposal\": True,\n"
+            "        \"approval\": True,\n"
+            "        \"execution\": True,\n"
+            "        \"github_pr\": True,\n"
+            "    }"
+        )
+        objective = "Criar endpoint interno de health da autoevolução controlada."
+    elif endpoint == "/api/internal/self-evolution-test":
+        return_expr = "{\"status\": \"ok\", \"mode\": \"self_evolution_test\"}"
+        objective = "Criar endpoint interno simples de validação de autoevolução controlada."
+    else:
+        mode = function_name
+        return_expr = json.dumps({"status": "ok", "mode": mode}, ensure_ascii=False)
+        objective = f"Criar endpoint interno controlado {endpoint}."
+
     source_append = (
         "\n\n"
-        "# METATRON_SELF_EVOLUTION_TEST_ENDPOINT\n"
-        "@app.get(\"/api/internal/self-evolution-test\")\n"
-        "def self_evolution_test():\n"
-        "    return {\"status\": \"ok\", \"mode\": \"self_evolution_test\"}\n"
+        f"# {constant_marker}\n"
+        f"@app.get(\"{endpoint}\")\n"
+        f"def {function_name}():\n"
+        f"    return {return_expr}\n"
     )
-    diff_preview = (
-        "--- a/app/main.py\n"
-        "+++ b/app/main.py\n"
-        "@@\n"
-        "+# METATRON_SELF_EVOLUTION_TEST_ENDPOINT\n"
-        "+@app.get(\"/api/internal/self-evolution-test\")\n"
-        "+def self_evolution_test():\n"
-        "+    return {\"status\": \"ok\", \"mode\": \"self_evolution_test\"}\n"
-    )
+
+    diff_lines = [
+        "--- a/app/main.py",
+        "+++ b/app/main.py",
+        "@@",
+        f"+# {constant_marker}",
+        f"+@app.get(\"{endpoint}\")",
+        f"+def {function_name}():",
+    ]
+    for line in return_expr.splitlines():
+        diff_lines.append(f"+    return {line}" if line.startswith("{") else f"+{line}")
+    diff_preview = "\n".join(diff_lines) + "\n"
+
     return {
         "target_path": "app/main.py",
-        "target_function": "self_evolution_test",
+        "target_function": function_name,
+        "endpoint": endpoint,
+        "objective": objective,
+        "patch_kind": patch_kind,
         "source_append": source_append,
         "diff_preview": diff_preview,
         "diff_hash": hashlib.sha256(diff_preview.encode("utf-8")).hexdigest(),
@@ -24749,7 +24819,7 @@ def _metatron_build_self_evolution_proposal_text(
         "human_approved: false\n"
         f"audit_receipt_id: {audit_receipt_id}\n\n"
         "Objetivo:\n"
-        "Criar endpoint interno simples de validação de autoevolução controlada.\n\n"
+        f"{artifact.get('objective') or 'Criar endpoint interno controlado.'}\n\n"
         "Escopo:\n"
         "- proposal_only\n"
         "- sem escrita real neste passo\n"
@@ -24759,6 +24829,8 @@ def _metatron_build_self_evolution_proposal_text(
         f"- {artifact.get('target_path')}\n\n"
         "Funções alvo:\n"
         f"- {artifact.get('target_function')}\n\n"
+        "Endpoint alvo:\n"
+        f"- {artifact.get('endpoint') or '/api/internal/self-evolution-test'}\n\n"
         "Diff preview:\n"
         f"{artifact.get('diff_preview')}\n"
         "Artifact executável:\n"
@@ -24857,9 +24929,9 @@ def _metatron_prepare_self_evolution_stream_payloads(
     client_message_id: Optional[str],
     trace_id: str,
 ) -> Dict[str, Any]:
-    artifact = _metatron_build_self_evolution_artifact()
+    artifact = _metatron_build_self_evolution_artifact(message)
     audit_receipt_id = new_id()
-    patch_id = f"EFATA777_ORKIO_SELF_EVOLUTION_TEST_{audit_receipt_id[:12].upper()}"
+    patch_id = f"EFATA777_ORKIO_{str(artifact.get('patch_kind') or 'SELF_EVOLUTION_TEST')}_{audit_receipt_id[:12].upper()}"
     approval_token = _github_approval_token_for_patch(patch_id)
 
     _get_or_create_user_message(db, org, tid, user, message, client_message_id)
