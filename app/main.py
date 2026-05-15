@@ -6498,12 +6498,78 @@ def _ensure_execution_events_schema_runtime(db: Session) -> None:
 
 
 
-def _github_token_value() -> str:
+def _github_token_value_with_source() -> tuple[str, str]:
+    """Resolve GitHub token without silently falling back to an unusable placeholder.
+
+    PATCH29: The executor can receive 404 from GitHub for a private repository when
+    no valid token reaches the API request. The previous resolver exposed only
+    token_present=True/False and made it hard to distinguish:
+    - expired/missing broker secret;
+    - Railway env not propagated;
+    - literal mapped:* placeholder;
+    - direct PAT configured in env.
+
+    This helper never logs the token value; it returns only the source label.
+    """
+    candidates: list[tuple[str, str]] = []
+
     try:
         token, _meta = resolve_github_token("control-plane:github", required=False)
-        return _clean_env(token or "")
+        candidates.append(("broker:control-plane:github", token or ""))
     except Exception:
-        return ""
+        candidates.append(("broker:control-plane:github:error", ""))
+
+    for env_name in (
+        "GITHUB_TOKEN",
+        "GITHUB_PAT",
+        "GH_TOKEN",
+        "GITHUB_ACCESS_TOKEN",
+        "GITHUB_FINE_GRAINED_TOKEN",
+    ):
+        try:
+            candidates.append((f"env:{env_name}", os.getenv(env_name, "") or ""))
+        except Exception:
+            pass
+
+    # Guardrail: GITHUB_TOKEN_REF is normally an indirection like
+    # mapped:control-plane.github. It is NOT a token. Only accept it if somebody
+    # actually pasted a PAT there.
+    try:
+        ref_value = os.getenv("GITHUB_TOKEN_REF", "") or ""
+        if ref_value.strip().startswith(("ghp_", "github_pat_", "gho_", "ghu_", "ghs_", "ghr_")):
+            candidates.append(("env:GITHUB_TOKEN_REF:direct_pat", ref_value))
+    except Exception:
+        pass
+
+    for source, raw in candidates:
+        token = _clean_env(raw or "")
+        if not token:
+            continue
+        if token.startswith("mapped:") or token.startswith("secret:"):
+            continue
+        if token.lower() in {"none", "null", "undefined", "false"}:
+            continue
+        return token, source
+
+    return "", "missing"
+
+
+def _github_token_value() -> str:
+    token, _source = _github_token_value_with_source()
+    return token
+
+
+def _github_token_diagnostic() -> Dict[str, Any]:
+    token, source = _github_token_value_with_source()
+    try:
+        fingerprint = hashlib.sha256(token.encode("utf-8")).hexdigest()[:12] if token else ""
+    except Exception:
+        fingerprint = ""
+    return {
+        "token_present": bool(token),
+        "token_source": source,
+        "token_fingerprint": fingerprint,
+    }
 
 
 
@@ -15016,6 +15082,60 @@ def _github_create_branch_capability(*, branch: str, repo_target: Optional[str] 
     # - expose a bounded diagnostic payload in the governed response.
     safe_repo = (repo or "").strip()
     safe_base_branch = re.sub(r"^refs/heads/", "", (base_branch or "").strip())
+    token_diag = _github_token_diagnostic()
+
+    # PATCH29: prove repository visibility before branch lookup. For private
+    # repositories, GitHub returns 404 when the token is absent, expired, or not
+    # authorized for that repository. Without this probe, the executor wrongly
+    # reports "branch main not found" even when the branch exists.
+    repo_probe_url = f"https://api.github.com/repos/{safe_repo}"
+    _github_log(
+        "GITHUB_REPO_PROBE_ATTEMPT",
+        repo=safe_repo,
+        url=repo_probe_url,
+        token_present=token_diag.get("token_present"),
+        token_source=token_diag.get("token_source"),
+        token_fingerprint=token_diag.get("token_fingerprint"),
+        trace_id=trace_id or "",
+    )
+    status_repo, body_repo = _github_api_json("GET", repo_probe_url, None)
+    _github_log(
+        "GITHUB_REPO_PROBE_RESULT",
+        repo=safe_repo,
+        url=repo_probe_url,
+        status=status_repo,
+        token_present=token_diag.get("token_present"),
+        token_source=token_diag.get("token_source"),
+        token_fingerprint=token_diag.get("token_fingerprint"),
+        body=(json.dumps(body_repo, ensure_ascii=False)[:900] if isinstance(body_repo, dict) else str(body_repo)[:900]),
+        trace_id=trace_id or "",
+    )
+    if status_repo != 200:
+        repo_error = ""
+        if isinstance(body_repo, dict):
+            repo_error = str(body_repo.get("message") or body_repo.get("documentation_url") or "")
+        else:
+            repo_error = str(body_repo or "")
+        return {
+            "handled": True,
+            "success": False,
+            "provider": "github",
+            "repo": safe_repo,
+            "branch": branch,
+            "base_branch": safe_base_branch,
+            "github_repo_status": status_repo,
+            "github_error": repo_error[:500],
+            "token_present": bool(token_diag.get("token_present")),
+            "token_source": token_diag.get("token_source"),
+            "token_fingerprint": token_diag.get("token_fingerprint"),
+            "message": (
+                f"Não foi possível acessar o repositório GitHub '{safe_repo}'. "
+                f"repo_status={status_repo}; github_error={repo_error[:220] or 'n/d'}; "
+                f"token_source={token_diag.get('token_source')}; "
+                f"token_present={bool(token_diag.get('token_present'))}"
+            ),
+        }
+
     ref_url = f"https://api.github.com/repos/{safe_repo}/git/ref/heads/{safe_base_branch}"
     _github_log(
         "GITHUB_BRANCH_LOOKUP_ATTEMPT",
@@ -15081,12 +15201,17 @@ def _github_create_branch_capability(*, branch: str, repo_target: Optional[str] 
             "repo": safe_repo,
             "branch": safe_base_branch,
             "base_branch": safe_base_branch,
+            "github_repo_status": status_repo,
             "github_ref_status": status_ref,
             "github_branch_status": status_branch,
             "github_error": github_error[:500],
+            "token_present": bool(token_diag.get("token_present")),
+            "token_source": token_diag.get("token_source"),
+            "token_fingerprint": token_diag.get("token_fingerprint"),
             "message": (
                 f"Não foi possível resolver o SHA da branch base '{safe_base_branch}'. "
-                f"ref_status={status_ref}; branch_status={status_branch}; github_error={github_error[:220] or 'n/d'}"
+                f"repo_status={status_repo}; ref_status={status_ref}; branch_status={status_branch}; "
+                f"github_error={github_error[:220] or 'n/d'}; token_source={token_diag.get('token_source')}"
             ),
         }
 
