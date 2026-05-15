@@ -5051,6 +5051,141 @@ def public_chat(inp: PublicChatIn, x_org_slug: Optional[str] = Header(default=No
 
 
 
+
+# ================================
+# AO-01 — Public plans + Enterprise request funnel
+# ================================
+
+class PublicEnterpriseRequestIn(BaseModel):
+    name: Optional[str] = None
+    email: Optional[str] = None
+    company: Optional[str] = None
+    phone: Optional[str] = None
+    segment: Optional[str] = None
+    challenge: Optional[str] = None
+    integrations: Optional[str] = None
+    plan_interest: Optional[str] = "enterprise"
+    urgency: Optional[str] = None
+    source: Optional[str] = "orkio_prechat"
+    context: Optional[Dict[str, Any]] = None
+
+@app.get("/api/public/plans")
+def public_plans():
+    return {
+        "ok": True,
+        "trial_days": 7,
+        "plans": [
+            {
+                "code": "essential",
+                "name": "Essencial",
+                "target": "Empresas que querem iniciar com agentes e automações principais.",
+                "features": [
+                    "Acesso ao Orkio OS",
+                    "Agentes base",
+                    "Diagnóstico inicial",
+                    "7 dias gratuitos"
+                ],
+                "cta": "Começar teste gratuito"
+            },
+            {
+                "code": "professional",
+                "name": "Professional",
+                "target": "Empresas que precisam de workflows, relatórios e inteligência operacional avançada.",
+                "features": [
+                    "Multiagentes",
+                    "Relatórios estratégicos",
+                    "Workflows avançados",
+                    "Acompanhamento de execução"
+                ],
+                "cta": "Solicitar plano Professional"
+            },
+            {
+                "code": "enterprise",
+                "name": "Enterprise / White Label",
+                "target": "Implantações personalizadas com integrações, governança ampliada e identidade da empresa.",
+                "features": [
+                    "Integrações com sistemas internos",
+                    "White label",
+                    "Governança avançada",
+                    "Implantação assistida pela PatroAI"
+                ],
+                "cta": "Solicitar proposta personalizada"
+            }
+        ]
+    }
+
+@app.post("/api/public/enterprise-request")
+def public_enterprise_request(inp: PublicEnterpriseRequestIn, x_org_slug: Optional[str] = Header(default=None), request: Request = None, db: Session = Depends(get_db)):
+    org = get_org(x_org_slug)
+    rid = new_id()
+    now = now_ts()
+    meta = {
+        "request_id": rid,
+        "source": inp.source or "orkio_prechat",
+        "name": inp.name,
+        "email": inp.email,
+        "company": inp.company,
+        "phone": inp.phone,
+        "segment": inp.segment,
+        "challenge": inp.challenge,
+        "integrations": inp.integrations,
+        "plan_interest": inp.plan_interest,
+        "urgency": inp.urgency,
+        "context": inp.context or {},
+    }
+
+    try:
+        lead = Lead(
+            id=rid,
+            org_slug=org,
+            name=(inp.name or "Lead Enterprise").strip(),
+            email=(inp.email or f"enterprise-{rid}@orkio.local").strip().lower(),
+            company=(inp.company or "Solicitação Enterprise").strip(),
+            role=(inp.plan_interest or "enterprise"),
+            segment=(inp.segment or None),
+            source=(inp.source or "orkio_prechat"),
+            ua=(request.headers.get("user-agent") if request else None),
+            created_at=now,
+        )
+        db.add(lead)
+        db.commit()
+    except Exception:
+        logger.exception("PUBLIC_ENTERPRISE_LEAD_PERSIST_FAILED")
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    subject = f"Orkio Enterprise Request — {inp.company or inp.name or rid}"
+    body = "\n".join([
+        "Nova solicitação Enterprise / White Label recebida pelo pré-chat Orkio.",
+        "",
+        f"Nome: {inp.name or ''}",
+        f"E-mail: {inp.email or ''}",
+        f"Empresa: {inp.company or ''}",
+        f"Telefone: {inp.phone or ''}",
+        f"Segmento: {inp.segment or ''}",
+        f"Plano de interesse: {inp.plan_interest or ''}",
+        f"Urgência: {inp.urgency or ''}",
+        "",
+        f"Desafio: {inp.challenge or ''}",
+        f"Integrações desejadas: {inp.integrations or ''}",
+        "",
+        "Contexto:",
+        json.dumps(inp.context or {}, ensure_ascii=False, indent=2),
+    ])
+    try:
+        _send_resend_email(RESEND_INTERNAL_TO, subject, body)
+    except Exception:
+        logger.exception("PUBLIC_ENTERPRISE_EMAIL_FAILED")
+
+    try:
+        audit(db, org, None, "public.enterprise_request", request_id=rid, path="/api/public/enterprise-request", status_code=200, latency_ms=0, meta=meta)
+    except Exception:
+        pass
+
+    return {"ok": True, "request_id": rid, "message": "Solicitação recebida. A equipe PatroAI avaliará o escopo e retornará com uma proposta."}
+
 @app.get("/api/health")
 def health():
     return {"status": "ok", "db": "ok" if db_ok() else "down", "version": APP_VERSION, "rag": RAG_MODE}
