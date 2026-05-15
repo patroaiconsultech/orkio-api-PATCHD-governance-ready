@@ -1,0 +1,30 @@
+{
+  "status": "execution_artifact_created_no_source_change",
+  "org_slug": "public",
+  "thread_id": "b1a60960d25943c5abea402db9436de8",
+  "approval_id": "apr_3f7d2f25c952",
+  "patch_id": "EFATA777_ORKIO_SELF_EVOLUTION_HEALTH_70E8066A8616",
+  "audit_receipt_id": "70e8066a86164d47b816effaad3310dd",
+  "patch_mode": "approved_apply",
+  "human_approved": true,
+  "write_allowed": true,
+  "target_files": [
+    "app/main.py"
+  ],
+  "target_functions": [],
+  "requested_actions": [
+    "create_branch",
+    "apply_patch",
+    "prepare_commit",
+    "open_pr"
+  ],
+  "source_files_modified": [
+    "app/main.py"
+  ],
+  "executable_artifact_ready": true,
+  "patch_artifact_id": "artifact_70e8066a86164d47b816effaad3310dd",
+  "diff_hash": "000aee032ff097c6ba4602fffd037019c6e672b7cf3bd054feb2a49ba4b43f8f",
+  "governance_note": "Executable source files were committed after human approval.",
+  "trace_id": "b3dd7e3da209451b8de5dfd2fc6c4118",
+  "created_at": 1778883204
+}
