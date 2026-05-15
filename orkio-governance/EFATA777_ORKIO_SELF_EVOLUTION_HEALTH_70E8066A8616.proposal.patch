@@ -1,0 +1,13 @@
+--- a/app/main.py
++++ b/app/main.py
+@@
++# METATRON_SELF_EVOLUTION_HEALTH_ENDPOINT
++@app.get("/api/internal/self-evolution-health")
++def self_evolution_health():
++    return {
++        "status": "ok",
++        "proposal": True,
++        "approval": True,
++        "execution": True,
++        "github_pr": True,
++    }
