@@ -15127,30 +15127,39 @@ _GITHUB_SEARCH_SNIPPET_LIMIT = 20
 def _github_normalize_repo_slug(value: Any) -> str:
     """Return a safe GitHub repo slug in owner/repo format.
 
-    Accepts:
-    - owner/repo
-    - https://github.com/owner/repo(.git)
-    - git@github.com:owner/repo.git
-
-    Rejects deployment domains such as Railway URLs, because those are not
-    GitHub repository identifiers and will fail at branch creation time.
+    Accepts owner/repo and github.com/git URLs. Hard-rejects deployment
+    domains such as Railway URLs, even when they look like owner/repo, because
+    those are not GitHub repository identifiers and cause false branch lookup
+    failures.
     """
     raw = _clean_env(value or "", default="")
     if not raw:
         return ""
     s = raw.strip()
+    low_raw = s.lower()
+
+    if any(marker in low_raw for marker in ("railway.app", "up.railway", "vercel.app", "render.com", "fly.dev")) and "github.com/" not in low_raw and not low_raw.startswith("git@github.com:"):
+        return ""
+
     if s.startswith("git@github.com:"):
         s = s.split("git@github.com:", 1)[1]
     elif "github.com/" in s.lower():
         s = re.split(r"github\.com/", s, flags=re.IGNORECASE, maxsplit=1)[-1]
+
     s = s.strip().strip("/")
     if s.endswith(".git"):
         s = s[:-4]
-    # remove accidental URL query/fragment
     s = s.split("?", 1)[0].split("#", 1)[0].strip("/")
+
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", s or ""):
         return ""
-    return s
+
+    owner, repo = s.split("/", 1)
+    low_repo = repo.lower()
+    if any(marker in low_repo for marker in ("railway.app", "up.railway", "vercel.app", "render.com", "fly.dev")):
+        return ""
+
+    return f"{owner}/{repo}"
 
 
 def _github_first_valid_repo_env(*names: str) -> str:
@@ -15162,11 +15171,14 @@ def _github_first_valid_repo_env(*names: str) -> str:
 
 
 def _github_backend_repo() -> str:
+    # Governed execution must prefer explicit API/backend repo variables.
+    # Legacy GITHUB_REPO is accepted only when it is a valid GitHub slug and
+    # not a Railway/domain value; _github_normalize_repo_slug enforces that.
     return _github_first_valid_repo_env(
+        "GITHUB_REPO_API",
+        "GITHUB_API_REPO",
         "GITHUB_REPO_BACKEND",
         "GITHUB_BACKEND_REPO",
-        "GITHUB_API_REPO",
-        "GITHUB_REPO_API",
         "GITHUB_REPO",
     )
 
@@ -15182,7 +15194,13 @@ def _github_frontend_repo() -> str:
 
 
 def _github_repo_config_diagnostics(*, repo_target: Optional[str] = None) -> Dict[str, Any]:
-    backend_raw = _clean_env(os.getenv("GITHUB_REPO", ""), default="")
+    backend_raw = (
+        _clean_env(os.getenv("GITHUB_REPO_API", ""), default="")
+        or _clean_env(os.getenv("GITHUB_API_REPO", ""), default="")
+        or _clean_env(os.getenv("GITHUB_REPO_BACKEND", ""), default="")
+        or _clean_env(os.getenv("GITHUB_BACKEND_REPO", ""), default="")
+        or _clean_env(os.getenv("GITHUB_REPO", ""), default="")
+    )
     frontend_raw = (
         _clean_env(os.getenv("GITHUB_REPO_WEB", ""), default="")
         or _clean_env(os.getenv("GITHUB_WEB_REPO", ""), default="")
