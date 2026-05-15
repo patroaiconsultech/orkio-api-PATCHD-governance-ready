@@ -1,0 +1,26 @@
+{
+  "status": "execution_artifact_created_no_source_change",
+  "org_slug": "public",
+  "thread_id": "a4cdc1fc24a24686849eafd9c78e62d6",
+  "approval_id": "apr_82bc78b6ec13",
+  "patch_id": "EFATA777_ORKIO_PATCH_B02DA7DD37A54501B0FF95AAB0807CAC",
+  "audit_receipt_id": "b02da7dd37a54501b0ff95aab0807cac",
+  "patch_mode": "approved_apply",
+  "human_approved": true,
+  "write_allowed": true,
+  "target_files": [],
+  "target_functions": [],
+  "requested_actions": [
+    "create_branch",
+    "apply_patch",
+    "prepare_commit",
+    "open_pr"
+  ],
+  "source_files_modified": [],
+  "executable_artifact_ready": false,
+  "patch_artifact_id": "",
+  "diff_hash": "",
+  "governance_note": "This minimal executor writes an audit artifact branch/commit/PR only; no source file is modified without an executable diff.",
+  "trace_id": "a5b433428cdf486ab64f5bccc7a16536",
+  "created_at": 1778848746
+}
