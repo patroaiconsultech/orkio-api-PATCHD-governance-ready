@@ -1,0 +1,30 @@
+{
+  "status": "execution_artifact_created_no_source_change",
+  "org_slug": "public",
+  "thread_id": "05f1b9c5ab004174b062dd3c88ae92d6",
+  "approval_id": "apr_0555dc6464e5",
+  "patch_id": "EFATA777_ORKIO_SELF_EVOLUTION_TEST_ACFA39E67AF6",
+  "audit_receipt_id": "acfa39e67af64c7d93e470034f4e6e83",
+  "patch_mode": "approved_apply",
+  "human_approved": true,
+  "write_allowed": true,
+  "target_files": [
+    "app/main.py"
+  ],
+  "target_functions": [],
+  "requested_actions": [
+    "create_branch",
+    "apply_patch",
+    "prepare_commit",
+    "open_pr"
+  ],
+  "source_files_modified": [
+    "app/main.py"
+  ],
+  "executable_artifact_ready": true,
+  "patch_artifact_id": "artifact_acfa39e67af64c7d93e470034f4e6e83",
+  "diff_hash": "d70d065785931b3865d8bca22fa32c0a256ff5914ce60d151a6af18129366746",
+  "governance_note": "Executable source files were committed after human approval.",
+  "trace_id": "dc4a86114c6b475ea874013ff84d59d8",
+  "created_at": 1778881694
+}
