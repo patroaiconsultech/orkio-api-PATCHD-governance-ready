@@ -1,0 +1,7 @@
+--- a/app/main.py
++++ b/app/main.py
+@@
++# METATRON_SELF_EVOLUTION_TEST_ENDPOINT
++@app.get("/api/internal/self-evolution-test")
++def self_evolution_test():
++    return {"status": "ok", "mode": "self_evolution_test"}
