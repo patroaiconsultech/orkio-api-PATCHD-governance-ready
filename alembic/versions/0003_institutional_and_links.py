@@ -34,6 +34,16 @@ def upgrade():
     op.execute("CREATE INDEX IF NOT EXISTS ix_agent_links_org ON agent_links (org_slug);")
     op.execute("CREATE INDEX IF NOT EXISTS ix_agent_links_source ON agent_links (source_agent_id);")
     op.execute("CREATE INDEX IF NOT EXISTS ix_agent_links_target ON agent_links (target_agent_id);")
+    op.execute(
+        """
+        DELETE FROM agent_links a
+        USING agent_links b
+        WHERE a.ctid < b.ctid
+          AND a.org_slug = b.org_slug
+          AND a.source_agent_id = b.source_agent_id
+          AND a.target_agent_id = b.target_agent_id;
+        """
+    )
     op.execute("CREATE UNIQUE INDEX IF NOT EXISTS uq_agent_links_org_src_tgt ON agent_links (org_slug, source_agent_id, target_agent_id);")
 
     # Ensure agent_knowledge table exists (best-effort) because RAG depends on it.
