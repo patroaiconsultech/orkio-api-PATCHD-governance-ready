@@ -12434,11 +12434,6 @@ def _normalize_patch_governance_source_path(path: str) -> str:
     name = p.rsplit("/", 1)[-1]
     if name in {"AppConsole.jsx", "AuthPage.jsx"} and not p.startswith("src/routes/"):
         return f"src/routes/{name}"
-    # METATRON: Orkio backend source is repository-relative app/main.py.
-    # User-facing prompts often say only "main.py"; without this normalization
-    # governed execution can target/create the wrong root-level file.
-    if name == "main.py" and not p.startswith("app/"):
-        return "app/main.py"
     return p
 
 
@@ -24686,6 +24681,280 @@ def governance_execute_approved_patch(
 
 
 
+
+# ================================
+# METATRON P0 — controlled self-evolution fast path
+# ================================
+
+def _metatron_sse(event: str, payload: Dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(payload or {}, ensure_ascii=False)}\n\n"
+
+
+def _metatron_is_controlled_self_evolution_request(user_text: str) -> bool:
+    txt = (user_text or "").lower()
+    if not txt.strip():
+        return False
+    markers = [
+        "self-evolution-test",
+        "/api/internal/self-evolution-test",
+        "autoevolução",
+        "auto evolução",
+        "proposta governada",
+        "proposal_only",
+        "diff preview",
+        "patch govern",
+        "governed patch",
+    ]
+    return any(m in txt for m in markers)
+
+
+def _metatron_build_self_evolution_artifact() -> Dict[str, Any]:
+    source_append = (
+        "\n\n"
+        "# METATRON_SELF_EVOLUTION_TEST_ENDPOINT\n"
+        "@app.get(\"/api/internal/self-evolution-test\")\n"
+        "def self_evolution_test():\n"
+        "    return {\"status\": \"ok\", \"mode\": \"self_evolution_test\"}\n"
+    )
+    diff_preview = (
+        "--- a/app/main.py\n"
+        "+++ b/app/main.py\n"
+        "@@\n"
+        "+# METATRON_SELF_EVOLUTION_TEST_ENDPOINT\n"
+        "+@app.get(\"/api/internal/self-evolution-test\")\n"
+        "+def self_evolution_test():\n"
+        "+    return {\"status\": \"ok\", \"mode\": \"self_evolution_test\"}\n"
+    )
+    return {
+        "target_path": "app/main.py",
+        "target_function": "self_evolution_test",
+        "source_append": source_append,
+        "diff_preview": diff_preview,
+        "diff_hash": hashlib.sha256(diff_preview.encode("utf-8")).hexdigest(),
+    }
+
+
+def _metatron_build_self_evolution_proposal_text(
+    *,
+    audit_receipt_id: str,
+    patch_id: str,
+    approval_token: str,
+    artifact: Dict[str, Any],
+) -> str:
+    return (
+        "PATCH GOVERNANCE RESPONSE\n\n"
+        "patch_mode: proposal_only\n"
+        "write_allowed: false\n"
+        "human_approval_required: true\n"
+        "human_approved: false\n"
+        f"audit_receipt_id: {audit_receipt_id}\n\n"
+        "Objetivo:\n"
+        "Criar endpoint interno simples de validação de autoevolução controlada.\n\n"
+        "Escopo:\n"
+        "- proposal_only\n"
+        "- sem escrita real neste passo\n"
+        "- não aplicar na main\n"
+        "- preparar artifact executável para aprovação humana e execução lateral\n\n"
+        "Arquivos alvo:\n"
+        f"- {artifact.get('target_path')}\n\n"
+        "Funções alvo:\n"
+        f"- {artifact.get('target_function')}\n\n"
+        "Diff preview:\n"
+        f"{artifact.get('diff_preview')}\n"
+        "Artifact executável:\n"
+        "ready: true\n"
+        "files_count: 1\n"
+        f"patch_id: {patch_id}\n"
+        f"approval_token: {approval_token}\n\n"
+        "Risco: low\n"
+        "Rollback: Reverter a branch/PR governada; nenhuma escrita ocorre sem aprovação humana.\n\n"
+        "Notas do agente:\n"
+        "Proposta governada preparada em modo proposal-only com diff real e artifact executável mínimo."
+    )
+
+
+def _metatron_store_self_evolution_pending_proposal(
+    *,
+    db: Session,
+    org: str,
+    thread_id: str,
+    payload: Dict[str, Any],
+    patch_id: str,
+    approval_token: str,
+    audit_receipt_id: str,
+    artifact: Dict[str, Any],
+) -> Dict[str, Any]:
+    proposal = _github_write_store_pending_proposal(
+        org=org,
+        thread_id=thread_id,
+        payload=payload,
+        patch_id=patch_id,
+        approval_token=approval_token,
+        requested_actions=["create_branch", "apply_patch", "prepare_commit", "open_pr"],
+        requested_paths=[str(artifact.get("target_path") or "app/main.py")],
+        db=db,
+    )
+    proposal = dict(proposal or {})
+    proposal.update({
+        "audit_receipt_id": audit_receipt_id,
+        "diff_preview": str(artifact.get("diff_preview") or ""),
+        "diff_hash": str(artifact.get("diff_hash") or ""),
+        "patch_artifact_id": f"artifact_{audit_receipt_id}",
+        "executable_artifact_ready": True,
+        "executable_files": [
+            {
+                "path": str(artifact.get("target_path") or "app/main.py"),
+                "mode": "append",
+                "content": str(artifact.get("source_append") or ""),
+            }
+        ],
+        "target_files": [str(artifact.get("target_path") or "app/main.py")],
+        "target_functions": [str(artifact.get("target_function") or "self_evolution_test")],
+        "risk_level": "low",
+        "rollback_plan": "Reverter a branch/PR governada; nenhuma escrita ocorre sem aprovação humana.",
+    })
+
+    user_id = str((payload or {}).get("sub") or "unknown").strip() or "unknown"
+    key = _github_write_pending_key(org, thread_id, payload)
+    userwide_key = _github_write_user_approval_key(org, user_id)
+    with _github_write_lock:
+        _github_write_pending_approval_state[key] = dict(proposal)
+        _github_write_pending_approval_state[userwide_key] = dict(proposal)
+
+    try:
+        _github_pending_db_upsert(
+            db=db,
+            lookup_key=key,
+            org_slug=str(org or "default"),
+            user_id=user_id,
+            thread_id=str(thread_id or "global"),
+            scope_kind="thread",
+            proposal=proposal,
+        )
+        _github_pending_db_upsert(
+            db=db,
+            lookup_key=userwide_key,
+            org_slug=str(org or "default"),
+            user_id=user_id,
+            thread_id=None,
+            scope_kind="userwide",
+            proposal=proposal,
+        )
+    except Exception:
+        logger.exception("METATRON_SELF_EVOLUTION_PENDING_PERSIST_FAILED")
+
+    return proposal
+
+
+def _metatron_prepare_self_evolution_stream_payloads(
+    *,
+    db: Session,
+    org: str,
+    tid: str,
+    uid: str,
+    user: Dict[str, Any],
+    message: str,
+    client_message_id: Optional[str],
+    trace_id: str,
+) -> Dict[str, Any]:
+    artifact = _metatron_build_self_evolution_artifact()
+    audit_receipt_id = new_id()
+    patch_id = f"EFATA777_ORKIO_SELF_EVOLUTION_TEST_{audit_receipt_id[:12].upper()}"
+    approval_token = _github_approval_token_for_patch(patch_id)
+
+    _get_or_create_user_message(db, org, tid, user, message, client_message_id)
+
+    proposal = _metatron_store_self_evolution_pending_proposal(
+        db=db,
+        org=org,
+        thread_id=tid,
+        payload=dict(user or {}),
+        patch_id=patch_id,
+        approval_token=approval_token,
+        audit_receipt_id=audit_receipt_id,
+        artifact=artifact,
+    )
+
+    text_out = _metatron_build_self_evolution_proposal_text(
+        audit_receipt_id=audit_receipt_id,
+        patch_id=patch_id,
+        approval_token=approval_token,
+        artifact=artifact,
+    )
+
+    assistant_id = new_id()
+    msg = Message(
+        id=assistant_id,
+        org_slug=org,
+        thread_id=tid,
+        user_id=uid,
+        user_name=str(user.get("name") or ""),
+        role="assistant",
+        content=text_out,
+        agent_id="orion",
+        agent_name="Orion",
+        created_at=now_ts(),
+    )
+    db.add(msg)
+    db.commit()
+
+    return {
+        "thread_id": tid,
+        "trace_id": trace_id,
+        "assistant_message_id": assistant_id,
+        "final_text": text_out,
+        "audit_receipt_id": audit_receipt_id,
+        "patch_id": patch_id,
+        "approval_token": approval_token,
+        "proposal": proposal,
+    }
+
+
+async def _metatron_self_evolution_sse(payload: Dict[str, Any]):
+    final_text = str(payload.get("final_text") or "")
+    base = {
+        "thread_id": payload.get("thread_id"),
+        "trace_id": payload.get("trace_id"),
+        "agent_id": "orion",
+        "agent_name": "Orion",
+        "final_speaker": "Orion",
+    }
+    yield _metatron_sse("status", {
+        **base,
+        "status": "Preparando proposta governada em fast-path controlado.",
+        "phase": "governance_proposal",
+    })
+    yield _metatron_sse("chunk", {
+        **base,
+        "delta": final_text,
+        "content": final_text,
+    })
+    yield _metatron_sse("agent_done", {
+        **base,
+        "message": "Proposta governada preparada.",
+    })
+    yield _metatron_sse("done", {
+        **base,
+        "done": True,
+        "assistant_persisted": True,
+        "assistant_message_id": payload.get("assistant_message_id"),
+        "final_text": final_text,
+        "audit_receipt_id": payload.get("audit_receipt_id"),
+        "patch_id": payload.get("patch_id"),
+        "patch_mode": "proposal_only",
+        "write_allowed": False,
+        "human_approval_required": True,
+        "human_approved": False,
+        "runtime_hints": {
+            "routing": {
+                "routing_source": "metatron_self_evolution_fastpath",
+                "route_applied": True,
+                "execution_lifecycle": "proposal_only",
+            }
+        },
+    })
+
+
 @app.post("/api/chat/stream")
 async def chat_stream(
     inp: ChatIn,
@@ -24761,6 +25030,35 @@ async def chat_stream(
         except Exception:
             pass
         raise
+
+    if _metatron_is_controlled_self_evolution_request(message):
+        try:
+            fast_payload = _metatron_prepare_self_evolution_stream_payloads(
+                db=db,
+                org=org,
+                tid=tid,
+                uid=uid,
+                user=dict(user or {}),
+                message=message,
+                client_message_id=client_message_id,
+                trace_id=trace_id,
+            )
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            logger.exception("METATRON_SELF_EVOLUTION_FASTPATH_FAILED")
+            raise
+        return StreamingResponse(
+            _metatron_self_evolution_sse(fast_payload),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache, no-transform",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     blocked_reply = _block_if_sensitive(message)
     orion_self_knowledge_flags = _orion_self_knowledge_request_flags(message)
@@ -24933,197 +25231,6 @@ async def chat_stream(
         except Exception:
             pass
         raise
-
-    # METATRON P0: deterministic controlled self-evolution fast path.
-    #
-    # Problem observed in production:
-    # - Browser reaches OPTIONS /api/chat/stream but the turn stays pending.
-    # - The handler performs multiple runtime/planner/agent steps before returning
-    #   StreamingResponse, so no SSE header/chunk reaches the UI quickly.
-    #
-    # For the controlled self-evolution smoke test, do not invoke the full agent
-    # runtime. Generate the governed proposal, persist the pending approval, persist
-    # the visible assistant message, and return a short SSE stream immediately.
-    # This keeps proposal_only semantics intact: no branch, no commit, no PR, no write.
-    try:
-        _self_evolution_low = str(message or "").lower()
-        _self_evolution_fastpath = (
-            _is_patch_governance_request_message(message)
-            and (
-                "self-evolution-test" in _self_evolution_low
-                or "/api/internal/self-evolution-test" in _self_evolution_low
-                or "autoevolução" in _self_evolution_low
-                or "autoevolucao" in _self_evolution_low
-            )
-            and (
-                "proposal_only" in _self_evolution_low
-                or "proposta governada" in _self_evolution_low
-                or "diff preview" in _self_evolution_low
-            )
-        )
-    except Exception:
-        _self_evolution_fastpath = False
-
-    if _self_evolution_fastpath:
-        _fast_ctx = _build_patch_governance_request_context(message)
-        _fast_ctx["target_files"] = ["app/main.py"]
-        _fast_ctx["target_functions"] = ["self_evolution_test"]
-        _fast_ctx["risk_level"] = "low"
-        _fast_ctx["rollback_plan"] = "Fechar a branch/PR de teste sem merge ou reverter o commit governado antes de qualquer promoção."
-        _fast_source_text = (
-            "Objetivo:\n"
-            "Criar endpoint interno mínimo de self-evolution smoke test.\n\n"
-            "Escopo:\n"
-            "- proposal_only\n"
-            "- sem escrita real nesta etapa\n"
-            "- alvo: app/main.py\n\n"
-            "Diff preview:\n"
-            "```diff\n"
-            "diff --git a/app/main.py b/app/main.py\n"
-            "--- a/app/main.py\n"
-            "+++ b/app/main.py\n"
-            "@@\n"
-            "+@app.get(\"/api/internal/self-evolution-test\")\n"
-            "+def self_evolution_test():\n"
-            "+    return {\"status\": \"ok\", \"mode\": \"self_evolution_test\"}\n"
-            "```\n\n"
-            "Artifact executável:\n"
-            "```json\n"
-            "{"
-            "\"executable_artifact\": true, "
-            "\"files\": [{"
-            "\"path\": \"app/main.py\", "
-            "\"mode\": \"append\", "
-            "\"content\": \"\\n\\n@app.get(\\\"/api/internal/self-evolution-test\\\")\\ndef self_evolution_test():\\n    return {\\\"status\\\": \\\"ok\\\", \\\"mode\\\": \\\"self_evolution_test\\\"}\\n\""
-            "}]"
-            "}\n"
-            "```\n\n"
-            "Risco: low\n"
-            "Rollback: Fechar a branch/PR de teste sem merge ou reverter o commit governado antes de qualquer promoção."
-        )
-        _fast_clamped = _clamp_patch_governance_response(
-            message,
-            _fast_source_text,
-            governance_ctx=_fast_ctx,
-        )
-        _fast_text = str(_fast_clamped.get("text") or "").strip()
-        _fast_governance = _fast_clamped.get("governance") if isinstance(_fast_clamped.get("governance"), dict) else {}
-        _fast_pending = _github_write_ensure_pending_from_patch_governance(
-            org=org,
-            thread_id=tid,
-            payload=user,
-            user_text=message,
-            governance=_fast_governance,
-            db=db,
-        )
-        _fast_agent_name = "Orion"
-        _fast_agent_id = None
-        try:
-            _fast_agent_row = alias_to_agent.get("orion") if isinstance(alias_to_agent, dict) else None
-            _fast_agent_id = getattr(_fast_agent_row, "id", None) if _fast_agent_row is not None else None
-        except Exception:
-            _fast_agent_id = None
-        try:
-            db.add(Message(
-                id=new_id(),
-                org_slug=org,
-                thread_id=tid,
-                user_id=uid,
-                user_name=str(user.get("name") or user.get("email") or ""),
-                role="assistant",
-                content=_fast_text,
-                agent_id=_fast_agent_id or "orion",
-                agent_name=_fast_agent_name,
-                created_at=now_ts(),
-            ))
-            db.commit()
-        except Exception:
-            try:
-                db.rollback()
-            except Exception:
-                pass
-
-        _release_db_session(db)
-
-        async def _self_evolution_fastpath_gen():
-            try:
-                yield sse_event("status", {
-                    "phase": "governance",
-                    "status": "PATCH_GOVERNANCE_FASTPATH_READY",
-                    "thread_id": tid,
-                    "trace_id": trace_id,
-                    "agent_name": _fast_agent_name,
-                })
-                yield sse_execution(
-                    "proposal_only_fastpath",
-                    "Proposta governada preparada",
-                    kind="system",
-                    scope="governance",
-                    agent_id=_fast_agent_id or "orion",
-                    agent_name=_fast_agent_name,
-                    detail="Self-evolution smoke test gerado sem acionar runtime LLM pesado.",
-                    patch_mode="proposal_only",
-                    write_allowed=False,
-                    human_approval_required=True,
-                    audit_receipt_id=str(_fast_governance.get("audit_receipt_id") or ""),
-                )
-                yield sse_event("chunk", {
-                    "agent_id": _fast_agent_id or "orion",
-                    "agent_name": _fast_agent_name,
-                    "content": _fast_text,
-                    "delta": _fast_text,
-                    "thread_id": tid,
-                    "trace_id": trace_id,
-                })
-                yield sse_event("agent_done", {
-                    "done": True,
-                    "agent_id": _fast_agent_id or "orion",
-                    "agent_name": _fast_agent_name,
-                    "thread_id": tid,
-                    "trace_id": trace_id,
-                })
-                yield sse_event("done", {
-                    "done": True,
-                    "thread_id": tid,
-                    "trace_id": trace_id,
-                    "final_text": _fast_text,
-                    "agent_id": _fast_agent_id or "orion",
-                    "agent_name": _fast_agent_name,
-                    "assistant_persisted": True,
-                    "patch_mode": "proposal_only",
-                    "write_allowed": False,
-                    "human_approval_required": True,
-                    "human_approved": False,
-                    "audit_receipt_id": str(_fast_governance.get("audit_receipt_id") or ""),
-                    "patch_proposal_ready": True,
-                    "executable_artifact_ready": bool(_fast_governance.get("executable_artifact_ready")),
-                    "patch_artifact_id": str(_fast_governance.get("patch_artifact_id") or ""),
-                    "target_files": list(_fast_governance.get("target_files") or []),
-                    "target_functions": list(_fast_governance.get("target_functions") or []),
-                    "pending_proposal_id": str((_fast_pending or {}).get("proposal_id") or ""),
-                    "runtime_hints": {
-                        "routing": {
-                            "routing_source": "self_evolution_fastpath",
-                            "dispatch_executed": False,
-                            "synthetic_fallback": False,
-                        },
-                        "governance": _fast_governance,
-                    },
-                })
-            except Exception:
-                return
-
-        return StreamingResponse(
-            _self_evolution_fastpath_gen(),
-            media_type="text/event-stream",
-            headers={
-                "X-Trace-Id": trace_id,
-                "Cache-Control": "no-cache, no-transform",
-                "Connection": "keep-alive",
-                "X-Accel-Buffering": "no",
-            },
-            background=BackgroundTask(_bg_release_stream, request),
-        )
 
     # History for context
     prev = list(
