@@ -24724,8 +24724,10 @@ def _metatron_is_controlled_self_evolution_request(user_text: str) -> bool:
 def _metatron_extract_internal_endpoint(user_text: str) -> str:
     """Extract a safe /api/internal/... endpoint from the governance prompt.
 
-    This keeps the controlled fast-path deterministic while avoiding the old
-    hardcoded behavior that always generated /api/internal/self-evolution-test.
+    IMPORTANT: this function must not silently fallback to
+    /api/internal/self-evolution-test. Returning an empty string is intentional:
+    the artifact builder will either choose a supported non-endpoint patch
+    (e.g. safe comment) or block the proposal as ambiguous.
     """
     raw = str(user_text or "")
     match = re.search(r"(/api/internal/[A-Za-z0-9_\-/]+)", raw)
@@ -24739,28 +24741,106 @@ def _metatron_extract_internal_endpoint(user_text: str) -> str:
             endpoint = "/api/internal/self-evolution-test"
 
     endpoint = endpoint.strip().rstrip(".,;:)]}")
-    if not endpoint.startswith("/api/internal/"):
-        endpoint = "/api/internal/self-evolution-test"
+    if not endpoint:
+        return ""
 
     # Safety: only allow a conservative internal path shape.
+    if not endpoint.startswith("/api/internal/"):
+        return ""
     if not re.fullmatch(r"/api/internal/[A-Za-z0-9_\-/]+", endpoint):
-        endpoint = "/api/internal/self-evolution-test"
+        return ""
 
     return endpoint
 
 
 def _metatron_function_name_from_endpoint(endpoint: str) -> str:
-    tail = str(endpoint or "").rstrip("/").split("/")[-1] or "self-evolution-test"
+    tail = str(endpoint or "").rstrip("/").split("/")[-1] or "internal_patch"
     fn = re.sub(r"[^A-Za-z0-9_]+", "_", tail).strip("_").lower()
     if not fn:
-        fn = "self_evolution_test"
+        fn = "internal_patch"
     if fn[0].isdigit():
         fn = f"internal_{fn}"
     return fn
 
 
+def _metatron_is_safe_comment_request(user_text: str) -> bool:
+    txt = str(user_text or "").lower()
+    if not txt.strip():
+        return False
+    comment_markers = [
+        "comentário seguro",
+        "comentario seguro",
+        "safe comment",
+        "comentário em app/main.py",
+        "comentario em app/main.py",
+        "adicionar um comentário",
+        "adicionar comentario",
+        "add a comment",
+    ]
+    file_markers = ["app/main.py", "main.py"]
+    return any(m in txt for m in comment_markers) and any(m in txt for m in file_markers)
+
+
+def _metatron_build_blocked_artifact(user_text: str = "") -> Dict[str, Any]:
+    diff_preview = (
+        "--- a/app/main.py\n"
+        "+++ b/app/main.py\n"
+        "@@\n"
+        "# proposal_blocked_ambiguous_target\n"
+        "# Nenhuma alteração executável foi preparada.\n"
+        "# Motivo: o pedido governado não informou um alvo seguro reconhecido.\n"
+    )
+    return {
+        "target_path": "app/main.py",
+        "target_function": "não aplicável",
+        "endpoint": "não aplicável",
+        "objective": "Bloquear proposta governada ambígua sem artifact executável seguro.",
+        "patch_kind": "AMBIGUOUS_TARGET",
+        "source_append": "",
+        "diff_preview": diff_preview,
+        "diff_hash": hashlib.sha256(diff_preview.encode("utf-8")).hexdigest(),
+        "executable_artifact_ready": False,
+        "risk_level": "medium",
+        "rollback_plan": "Nenhum rollback necessário; nenhuma escrita foi preparada.",
+        "block_code": "proposal_blocked_ambiguous_target",
+    }
+
+
+def _metatron_build_safe_comment_artifact(user_text: str = "") -> Dict[str, Any]:
+    marker = "METATRON_SAFE_COMMENT"
+    comment = "# METATRON_SAFE_COMMENT: Governed proposal-only dry-run marker. No runtime behavior changed."
+    source_append = f"\n\n{comment}\n"
+    diff_preview = (
+        "--- a/app/main.py\n"
+        "+++ b/app/main.py\n"
+        "@@\n"
+        f"+{comment}\n"
+    )
+    return {
+        "target_path": "app/main.py",
+        "target_function": "comentario_seguro",
+        "endpoint": "não aplicável",
+        "objective": "Adicionar comentário seguro de dry-run governado sem alterar comportamento em runtime.",
+        "patch_kind": "SAFE_COMMENT",
+        "source_append": source_append,
+        "diff_preview": diff_preview,
+        "diff_hash": hashlib.sha256(diff_preview.encode("utf-8")).hexdigest(),
+        "executable_artifact_ready": True,
+        "risk_level": "low",
+        "rollback_plan": "Remover o comentário seguro da branch/PR governada; não há alteração funcional.",
+        "constant_marker": marker,
+    }
+
+
 def _metatron_build_self_evolution_artifact(user_text: str = "") -> Dict[str, Any]:
+    # First handle supported non-endpoint dry-run patches.
+    if _metatron_is_safe_comment_request(user_text):
+        return _metatron_build_safe_comment_artifact(user_text)
+
     endpoint = _metatron_extract_internal_endpoint(user_text)
+    if not endpoint:
+        return _metatron_build_blocked_artifact(user_text)
+
     function_name = _metatron_function_name_from_endpoint(endpoint)
     constant_marker = f"METATRON_{function_name.upper()}_ENDPOINT"
     patch_kind = function_name.upper()
@@ -24780,6 +24860,8 @@ def _metatron_build_self_evolution_artifact(user_text: str = "") -> Dict[str, An
         return_expr = "{\"status\": \"ok\", \"mode\": \"self_evolution_test\"}"
         objective = "Criar endpoint interno simples de validação de autoevolução controlada."
     else:
+        # Generic endpoint proposals are allowed only when the endpoint was
+        # explicitly requested as /api/internal/... in the prompt.
         mode = function_name
         return_expr = json.dumps({"status": "ok", "mode": mode}, ensure_ascii=False)
         objective = f"Criar endpoint interno controlado {endpoint}."
@@ -24813,6 +24895,9 @@ def _metatron_build_self_evolution_artifact(user_text: str = "") -> Dict[str, An
         "source_append": source_append,
         "diff_preview": diff_preview,
         "diff_hash": hashlib.sha256(diff_preview.encode("utf-8")).hexdigest(),
+        "executable_artifact_ready": True,
+        "risk_level": "low",
+        "rollback_plan": "Reverter a branch/PR governada; nenhuma escrita ocorre sem aprovação humana.",
     }
 
 
@@ -24823,6 +24908,46 @@ def _metatron_build_self_evolution_proposal_text(
     approval_token: str,
     artifact: Dict[str, Any],
 ) -> str:
+    executable_ready = bool(artifact.get("executable_artifact_ready", True))
+    target_path = str(artifact.get("target_path") or "app/main.py")
+    target_function = str(artifact.get("target_function") or "não aplicável")
+    endpoint = str(artifact.get("endpoint") or "não aplicável")
+    risk = str(artifact.get("risk_level") or ("low" if executable_ready else "medium"))
+    rollback = str(artifact.get("rollback_plan") or "Reverter a branch/PR governada; nenhuma escrita ocorre sem aprovação humana.")
+
+    if not executable_ready:
+        return (
+            "PATCH GOVERNANCE RESPONSE\n\n"
+            "patch_mode: proposal_blocked\n"
+            "write_allowed: false\n"
+            "human_approval_required: false\n"
+            "human_approved: false\n"
+            f"audit_receipt_id: {audit_receipt_id}\n\n"
+            "Objetivo:\n"
+            f"{artifact.get('objective') or 'Bloquear proposta ambígua sem artifact executável seguro.'}\n\n"
+            "Escopo:\n"
+            "- proposal_only\n"
+            "- sem escrita real\n"
+            "- sem branch\n"
+            "- sem commit\n"
+            "- sem pull request\n\n"
+            "Arquivos alvo:\n"
+            f"- {target_path}\n\n"
+            "Funções alvo:\n"
+            f"- {target_function}\n\n"
+            "Endpoint alvo:\n"
+            f"- {endpoint}\n\n"
+            "Diff preview:\n"
+            f"{artifact.get('diff_preview')}\n"
+            "Artifact executável:\n"
+            "ready: false\n"
+            f"motivo: {artifact.get('block_code') or 'proposal_blocked_ambiguous_target'}\n\n"
+            f"Risco: {risk}\n"
+            f"Rollback: {rollback}\n\n"
+            "Notas do agente:\n"
+            "Proposta bloqueada porque o alvo solicitado não corresponde a um artifact governado seguro conhecido."
+        )
+
     return (
         "PATCH GOVERNANCE RESPONSE\n\n"
         "patch_mode: proposal_only\n"
@@ -24831,18 +24956,18 @@ def _metatron_build_self_evolution_proposal_text(
         "human_approved: false\n"
         f"audit_receipt_id: {audit_receipt_id}\n\n"
         "Objetivo:\n"
-        f"{artifact.get('objective') or 'Criar endpoint interno controlado.'}\n\n"
+        f"{artifact.get('objective') or 'Criar patch interno controlado.'}\n\n"
         "Escopo:\n"
         "- proposal_only\n"
         "- sem escrita real neste passo\n"
         "- não aplicar na main\n"
         "- preparar artifact executável para aprovação humana e execução lateral\n\n"
         "Arquivos alvo:\n"
-        f"- {artifact.get('target_path')}\n\n"
+        f"- {target_path}\n\n"
         "Funções alvo:\n"
-        f"- {artifact.get('target_function')}\n\n"
+        f"- {target_function}\n\n"
         "Endpoint alvo:\n"
-        f"- {artifact.get('endpoint') or '/api/internal/self-evolution-test'}\n\n"
+        f"- {endpoint}\n\n"
         "Diff preview:\n"
         f"{artifact.get('diff_preview')}\n"
         "Artifact executável:\n"
@@ -24850,8 +24975,8 @@ def _metatron_build_self_evolution_proposal_text(
         "files_count: 1\n"
         f"patch_id: {patch_id}\n"
         f"approval_token: {approval_token}\n\n"
-        "Risco: low\n"
-        "Rollback: Reverter a branch/PR governada; nenhuma escrita ocorre sem aprovação humana.\n\n"
+        f"Risco: {risk}\n"
+        f"Rollback: {rollback}\n\n"
         "Notas do agente:\n"
         "Proposta governada preparada em modo proposal-only com diff real e artifact executável mínimo."
     )
@@ -24868,6 +24993,31 @@ def _metatron_store_self_evolution_pending_proposal(
     audit_receipt_id: str,
     artifact: Dict[str, Any],
 ) -> Dict[str, Any]:
+    executable_ready = bool(artifact.get("executable_artifact_ready", True))
+    source_append = str(artifact.get("source_append") or "")
+    target_path = str(artifact.get("target_path") or "app/main.py")
+
+    if not executable_ready or not source_append.strip():
+        # Blocked/ambiguous proposals must not create an executable approval.
+        return {
+            "audit_receipt_id": audit_receipt_id,
+            "patch_id": patch_id,
+            "patch_mode": "proposal_blocked",
+            "write_allowed": False,
+            "human_approval_required": False,
+            "human_approved": False,
+            "diff_preview": str(artifact.get("diff_preview") or ""),
+            "diff_hash": str(artifact.get("diff_hash") or ""),
+            "patch_artifact_id": "",
+            "executable_artifact_ready": False,
+            "executable_files": [],
+            "target_files": [target_path],
+            "target_functions": [str(artifact.get("target_function") or "não aplicável")],
+            "risk_level": str(artifact.get("risk_level") or "medium"),
+            "rollback_plan": str(artifact.get("rollback_plan") or "Nenhum rollback necessário."),
+            "block_code": str(artifact.get("block_code") or "proposal_blocked_ambiguous_target"),
+        }
+
     proposal = _github_write_store_pending_proposal(
         org=org,
         thread_id=thread_id,
@@ -24875,7 +25025,7 @@ def _metatron_store_self_evolution_pending_proposal(
         patch_id=patch_id,
         approval_token=approval_token,
         requested_actions=["create_branch", "apply_patch", "prepare_commit", "open_pr"],
-        requested_paths=[str(artifact.get("target_path") or "app/main.py")],
+        requested_paths=[target_path],
         db=db,
     )
     proposal = dict(proposal or {})
@@ -24887,15 +25037,15 @@ def _metatron_store_self_evolution_pending_proposal(
         "executable_artifact_ready": True,
         "executable_files": [
             {
-                "path": str(artifact.get("target_path") or "app/main.py"),
-                "mode": "append",
-                "content": str(artifact.get("source_append") or ""),
+                "path": target_path,
+                "mode": str(artifact.get("mode") or "append"),
+                "content": source_append,
             }
         ],
-        "target_files": [str(artifact.get("target_path") or "app/main.py")],
-        "target_functions": [str(artifact.get("target_function") or "self_evolution_test")],
-        "risk_level": "low",
-        "rollback_plan": "Reverter a branch/PR governada; nenhuma escrita ocorre sem aprovação humana.",
+        "target_files": [target_path],
+        "target_functions": [str(artifact.get("target_function") or "não aplicável")],
+        "risk_level": str(artifact.get("risk_level") or "low"),
+        "rollback_plan": str(artifact.get("rollback_plan") or "Reverter a branch/PR governada; nenhuma escrita ocorre sem aprovação humana."),
     })
 
     user_id = str((payload or {}).get("sub") or "unknown").strip() or "unknown"
@@ -24943,8 +25093,10 @@ def _metatron_prepare_self_evolution_stream_payloads(
 ) -> Dict[str, Any]:
     artifact = _metatron_build_self_evolution_artifact(message)
     audit_receipt_id = new_id()
-    patch_id = f"EFATA777_ORKIO_{str(artifact.get('patch_kind') or 'SELF_EVOLUTION_TEST')}_{audit_receipt_id[:12].upper()}"
-    approval_token = _github_approval_token_for_patch(patch_id)
+    executable_ready = bool(artifact.get("executable_artifact_ready", True))
+    patch_kind = str(artifact.get("patch_kind") or ("SELF_EVOLUTION_TEST" if executable_ready else "AMBIGUOUS_TARGET"))
+    patch_id = f"EFATA777_ORKIO_{patch_kind}_{audit_receipt_id[:12].upper()}"
+    approval_token = _github_approval_token_for_patch(patch_id) if executable_ready else ""
 
     _get_or_create_user_message(db, org, tid, user, message, client_message_id)
 
