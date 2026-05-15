@@ -24909,9 +24909,57 @@ def _metatron_build_blocked_artifact(user_text: str = "") -> Dict[str, Any]:
     }
 
 
+def _metatron_extract_expected_safe_comment(user_text: str = "") -> Optional[str]:
+    """
+    Extracts an explicitly requested safe Python comment from the governance prompt.
+
+    This prevents the proposal generator from silently replacing a human-provided
+    marker with the default METATRON_SAFE_COMMENT template. Only a single-line
+    Python comment is accepted here because this path is intentionally limited to
+    safe dry-run comments in app/main.py.
+    """
+    raw = str(user_text or "")
+    if not raw.strip():
+        return None
+
+    # Prefer the first explicit Python comment after "Código esperado:" when present.
+    expected_match = re.search(
+        r"(?is)c[oó]digo\s+esperado\s*:\s*(#[^\r\n]+)",
+        raw,
+    )
+    if expected_match:
+        candidate = expected_match.group(1).strip()
+    else:
+        # Fallback: accept a clear METATRON safe comment anywhere in the prompt.
+        marker_match = re.search(
+            r"(?m)^\s*(#\s*METATRON_[A-Z0-9_]+[^\r\n]*)\s*$",
+            raw,
+        )
+        candidate = marker_match.group(1).strip() if marker_match else ""
+
+    if not candidate:
+        return None
+    if not candidate.startswith("#"):
+        return None
+    if "\n" in candidate or "\r" in candidate:
+        return None
+
+    # Guardrails: keep this path comment-only and explicitly Metatron-scoped.
+    upper = candidate.upper()
+    if "METATRON_" not in upper:
+        return None
+    if len(candidate) > 240:
+        return None
+    return candidate
+
+
 def _metatron_build_safe_comment_artifact(user_text: str = "") -> Dict[str, Any]:
-    marker = "METATRON_SAFE_COMMENT"
-    comment = "# METATRON_SAFE_COMMENT: Governed proposal-only dry-run marker. No runtime behavior changed."
+    default_comment = "# METATRON_SAFE_COMMENT: Governed proposal-only dry-run marker. No runtime behavior changed."
+    comment = _metatron_extract_expected_safe_comment(user_text) or default_comment
+
+    marker_match = re.search(r"METATRON_[A-Z0-9_]+", comment.upper())
+    marker = marker_match.group(0) if marker_match else "METATRON_SAFE_COMMENT"
+
     source_append = f"\n\n{comment}\n"
     diff_preview = (
         "--- a/app/main.py\n"
