@@ -82,6 +82,29 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
+
+        # AO-01 safety reconcile:
+        # Alembic stores the current migration revision in alembic_version.version_num.
+        # Some Orkio migration identifiers are longer than the default VARCHAR(32).
+        # Without this widening, deploy can crash with:
+        # psycopg2.errors.StringDataRightTruncation: value too long for type character varying(32)
+        try:
+            has_alembic = connection.execute(
+                text("select to_regclass('public.alembic_version')")
+            ).scalar()
+
+            if has_alembic:
+                connection.execute(
+                    text(
+                        "ALTER TABLE alembic_version "
+                        "ALTER COLUMN version_num TYPE VARCHAR(128)"
+                    )
+                )
+                connection.commit()
+        except Exception:
+            # Nunca derrubar migrations por causa do ajuste defensivo.
+            pass
+
         # Recovery de produção:
         # Se o schema já existe (ex.: tabela users),
         # e a tabela alembic_version existe mas está vazia,
