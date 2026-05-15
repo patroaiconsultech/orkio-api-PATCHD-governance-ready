@@ -1,152 +1,115 @@
-from __future__ import annotations
+"""PATCH v7.3.0 — governed evolution core
 
-import os
-from logging.config import fileConfig
+Revision ID: 0034_patch_governed_evolution_core
+Revises: 0033_patch_hybrid_wallet_billing
+Create Date: 2026-04-20
 
-from alembic import context
-from sqlalchemy import engine_from_config, pool, text
+AO-01 reconcile note:
+This migration is intentionally idempotent for production databases that
+already received part of the governed evolution schema through boot-time
+reconciliation or previous failed deploy attempts.
+"""
+from alembic import op
+import sqlalchemy as sa
 
-from app.db import Base
-from app import models  # noqa: F401
-
-
-config = context.config
-
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
-
-target_metadata = Base.metadata
-
-
-def _clean_env_value(value: str | None) -> str:
-    if value is None:
-        return ""
-    return value.strip().strip('"').strip("'")
+revision = "0034_patch_governed_evolution_core"
+down_revision = "0033_patch_hybrid_wallet_billing"
+branch_labels = None
+depends_on = None
 
 
-def _db_url() -> str:
-    """
-    Resolve a database URL compatible with Railway / SQLAlchemy / Alembic.
+def _table_exists(table_name: str) -> bool:
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    return table_name in inspector.get_table_names()
 
-    Priority:
-    1. DATABASE_PUBLIC_URL
-    2. DATABASE_URL_PUBLIC
-    3. DATABASE_URL
-    """
-    url = (
-        _clean_env_value(os.getenv("DATABASE_PUBLIC_URL"))
-        or _clean_env_value(os.getenv("DATABASE_URL_PUBLIC"))
-        or _clean_env_value(os.getenv("DATABASE_URL"))
-    )
 
-    if not url:
-        raise RuntimeError(
-            "Alembic could not resolve a database URL. "
-            "Set DATABASE_PUBLIC_URL, DATABASE_URL_PUBLIC, or DATABASE_URL."
+def _index_exists(table_name: str, index_name: str) -> bool:
+    bind = op.get_bind()
+    inspector = sa.inspect(bind)
+    try:
+        return any(idx.get("name") == index_name for idx in inspector.get_indexes(table_name))
+    except Exception:
+        return False
+
+
+def upgrade():
+    if not _table_exists("evolution_proposals"):
+        op.create_table(
+            "evolution_proposals",
+            sa.Column("id", sa.String(), primary_key=True),
+            sa.Column("org_slug", sa.String(), nullable=False, server_default="system"),
+            sa.Column("fingerprint", sa.String(), nullable=False),
+            sa.Column("code", sa.String(), nullable=False),
+            sa.Column("severity", sa.String(), nullable=False),
+            sa.Column("category", sa.String(), nullable=False),
+            sa.Column("source", sa.String(), nullable=False),
+            sa.Column("action", sa.String(), nullable=False),
+            sa.Column("status", sa.String(), nullable=False, server_default="awaiting_master_approval"),
+            sa.Column("title", sa.String(), nullable=True),
+            sa.Column("summary", sa.Text(), nullable=True),
+            sa.Column("finding_json", sa.Text(), nullable=True),
+            sa.Column("issue_json", sa.Text(), nullable=True),
+            sa.Column("decision_json", sa.Text(), nullable=True),
+            sa.Column("approval_note", sa.Text(), nullable=True),
+            sa.Column("rejection_note", sa.Text(), nullable=True),
+            sa.Column("first_detected_at", sa.BigInteger(), nullable=False),
+            sa.Column("last_detected_at", sa.BigInteger(), nullable=False),
+            sa.Column("detected_count", sa.Integer(), nullable=False, server_default="1"),
+            sa.Column("approved_by", sa.String(), nullable=True),
+            sa.Column("approved_at", sa.BigInteger(), nullable=True),
+            sa.Column("rejected_by", sa.String(), nullable=True),
+            sa.Column("rejected_at", sa.BigInteger(), nullable=True),
+            sa.Column("last_trace_id", sa.String(), nullable=True),
+            sa.Column("last_execution_status", sa.String(), nullable=True),
+            sa.Column("created_at", sa.BigInteger(), nullable=False),
+            sa.Column("updated_at", sa.BigInteger(), nullable=False),
         )
 
-    # Normalize Railway internal hostname casing
-    url = url.replace("Postgres.railway.internal", "postgres.railway.internal")
+    if not _index_exists("evolution_proposals", "ix_evolution_proposals_org_status"):
+        op.create_index("ix_evolution_proposals_org_status", "evolution_proposals", ["org_slug", "status"])
+    if not _index_exists("evolution_proposals", "ix_evolution_proposals_status_updated"):
+        op.create_index("ix_evolution_proposals_status_updated", "evolution_proposals", ["status", "updated_at"])
+    if not _index_exists("evolution_proposals", "ux_evolution_proposals_fingerprint"):
+        op.create_index("ux_evolution_proposals_fingerprint", "evolution_proposals", ["fingerprint"], unique=True)
 
-    # Normalize SQLAlchemy driver prefix
-    if url.startswith("postgres://"):
-        url = "postgresql://" + url[len("postgres://"):]
-
-    return url
-
-
-def run_migrations_offline() -> None:
-    url = _db_url()
-
-    context.configure(
-        url=url,
-        target_metadata=target_metadata,
-        literal_binds=True,
-        dialect_opts={"paramstyle": "named"},
-        compare_type=True,
-        compare_server_default=True,
-    )
-
-    with context.begin_transaction():
-        context.run_migrations()
-
-
-def run_migrations_online() -> None:
-    configuration = config.get_section(config.config_ini_section) or {}
-    configuration["sqlalchemy.url"] = _db_url()
-
-    connectable = engine_from_config(
-        configuration,
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
-
-    with connectable.connect() as connection:
-
-        # AO-01 safety reconcile:
-        # Alembic stores the current migration revision in alembic_version.version_num.
-        # Some Orkio migration identifiers are longer than the default VARCHAR(32).
-        # Without this widening, deploy can crash with:
-        # psycopg2.errors.StringDataRightTruncation: value too long for type character varying(32)
-        try:
-            has_alembic = connection.execute(
-                text("select to_regclass('public.alembic_version')")
-            ).scalar()
-
-            if has_alembic:
-                connection.execute(
-                    text(
-                        "ALTER TABLE alembic_version "
-                        "ALTER COLUMN version_num TYPE VARCHAR(128)"
-                    )
-                )
-                connection.commit()
-        except Exception:
-            # Nunca derrubar migrations por causa do ajuste defensivo.
-            pass
-
-        # Recovery de produção:
-        # Se o schema já existe (ex.: tabela users),
-        # e a tabela alembic_version existe mas está vazia,
-        # grava a revisão correta para impedir replay do 0001_init.
-        try:
-            has_users = connection.execute(
-                text("select to_regclass('public.users')")
-            ).scalar()
-
-            has_alembic = connection.execute(
-                text("select to_regclass('public.alembic_version')")
-            ).scalar()
-
-            if has_users and has_alembic:
-                count = connection.execute(
-                    text("select count(*) from alembic_version")
-                ).scalar()
-
-                if count == 0:
-                    connection.execute(
-                        text(
-                            "insert into alembic_version (version_num) "
-                            "values ('0026_patch_v64_realtime_schema_reconcile')"
-                        )
-                    )
-                    connection.commit()
-        except Exception:
-            # Nunca derrubar migrations por causa do recovery defensivo
-            pass
-
-        context.configure(
-            connection=connection,
-            target_metadata=target_metadata,
-            compare_type=True,
-            compare_server_default=True,
+    if not _table_exists("evolution_executions"):
+        op.create_table(
+            "evolution_executions",
+            sa.Column("id", sa.String(), primary_key=True),
+            sa.Column("org_slug", sa.String(), nullable=False, server_default="system"),
+            sa.Column("proposal_id", sa.String(), nullable=False),
+            sa.Column("status", sa.String(), nullable=False),
+            sa.Column("mode", sa.String(), nullable=False, server_default="manual"),
+            sa.Column("actor_ref", sa.String(), nullable=True),
+            sa.Column("trace_id", sa.String(), nullable=True),
+            sa.Column("result_json", sa.Text(), nullable=True),
+            sa.Column("error_text", sa.Text(), nullable=True),
+            sa.Column("started_at", sa.BigInteger(), nullable=True),
+            sa.Column("completed_at", sa.BigInteger(), nullable=True),
+            sa.Column("created_at", sa.BigInteger(), nullable=False),
+            sa.Column("updated_at", sa.BigInteger(), nullable=False),
         )
 
-        with context.begin_transaction():
-            context.run_migrations()
+    if not _index_exists("evolution_executions", "ix_evolution_executions_proposal_created"):
+        op.create_index("ix_evolution_executions_proposal_created", "evolution_executions", ["proposal_id", "created_at"])
+    if not _index_exists("evolution_executions", "ix_evolution_executions_status_created"):
+        op.create_index("ix_evolution_executions_status_created", "evolution_executions", ["status", "created_at"])
 
 
-if context.is_offline_mode():
-    run_migrations_offline()
-else:
-    run_migrations_online()
+def downgrade():
+    if _table_exists("evolution_executions"):
+        if _index_exists("evolution_executions", "ix_evolution_executions_status_created"):
+            op.drop_index("ix_evolution_executions_status_created", table_name="evolution_executions")
+        if _index_exists("evolution_executions", "ix_evolution_executions_proposal_created"):
+            op.drop_index("ix_evolution_executions_proposal_created", table_name="evolution_executions")
+        op.drop_table("evolution_executions")
+
+    if _table_exists("evolution_proposals"):
+        if _index_exists("evolution_proposals", "ux_evolution_proposals_fingerprint"):
+            op.drop_index("ux_evolution_proposals_fingerprint", table_name="evolution_proposals")
+        if _index_exists("evolution_proposals", "ix_evolution_proposals_status_updated"):
+            op.drop_index("ix_evolution_proposals_status_updated", table_name="evolution_proposals")
+        if _index_exists("evolution_proposals", "ix_evolution_proposals_org_status"):
+            op.drop_index("ix_evolution_proposals_org_status", table_name="evolution_proposals")
+        op.drop_table("evolution_proposals")
