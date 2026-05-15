@@ -15002,30 +15002,92 @@ def _github_create_branch_capability(*, branch: str, repo_target: Optional[str] 
             "message": "GitHub capability não está habilitada no ambiente.",
         }
 
-    ref_url = f"https://api.github.com/repos/{repo}/git/ref/heads/{base_branch}"
+    # PATCH28: explicit GitHub branch lookup diagnostics + fallback.
+    #
+    # Why this exists:
+    # The previous response collapsed all GitHub lookup failures into
+    # "base branch not found", which hid the real cause: wrong repo, bad token
+    # scope, expired token, URL encoding, or an unexpected API payload.
+    #
+    # Contract:
+    # - never proceed without a resolved base SHA;
+    # - log exact URL/status/body for the branch lookup;
+    # - try both GitHub reference API and branch API;
+    # - expose a bounded diagnostic payload in the governed response.
+    safe_repo = (repo or "").strip()
+    safe_base_branch = re.sub(r"^refs/heads/", "", (base_branch or "").strip())
+    ref_url = f"https://api.github.com/repos/{safe_repo}/git/ref/heads/{safe_base_branch}"
+    _github_log(
+        "GITHUB_BRANCH_LOOKUP_ATTEMPT",
+        repo=safe_repo,
+        base_branch=safe_base_branch,
+        url=ref_url,
+        token_present=bool(token),
+        trace_id=trace_id or "",
+    )
     status_ref, body_ref = _github_api_json("GET", ref_url, None)
-    if status_ref != 200:
-        return {
-            "handled": True,
-            "success": False,
-            "provider": "github",
-            "repo": repo,
-            "branch": base_branch,
-            "message": f"Não foi possível localizar a branch base '{base_branch}' no repositório configurado.",
-        }
+    _github_log(
+        "GITHUB_BRANCH_LOOKUP_RESULT",
+        repo=safe_repo,
+        base_branch=safe_base_branch,
+        url=ref_url,
+        status=status_ref,
+        body=(json.dumps(body_ref, ensure_ascii=False)[:900] if isinstance(body_ref, dict) else str(body_ref)[:900]),
+        trace_id=trace_id or "",
+    )
 
     try:
-        base_sha = (((body_ref or {}).get("object") or {}).get("sha") or "").strip()
+        base_sha = (((body_ref or {}).get("object") or {}).get("sha") or "").strip() if status_ref == 200 else ""
     except Exception:
         base_sha = ""
+
+    branch_url = f"https://api.github.com/repos/{safe_repo}/branches/{safe_base_branch}"
+    status_branch = 0
+    body_branch: Dict[str, Any] = {}
     if not base_sha:
+        _github_log(
+            "GITHUB_BRANCH_LOOKUP_FALLBACK_ATTEMPT",
+            repo=safe_repo,
+            base_branch=safe_base_branch,
+            url=branch_url,
+            token_present=bool(token),
+            trace_id=trace_id or "",
+        )
+        status_branch, body_branch = _github_api_json("GET", branch_url, None)
+        _github_log(
+            "GITHUB_BRANCH_LOOKUP_FALLBACK_RESULT",
+            repo=safe_repo,
+            base_branch=safe_base_branch,
+            url=branch_url,
+            status=status_branch,
+            body=(json.dumps(body_branch, ensure_ascii=False)[:900] if isinstance(body_branch, dict) else str(body_branch)[:900]),
+            trace_id=trace_id or "",
+        )
+        try:
+            base_sha = (((body_branch or {}).get("commit") or {}).get("sha") or "").strip() if status_branch == 200 else ""
+        except Exception:
+            base_sha = ""
+
+    if not base_sha:
+        github_error = ""
+        if isinstance(body_branch, dict) and body_branch.get("message"):
+            github_error = str(body_branch.get("message") or "")
+        elif isinstance(body_ref, dict) and body_ref.get("message"):
+            github_error = str(body_ref.get("message") or "")
         return {
             "handled": True,
             "success": False,
             "provider": "github",
-            "repo": repo,
-            "branch": base_branch,
-            "message": "Não foi possível resolver o SHA da branch base para criar a nova branch.",
+            "repo": safe_repo,
+            "branch": safe_base_branch,
+            "base_branch": safe_base_branch,
+            "github_ref_status": status_ref,
+            "github_branch_status": status_branch,
+            "github_error": github_error[:500],
+            "message": (
+                f"Não foi possível resolver o SHA da branch base '{safe_base_branch}'. "
+                f"ref_status={status_ref}; branch_status={status_branch}; github_error={github_error[:220] or 'n/d'}"
+            ),
         }
 
     exists_url = f"https://api.github.com/repos/{repo}/git/ref/heads/{branch}"
