@@ -8326,6 +8326,121 @@ def _github_write_get_active_approval(org: str, thread_id: Optional[str], payloa
         return None
 
 
+def _github_write_claim_active_approval_for_execution(
+    org: str,
+    thread_id: Optional[str],
+    payload: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """Atomically claim the active approval for exactly one execution.
+
+    This is the runtime idempotency gate for the side-channel executor. It
+    prevents stale approvals and double-click/race conditions from opening
+    duplicated branches/commits/PRs for the same approval_id/patch_id.
+    """
+    _github_write_bootstrap_state()
+    user_id = str((payload or {}).get("sub") or "").strip()
+    thread_key = _github_write_approval_key(org, thread_id, user_id)
+    userwide_key = _github_write_user_approval_key(org, user_id)
+    now = now_ts()
+    with _github_write_lock:
+        _github_write_cleanup_locked()
+        source_key = ""
+        item = _github_write_approval_state.get(thread_key)
+        if isinstance(item, dict):
+            source_key = thread_key
+        else:
+            item = _github_write_approval_state.get(userwide_key)
+            if isinstance(item, dict):
+                source_key = userwide_key
+
+        if not isinstance(item, dict) or not item:
+            return {"ok": False, "status": "execution_blocked_no_active_approval", "approval": None}
+
+        approval = dict(item)
+        if bool(approval.get("execution_consumed")) or str(approval.get("execution_status") or "").lower() in {"executed", "completed", "consumed"}:
+            return {"ok": False, "status": "execution_blocked_approval_already_consumed", "approval": approval}
+        if bool(approval.get("execution_claimed")) or str(approval.get("execution_status") or "").lower() in {"in_progress", "running"}:
+            return {"ok": False, "status": "execution_blocked_approval_execution_in_progress", "approval": approval}
+
+        approval["execution_claimed"] = True
+        approval["execution_status"] = "in_progress"
+        approval["execution_claimed_at"] = now
+        approval["execution_claimed_thread_id"] = str(thread_id or "global")
+        _github_write_approval_state[thread_key] = dict(approval)
+        _github_write_approval_state[userwide_key] = dict(approval)
+        if source_key and source_key not in {thread_key, userwide_key}:
+            _github_write_approval_state[source_key] = dict(approval)
+        return {"ok": True, "status": "execution_claimed", "approval": dict(approval)}
+
+
+def _github_write_release_claimed_approval_after_failure(
+    org: str,
+    thread_id: Optional[str],
+    payload: Optional[Dict[str, Any]],
+    approval: Optional[Dict[str, Any]],
+) -> None:
+    """Release the idempotency claim only when execution did not complete.
+
+    This allows a human to retry after a real failure, while still blocking
+    duplicate successful executions.
+    """
+    if not isinstance(approval, dict) or not approval:
+        return
+    _github_write_bootstrap_state()
+    user_id = str((payload or {}).get("sub") or "").strip()
+    thread_key = _github_write_approval_key(org, thread_id, user_id)
+    userwide_key = _github_write_user_approval_key(org, user_id)
+    approval_id = str(approval.get("approval_id") or "").strip()
+    with _github_write_lock:
+        for key in (thread_key, userwide_key):
+            item = _github_write_approval_state.get(key)
+            if not isinstance(item, dict):
+                continue
+            if approval_id and str(item.get("approval_id") or "").strip() != approval_id:
+                continue
+            updated = dict(item)
+            updated["execution_claimed"] = False
+            updated["execution_status"] = "failed_retry_allowed"
+            updated["execution_failed_at"] = now_ts()
+            _github_write_approval_state[key] = updated
+
+
+def _github_write_consume_approval_after_success(
+    org: str,
+    thread_id: Optional[str],
+    payload: Optional[Dict[str, Any]],
+    approval: Optional[Dict[str, Any]],
+    execution_result: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Consume and clear active approval after a successful governed execution."""
+    if not isinstance(approval, dict) or not approval:
+        return
+    _github_write_bootstrap_state()
+    user_id = str((payload or {}).get("sub") or "").strip()
+    thread_key = _github_write_approval_key(org, thread_id, user_id)
+    userwide_key = _github_write_user_approval_key(org, user_id)
+    approval_id = str(approval.get("approval_id") or "").strip()
+    consumed = dict(approval)
+    consumed["execution_consumed"] = True
+    consumed["execution_status"] = "completed"
+    consumed["execution_consumed_at"] = now_ts()
+    if isinstance(execution_result, dict):
+        consumed["execution_result_status"] = str(execution_result.get("status") or "")
+        consumed["execution_branch"] = str(execution_result.get("branch") or "")
+        consumed["execution_commit_sha"] = str(execution_result.get("commit_sha") or "")
+        consumed["execution_pull_request_url"] = str(execution_result.get("pull_request_url") or "")
+
+    with _github_write_lock:
+        for key in (thread_key, userwide_key):
+            item = _github_write_approval_state.get(key)
+            if not isinstance(item, dict):
+                continue
+            if approval_id and str(item.get("approval_id") or "").strip() != approval_id:
+                continue
+            _github_write_approval_state.pop(key, None)
+
+
+
 
 def _github_write_embed_runtime_approval_message(
     message: str,
@@ -24413,16 +24528,28 @@ def governance_execute_approved_patch(
         raise HTTPException(status_code=400, detail="thread_id required.")
 
     payload = dict(user or {})
-    approval = _github_write_get_active_approval(org, tid, payload)
-    if not isinstance(approval, dict) or not approval:
+    claim = _github_write_claim_active_approval_for_execution(org, tid, payload)
+    approval = claim.get("approval") if isinstance(claim, dict) else None
+    if not bool((claim or {}).get("ok")):
+        claim_status = str((claim or {}).get("status") or "execution_blocked_no_active_approval").strip()
+        previous_receipts = _github_write_get_execution_receipts(org, tid, payload)
+        pr_url = str(previous_receipts.get("pull_request_url") or "").strip() if isinstance(previous_receipts, dict) else ""
+        if claim_status == "execution_blocked_approval_execution_in_progress":
+            result_msg = "Esta aprovação já está em execução. Aguarde o término antes de tentar novamente."
+        elif claim_status == "execution_blocked_approval_already_consumed" or pr_url:
+            claim_status = "execution_blocked_approval_already_consumed"
+            result_msg = "Esta aprovação já foi consumida por uma execução anterior. Gere uma nova proposta para novas alterações."
+        else:
+            result_msg = "Não há aprovação ativa para executar nesta thread. Gere uma proposta e aprove pelo botão com senha."
         text_out = (
             "GOVERNED PATCH EXECUTION RESPONSE\n\n"
-            "- status: execution_blocked_no_active_approval\n"
+            f"- status: {claim_status}\n"
             "- patch_mode: proposal_only\n"
             "- write_allowed: false\n"
-            "- human_approved: false\n\n"
+            "- human_approved: false\n"
+            f"- previous_pull_request_url: {pr_url or 'n/d'}\n\n"
             "Resultado:\n"
-            "Não há aprovação ativa para executar nesta thread. Gere uma proposta e aprove pelo botão com senha."
+            f"{result_msg}"
         )
         try:
             msg = Message(
@@ -24444,7 +24571,7 @@ def governance_execute_approved_patch(
             except Exception: pass
         return {
             "ok": False,
-            "status": "execution_blocked_no_active_approval",
+            "status": claim_status,
             "patch_mode": "proposal_only",
             "write_allowed": False,
             "human_approved": False,
@@ -24472,6 +24599,10 @@ def governance_execute_approved_patch(
         audit_receipt_id=approval_audit,
         trace_id=getattr(inp, "trace_id", None) or new_id(),
     )
+    if bool(execution_result.get("pull_request_opened") or execution_result.get("commit_created") or execution_result.get("success")):
+        _github_write_consume_approval_after_success(org, tid, payload, approval, execution_result)
+    else:
+        _github_write_release_claimed_approval_after_failure(org, tid, payload, approval)
     text_out = _github_render_governed_execution_result(execution_result)
     try:
         msg = Message(
