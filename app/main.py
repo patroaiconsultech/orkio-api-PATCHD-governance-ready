@@ -16820,6 +16820,113 @@ def _github_critical_source_guard(path: str, content: str, *, mode: str = "", tr
     return None
 
 
+
+def _github_decode_base64_text(value: Any) -> str:
+    raw = str(value or "")
+    if not raw.strip():
+        return ""
+    try:
+        return base64.b64decode(raw.encode("utf-8")).decode("utf-8", errors="replace")
+    except Exception:
+        try:
+            return base64.b64decode(raw.encode("utf-8"), validate=False).decode("utf-8", errors="replace")
+        except Exception:
+            return ""
+
+
+def _github_fetch_file_text_for_write(*, repo: str, path: str, ref: str, trace_id: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Fetch current file content for append/append_unique write modes.
+
+    GitHub's Contents API may omit base64 content for files larger than ~1 MB,
+    returning metadata/sha only. app/main.py is large enough to trigger this in
+    production. For that case, fall back to Git Blob API before applying the
+    patch fragment. This guarantees source guards validate the final materialized
+    file, not the small fragment.
+    """
+    safe_path = str(path or "").strip()
+    safe_ref = str(ref or "").strip()
+    status_get, body_get = _github_api_json(
+        "GET",
+        f"https://api.github.com/repos/{repo}/contents/{safe_path}?ref={safe_ref}",
+        None,
+    )
+    if status_get != 200 or not isinstance(body_get, dict):
+        return {
+            "ok": False,
+            "status": status_get,
+            "source": "contents",
+            "message": f"O arquivo '{safe_path}' não existe na branch '{safe_ref}' para operação append.",
+            "body": body_get,
+        }
+
+    decoded = _github_decode_base64_text((body_get or {}).get("content"))
+    if decoded or int((body_get or {}).get("size") or 0) == 0:
+        _github_log(
+            "GITHUB_APPEND_BASE_FETCH_OK",
+            repo=repo,
+            branch=safe_ref,
+            path=safe_path,
+            source="contents",
+            bytes=len(decoded.encode("utf-8", errors="replace")),
+            trace_id=trace_id or "",
+        )
+        return {
+            "ok": True,
+            "status": status_get,
+            "source": "contents",
+            "content": decoded,
+            "sha": str((body_get or {}).get("sha") or ""),
+        }
+
+    blob_sha = str((body_get or {}).get("sha") or "").strip()
+    if blob_sha:
+        status_blob, body_blob = _github_api_json(
+            "GET",
+            f"https://api.github.com/repos/{repo}/git/blobs/{blob_sha}",
+            None,
+        )
+        if status_blob in (200, 201) and isinstance(body_blob, dict):
+            blob_content = _github_decode_base64_text((body_blob or {}).get("content"))
+            if blob_content or int((body_get or {}).get("size") or 0) == 0:
+                _github_log(
+                    "GITHUB_APPEND_BASE_FETCH_OK",
+                    repo=repo,
+                    branch=safe_ref,
+                    path=safe_path,
+                    source="git_blob",
+                    bytes=len(blob_content.encode("utf-8", errors="replace")),
+                    trace_id=trace_id or "",
+                )
+                return {
+                    "ok": True,
+                    "status": status_blob,
+                    "source": "git_blob",
+                    "content": blob_content,
+                    "sha": blob_sha,
+                }
+
+        _github_log(
+            "GITHUB_APPEND_BASE_FETCH_FAILED",
+            repo=repo,
+            branch=safe_ref,
+            path=safe_path,
+            source="git_blob",
+            status=status_blob,
+            trace_id=trace_id or "",
+        )
+
+    return {
+        "ok": False,
+        "status": status_get,
+        "source": "contents_empty",
+        "message": (
+            f"Não foi possível materializar o conteúdo atual de '{safe_path}' antes do append. "
+            "Execução bloqueada para evitar sobrescrita parcial."
+        ),
+        "sha": blob_sha,
+    }
+
 def _github_commit_batch_capability(*, changes: List[Dict[str, str]], branch: Optional[str] = None, repo_target: Optional[str] = None, user_text: Optional[str] = None, title: Optional[str] = None, trace_id: Optional[str] = None, governance: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     repo, branch, token, repo_kind = _github_resolve_repo_branch(branch=branch, repo_target=repo_target, user_text=user_text)
     blocked = _github_enforce_governed_write(action="batch_commit", governance=governance, repo=repo, branch=branch)
@@ -16860,22 +16967,57 @@ def _github_commit_batch_capability(*, changes: List[Dict[str, str]], branch: Op
         desired_content = item["content"]
         final_content = desired_content
         if mode in {"append", "append_unique"}:
-            status_get, body_get = _github_api_json("GET", f"https://api.github.com/repos/{repo}/contents/{path}?ref={branch}", None)
-            if status_get != 200 or not isinstance(body_get, dict):
-                return {"handled": True, "success": False, "provider": "github", "repo": repo, "branch": branch, "path": path, "message": f"O arquivo '{path}' não existe na branch '{branch}' para operação append."}
-            existing_text = ""
-            try:
-                existing_text = base64.b64decode(((body_get or {}).get("content") or "").encode("utf-8")).decode("utf-8", errors="replace")
-            except Exception:
-                existing_text = ""
+            fetch_result = _github_fetch_file_text_for_write(
+                repo=repo,
+                path=path,
+                ref=branch,
+                trace_id=trace_id,
+            )
+            if not bool(fetch_result.get("ok")):
+                return {
+                    "handled": True,
+                    "success": False,
+                    "provider": "github",
+                    "repo": repo,
+                    "branch": branch,
+                    "path": path,
+                    "status": "append_base_fetch_failed",
+                    "message": fetch_result.get("message") or f"O arquivo '{path}' não pôde ser materializado para operação append.",
+                    "fetch_result": {k: v for k, v in fetch_result.items() if k not in {"body", "content"}},
+                }
+
+            existing_text = str(fetch_result.get("content") or "")
             final_content = existing_text
             desired_clean = desired_content.strip()
             if mode == "append_unique" and desired_clean and desired_clean in existing_text:
                 final_content = existing_text
+                _github_log(
+                    "GITHUB_APPEND_UNIQUE_NOOP",
+                    repo=repo,
+                    branch=branch,
+                    path=path,
+                    mode=mode,
+                    existing_bytes=len(existing_text.encode("utf-8", errors="replace")),
+                    fragment_bytes=len(desired_content.encode("utf-8", errors="replace")),
+                    final_bytes=len(final_content.encode("utf-8", errors="replace")),
+                    trace_id=trace_id or "",
+                )
             else:
                 if final_content and not final_content.endswith("\n"):
                     final_content += "\n"
                 final_content += desired_content
+                _github_log(
+                    "GITHUB_APPEND_MATERIALIZED",
+                    repo=repo,
+                    branch=branch,
+                    path=path,
+                    mode=mode,
+                    source=str(fetch_result.get("source") or ""),
+                    existing_bytes=len(existing_text.encode("utf-8", errors="replace")),
+                    fragment_bytes=len(desired_content.encode("utf-8", errors="replace")),
+                    final_bytes=len(final_content.encode("utf-8", errors="replace")),
+                    trace_id=trace_id or "",
+                )
 
         guarded = _github_critical_source_guard(path, final_content, mode=mode, trace_id=trace_id)
         if guarded:
