@@ -1,0 +1,4 @@
+--- a/app/main.py
++++ b/app/main.py
+@@
++# METATRON_APPEND_MATERIALIZE_FINAL_TEST: append_unique must materialize the complete app/main.py before guard validation.

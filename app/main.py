@@ -33893,3 +33893,6 @@ def public_enterprise_lead(payload: PublicEnterpriseLeadIn, request: Request):
         "email_sent": bool(sent),
         "message": "Solicitação registrada para avaliação da equipe PatroAI.",
     }
+
+
+# METATRON_APPEND_MATERIALIZE_FINAL_TEST: append_unique must materialize the complete app/main.py before guard validation.
