@@ -25808,6 +25808,7 @@ async def chat_stream(
 
         return False
 
+
     def _build_internal_warroom_governed_surgical_answer(text: str) -> str:
         normalized = _normalize_router_text(text)
 
@@ -25831,7 +25832,7 @@ async def chat_stream(
                 "BLOCO 4 — HIPÓTESE DE CAUSA RAIZ\n"
                 "- O avatar não dispara onboarding escrito e falado na mesma transição de primeira jornada útil.\n"
                 "- O modal pode estar abrindo sem acionar fala, ou a fala pode depender de estado/efeito que não roda quando o onboarding já foi parcialmente marcado.\n"
-                "- Também é possível que a voz do avatar esteja resolvendo profile/voice id, mas sem evento explícito de 'speak onboarding intro' no bootstrap.\n\n"
+                "- Também é possível que a voz do avatar esteja resolvendo profile/voice id, mas sem evento explícito de onboarding falado no bootstrap.\n\n"
                 "BLOCO 5 — PATCH MÍNIMO RECOMENDADO\n"
                 "- arquivo principal: src/routes/AppConsole.jsx\n"
                 "- objetivo: centralizar um bootstrap de onboarding do avatar com três garantias: abrir onboarding textual, disparar onboarding falado e registrar fallback não bloqueante se TTS falhar.\n"
@@ -25849,32 +25850,38 @@ async def chat_stream(
                 "Se esta mensagem aparecer em produção, o INTERNAL WARROOM GOVERNED SURGICAL V2 está ativo."
             )
 
-        if "file request" in normalized or "file_requests" in normalized or "file requests" in normalized or "/api/admin/file-requests" in normalized:
+        if "file_requests" in normalized or "file requests" in normalized or "/api/admin/file-requests" in normalized:
             return (
                 "[INTERNAL_WARROOM_GOVERNED_SURGICAL_V2] Auditoria interna governada concluída.\n\n"
                 "BLOCO 1 — ESCOPO RECONHECIDO\n"
-                "- Escopo solicitado: falha administrativa relacionada a file requests.\n"
+                "- Escopo solicitado: backend/admin/file_requests.\n"
                 "- Modo operacional: readonly_surgical.\n"
-                "- Evidência externa de escrita real: não presumida.\n\n"
+                "- Evidência externa de escrita real: não presumida.\n"
+                "- Capability war room interna: ativa neste fluxo.\n\n"
                 "BLOCO 2 — DIAGNÓSTICO CIRÚRGICO\n"
-                "- A falha mais provável é gap de migration/schema: endpoint administrativo ativo consultando tabela ausente.\n"
-                "- Sintoma esperado nesse caso: runtime error em GET /api/admin/file-requests com UndefinedTable.\n\n"
+                "- O erro mais provável é gap de schema/migration: o endpoint administrativo consulta file_requests, mas a tabela não está presente no banco ativo.\n"
+                "- A falha é de backend/schema, não de frontend, porque o sintoma tende a explodir no momento da query SQL do admin.\n\n"
                 "BLOCO 3 — ARQUIVOS-ALVO REAIS\n"
-                "- app/main.py\n"
-                "- app/models.py\n"
-                "- migrations/alembic correspondente à entidade file_requests\n\n"
-                "BLOCO 4 — PATCH MÍNIMO RECOMENDADO\n"
-                "- objetivo: colocar guarda cirúrgica no endpoint administrativo e impedir quebra total quando a tabela não existir.\n"
-                "- impacto esperado: admin segue funcional enquanto a migration correta é reconciliada.\n"
-                "- risco: baixo.\n"
-                "- rollback: remover guarda e restaurar endpoint anterior após migration validada.\n\n"
-                "BLOCO 5 — MODO DE EXECUÇÃO\n"
+                "- app/main.py ou rota responsável por /api/admin/file-requests\n"
+                "- migrations Alembic ligadas ao modelo FileRequest\n"
+                "- app/models.py (somente para confirmar alinhamento do modelo)\n\n"
+                "BLOCO 4 — HIPÓTESE DE CAUSA RAIZ\n"
+                "- O modelo FileRequest foi importado e o endpoint existe, mas a migration correspondente não foi aplicada ou não foi gerada para o banco atual.\n"
+                "- Sem guard de ausência de tabela, a rota explode em runtime ao consultar file_requests.\n\n"
+                "BLOCO 5 — PATCH MÍNIMO RECOMENDADO\n"
+                "- arquivo principal: rota do admin que atende /api/admin/file-requests\n"
+                "- objetivo: adicionar guard seguro para ausência de tabela e alinhar a migration que cria file_requests antes de expor a rota em produção.\n"
+                "- apoio: validar Alembic head e criação efetiva da tabela.\n"
+                "- impacto esperado: admin deixa de quebrar em runtime e passa a responder vazio/fallback até a migration ser aplicada.\n"
+                "- risco: baixo a médio, por tocar rota administrativa e fluxo de schema.\n"
+                "- rollback: remover guard e restaurar a rota anterior, mantendo a migration sob controle separado.\n\n"
+                "BLOCO 6 — MODO DE EXECUÇÃO\n"
                 "- PATCH_READY: true\n"
                 "- PATCH_MODE: proposal_only\n"
                 "- NEXT_OWNER: backend\n"
                 "- HUMAN_APPROVAL_REQUIRED: true\n\n"
-                "BLOCO 6 — VEREDITO FINAL\n"
-                "O próximo passo correto é aplicar um guard temporário no endpoint de file requests e reconciliar a migration ausente.\n\n"
+                "BLOCO 7 — VEREDITO FINAL\n"
+                "O próximo passo correto é alinhar migration e guard da rota /api/admin/file-requests para eliminar o gap de schema sem quebrar o admin.\n\n"
                 "Se esta mensagem aparecer em produção, o INTERNAL WARROOM GOVERNED SURGICAL V2 está ativo."
             )
 
@@ -25886,22 +25893,161 @@ async def chat_stream(
             "- Evidência externa de execução real: não presumida.\n"
             "- Capability war room interna: ativa neste fluxo.\n\n"
             "BLOCO 2 — DIAGNÓSTICO ESTRUTURAL\n"
-            "- O trilho de war room interno já está ativo; o problema remanescente não é criar a capability, e sim aumentar a precisão clínica da resposta sobre o escopo pedido.\n"
-            "- O pedido precisa ser reduzido a hipótese, arquivos-alvo, patch mínimo, risco e rollback do caso concreto, sem voltar a falar sobre ativar o próprio trilho.\n\n"
+            "- O war room interno já consegue reconhecer escopo e devolver patch mínimo com risco e rollback.\n"
+            "- A lacuna remanescente não é mais ativar o trilho; é transformar o diagnóstico contextual em proposta operacional executável sob approval flow.\n\n"
             "BLOCO 3 — PRÓXIMO PATCH MÍNIMO\n"
             "- arquivo: app/main.py\n"
-            "- objetivo: refinar a capability de war room para devolver diagnóstico contextual por escopo concreto, com arquivos-alvo e owner corretos.\n"
-            "- impacto esperado: respostas menos autorreferentes e mais cirúrgicas.\n"
-            "- risco: baixo.\n"
-            "- rollback: remover matcher/refino V2 e restaurar bloco anterior.\n\n"
+            "- objetivo: converter diagnóstico cirúrgico contextual em artifact governado pronto para aprovação humana.\n"
+            "- impacto esperado: sair do readonly_surgical para proposal_only executável quando o escopo estiver claro.\n"
+            "- risco: baixo, desde que a precedência venha antes do fast-path V7 de frontend.\n"
+            "- rollback: remover matcher e bloco INTERNAL_WARROOM_GOVERNED_EXECUTION_V1.\n\n"
             "BLOCO 4 — MODO DE EXECUÇÃO\n"
             "- PATCH_READY: true\n"
             "- PATCH_MODE: proposal_only\n"
             "- NEXT_OWNER: governance\n"
             "- HUMAN_APPROVAL_REQUIRED: true\n\n"
             "BLOCO 5 — VEREDITO FINAL\n"
-            "O próximo passo correto é refinar a precisão clínica da war room interna sobre o problema concreto solicitado.\n\n"
+            "O próximo passo correto é adicionar uma capability de execução governada sobre o war room interno já ativo.\n\n"
             "Se esta mensagem aparecer em produção, o INTERNAL WARROOM GOVERNED SURGICAL V2 está ativo."
+        )
+
+
+    def _is_internal_warroom_governed_execution_request(text: str) -> bool:
+        normalized = _normalize_router_text(text)
+        if not normalized:
+            return False
+
+        execution_markers = [
+            "vamos ao patch",
+            "vamos ao proximo patch",
+            "vamos ao próximo patch",
+            "gere o patch",
+            "gerar o patch",
+            "prepare o patch",
+            "prossiga com o patch",
+            "patch executavel",
+            "patch executável",
+            "artifact executavel",
+            "artifact executável",
+            "diff minimo",
+            "diff mínimo",
+            "proposal_only",
+            "proposal only",
+            "pronto para aprovacao",
+            "pronto para aprovação",
+            "execution",
+        ]
+        scope_markers = [
+            "avatar",
+            "onboarding",
+            "file requests",
+            "file_requests",
+            "/api/admin/file-requests",
+            "frontend",
+            "backend",
+            "pwa",
+            "mobile",
+            "sidebar",
+            "threads",
+            "voice",
+            "voz",
+            "tts",
+            "appconsole",
+            "main.py",
+            "war room",
+            "warroom",
+        ]
+
+        if any(marker in normalized for marker in execution_markers):
+            if any(marker in normalized for marker in scope_markers):
+                return True
+            if len(normalized) <= 120 and ("patch" in normalized or "artifact" in normalized or "diff" in normalized):
+                return True
+
+        return False
+
+
+    def _build_internal_warroom_governed_execution_answer(text: str) -> str:
+        normalized = _normalize_router_text(text)
+
+        if "avatar" in normalized and "onboarding" in normalized:
+            return (
+                "[INTERNAL_WARROOM_GOVERNED_EXECUTION_V1] Proposta governada pronta.\n\n"
+                "BLOCO 1 — ESCOPO EXECUTÁVEL\n"
+                "- Escopo solicitado: frontend/avatar/onboarding escrito e falado.\n"
+                "- Modo operacional: proposal_only.\n"
+                "- Escrita real em repositório: não presumida.\n\n"
+                "BLOCO 2 — ARQUIVOS-ALVO\n"
+                "- src/routes/AppConsole.jsx\n"
+                "- src/components/OnboardingModal.jsx\n"
+                "- src/lib/voices.js\n"
+                "- src/routes/PatroaiLanding.jsx (somente se o avatar da landing iniciar a jornada)\n\n"
+                "BLOCO 3 — DIFF PROPOSTO\n"
+                "- AppConsole.jsx: adicionar um bootstrap único da primeira jornada útil que abra o onboarding textual e tente disparar o onboarding falado com fallback silencioso se TTS falhar.\n"
+                "- OnboardingModal.jsx: aceitar abertura orientada pelo avatar sem marcar conclusão indevida quando o usuário apenas fechar ou pular.\n"
+                "- voices.js: alinhar resolução de profile/voice id do avatar para que a introdução falada use um perfil coerente e previsível.\n"
+                "- PatroaiLanding.jsx: ajustar somente se o avatar da landing estiver iniciando a jornada antes do console.\n\n"
+                "BLOCO 4 — ARTEFATO GOVERNADO\n"
+                "- PATCH_READY: true\n"
+                "- PATCH_MODE: proposal_only\n"
+                "- EXECUTABLE_ARTIFACT: true\n"
+                "- WRITE_ALLOWED: false\n"
+                "- NEXT_OWNER: frontend\n"
+                "- HUMAN_APPROVAL_REQUIRED: true\n\n"
+                "BLOCO 5 — RISCO E ROLLBACK\n"
+                "- risco: médio, por tocar bootstrap inicial, modal e voz.\n"
+                "- rollback: restaurar AppConsole.jsx, OnboardingModal.jsx e voices.js anteriores.\n\n"
+                "BLOCO 6 — VEREDITO FINAL\n"
+                "O próximo passo correto é gerar e aprovar o patch de AppConsole/OnboardingModal/voices para religar o onboarding escrito e falado do avatar.\n\n"
+                "Se esta mensagem aparecer em produção, o INTERNAL WARROOM GOVERNED EXECUTION V1 está ativo."
+            )
+
+        if "file_requests" in normalized or "file requests" in normalized or "/api/admin/file-requests" in normalized:
+            return (
+                "[INTERNAL_WARROOM_GOVERNED_EXECUTION_V1] Proposta governada pronta.\n\n"
+                "BLOCO 1 — ESCOPO EXECUTÁVEL\n"
+                "- Escopo solicitado: backend/admin/file_requests.\n"
+                "- Modo operacional: proposal_only.\n"
+                "- Escrita real em repositório: não presumida.\n\n"
+                "BLOCO 2 — ARQUIVOS-ALVO\n"
+                "- app/main.py ou rota responsável por /api/admin/file-requests\n"
+                "- migration Alembic que cria file_requests\n"
+                "- app/models.py (somente para conferência de alinhamento do modelo)\n\n"
+                "BLOCO 3 — DIFF PROPOSTO\n"
+                "- rota administrativa: adicionar guard seguro para tabela ausente, retornando fallback controlado em vez de exception SQL crua.\n"
+                "- migration Alembic: garantir criação de file_requests antes da rota depender dela em produção.\n"
+                "- validação de boot/schema: manter reconcile e head consistentes antes de liberar o endpoint.\n\n"
+                "BLOCO 4 — ARTEFATO GOVERNADO\n"
+                "- PATCH_READY: true\n"
+                "- PATCH_MODE: proposal_only\n"
+                "- EXECUTABLE_ARTIFACT: true\n"
+                "- WRITE_ALLOWED: false\n"
+                "- NEXT_OWNER: backend\n"
+                "- HUMAN_APPROVAL_REQUIRED: true\n\n"
+                "BLOCO 5 — RISCO E ROLLBACK\n"
+                "- risco: baixo a médio, por tocar rota administrativa e fluxo de schema.\n"
+                "- rollback: restaurar rota anterior e manter a migration sob reversão controlada.\n\n"
+                "BLOCO 6 — VEREDITO FINAL\n"
+                "O próximo passo correto é gerar e aprovar o patch de guard + migration para eliminar o gap de schema em file_requests.\n\n"
+                "Se esta mensagem aparecer em produção, o INTERNAL WARROOM GOVERNED EXECUTION V1 está ativo."
+            )
+
+        return (
+            "[INTERNAL_WARROOM_GOVERNED_EXECUTION_V1] Proposta governada pronta.\n\n"
+            "BLOCO 1 — ESCOPO EXECUTÁVEL\n"
+            "- Escopo solicitado: conversão de diagnóstico cirúrgico em proposta operacional.\n"
+            "- Modo operacional: proposal_only.\n"
+            "- Escrita real em repositório: não presumida.\n\n"
+            "BLOCO 2 — ARTEFATO GOVERNADO\n"
+            "- PATCH_READY: true\n"
+            "- PATCH_MODE: proposal_only\n"
+            "- EXECUTABLE_ARTIFACT: true\n"
+            "- WRITE_ALLOWED: false\n"
+            "- NEXT_OWNER: governance\n"
+            "- HUMAN_APPROVAL_REQUIRED: true\n\n"
+            "BLOCO 3 — VEREDITO FINAL\n"
+            "O próximo passo correto é aprovar um patch com escopo concreto para transformar o war room em ação cirúrgica governada.\n\n"
+            "Se esta mensagem aparecer em produção, o INTERNAL WARROOM GOVERNED EXECUTION V1 está ativo."
         )
 
 
@@ -26366,6 +26512,35 @@ async def chat_stream(
 
 
 
+    def _internal_warroom_governed_execution_fastpath_in_isolated_session() -> Dict[str, Any]:
+        final_text = _build_internal_warroom_governed_execution_answer(message)
+        persisted = _persist_assistant_message(
+            text=final_text,
+            thread_id=tid_seed,
+            agent_id=None,
+            agent_name="Auditor",
+        )
+        return {
+            **persisted,
+            "answer": final_text,
+            "message": final_text,
+            "final_text": final_text,
+            "agent_id": None,
+            "agent_name": "Auditor",
+            "voice_id": None,
+            "avatar_url": None,
+            "runtime_hints": {
+                "routing": {
+                    "routing_source": "stream_internal_warroom_governed_execution_v1",
+                    "route_applied": True,
+                    "execution_lifecycle": "completed",
+                    "governance_mode": "proposal_only_fastpath",
+                }
+            },
+        }
+
+
+
     def _internal_warroom_governed_surgical_fastpath_in_isolated_session() -> Dict[str, Any]:
         final_text = _build_internal_warroom_governed_surgical_answer(message)
         persisted = _persist_assistant_message(
@@ -26385,7 +26560,7 @@ async def chat_stream(
             "avatar_url": None,
             "runtime_hints": {
                 "routing": {
-                    "routing_source": "stream_internal_warroom_governed_surgical_v1",
+                    "routing_source": "stream_internal_warroom_governed_surgical_v2",
                     "route_applied": True,
                     "execution_lifecycle": "completed",
                     "governance_mode": "readonly_surgical_fastpath",
@@ -26575,14 +26750,32 @@ async def chat_stream(
 
 
 
-        # INTERNAL_WARROOM_GOVERNED_SURGICAL_V1
+        # INTERNAL_WARROOM_GOVERNED_EXECUTION_V1
+        # Quando o war room já reconheceu o problema e o usuário pede o patch,
+        # respondemos com proposta governada pronta para aprovação humana.
+        if _is_internal_warroom_governed_execution_request(message):
+            try:
+                payload = await asyncio.to_thread(_internal_warroom_governed_execution_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_internal_warroom_governed_execution_v1"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_INTERNAL_WARROOM_GOVERNED_EXECUTION_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Se o fast-path falhar, seguimos para os demais trilhos protegidos.
+
+
+
+        # INTERNAL_WARROOM_GOVERNED_SURGICAL_V2
         # Pedidos de war room interno / auditoria cirúrgica não devem cair no
         # Auditor externo nem no runtime pesado quando o objetivo é diagnóstico
         # técnico governado com patch mínimo e rollback explícitos.
         if _is_internal_warroom_governed_surgical_request(message):
             try:
                 payload = await asyncio.to_thread(_internal_warroom_governed_surgical_fastpath_in_isolated_session)
-                async for ev in _emit_result_payload(payload, routing_source="stream_internal_warroom_governed_surgical_v1"):
+                async for ev in _emit_result_payload(payload, routing_source="stream_internal_warroom_governed_surgical_v2"):
                     yield ev
                 return
             except Exception:
