@@ -1,4 +1,4 @@
-# EFATA 777 V7 COMPLETE
+# EFATA 777 V6 BASELINE EXPLICIT MARKER COMPLETE
 # Consolidated package for governed capability answers + analytical readonly + registry alignment + realtime self-heal hardening.
 
 from __future__ import annotations
@@ -25495,7 +25495,7 @@ async def chat_stream(
     db: Session = Depends(get_db),
 ):
     """
-    METATRON_CHAT_STREAM_BASELINE_ROUTER_V4
+    METATRON_CHAT_STREAM_BASELINE_ROUTER_V5
 
     Production recovery route for /api/chat/stream.
 
@@ -25610,12 +25610,56 @@ async def chat_stream(
 
         return False
 
+    def _is_frontend_product_review_request(text: str) -> bool:
+        normalized = _normalize_router_text(text)
+        if not normalized:
+            return False
+
+        if _is_governed_runtime_request(text):
+            return False
+
+        product_markers = [
+            "pwa",
+            "mobile",
+            "móvel",
+            "movel",
+            "landing",
+            "landing page",
+            "botão de login",
+            "botao de login",
+            "login na landing",
+            "onboarding",
+            "lista de chats",
+            "lista dos chats",
+            "lista de conversas",
+            "lista de threads",
+            "threads",
+            "sidebar",
+            "menu lateral",
+            "nao aparece a lista",
+            "não aparece a lista",
+            "versao mobile",
+            "versão mobile",
+            "responsivo",
+            "responsividade",
+            "nao tem botão na landing para login",
+            "não tem botão na landing para login",
+            "nao aparece a lista de chats",
+            "não aparece a lista de chats",
+            "nao aparece a lista de chats tambem",
+            "não aparece a lista de chats também",
+        ]
+        return len(normalized) <= 600 and any(marker in normalized for marker in product_markers)
+
     def _is_baseline_operational_request(text: str) -> bool:
         normalized = _normalize_router_text(text)
         if not normalized:
             return True
 
         if _is_presence_status_question_request(text):
+            return True
+
+        if _is_frontend_product_review_request(text):
             return True
 
         exact = {
@@ -25700,6 +25744,17 @@ async def chat_stream(
         ]):
             return "Sim, estamos online. O transporte do chat está ativo e o canal básico está funcional."
 
+        if _is_frontend_product_review_request(text):
+            return (
+                "[BASELINE_V6_PRODUCT_REVIEW] Pedido de revisão de produto reconhecido. "
+                "O foco desta análise deve cobrir: "
+                "1) botão de login visível na landing; "
+                "2) separação entre autenticação e onboarding, sem exigir jornada completa para logar; "
+                "3) exibição correta da lista de chats/threads após login; "
+                "4) navegação, responsividade e usabilidade do PWA/mobile. "
+                "Se esta mensagem não aparecer em produção, o deploy ativo ainda não está com o baseline V6."
+            )
+
         if any(token in normalized for token in [
             "acabou o problema de runtime",
             "problema de runtime",
@@ -25728,7 +25783,7 @@ async def chat_stream(
         ]):
             return "A falha atual está concentrada no runtime principal e no fanout multiagente. O transporte do chat está ativo e o canal básico continua funcional."
 
-        return "O canal básico do chat está ativo. Nesta fase, respostas comuns seguem pelo baseline operacional seguro, enquanto o runtime principal fica reservado para pedidos técnicos e governados."
+        return "[BASELINE_V6_GENERIC] O canal básico do chat está ativo. Nesta fase, respostas comuns seguem pelo baseline operacional seguro V6, enquanto o runtime principal fica reservado para pedidos técnicos e governados."
 
     def _ensure_thread_and_user_message(db2: Session) -> str:
         tid = tid_seed
@@ -25837,7 +25892,7 @@ async def chat_stream(
             "avatar_url": None,
             "runtime_hints": {
                 "routing": {
-                    "routing_source": "stream_baseline_router_v4",
+                    "routing_source": "stream_baseline_router_v5",
                     "route_applied": True,
                     "execution_lifecycle": "completed",
                 }
@@ -25885,7 +25940,7 @@ async def chat_stream(
             "kind": "system",
             "label": "Stream aberto",
             "message": "SSE aberto antes do processamento pesado.",
-            "detail": "Runtime protegido por terminal guard V3.",
+            "detail": "Runtime protegido por terminal guard V6.",
         })
 
         async def _emit_result_payload(payload: Dict[str, Any], *, routing_source: str = "stream_runtime_v3"):
@@ -25955,14 +26010,14 @@ async def chat_stream(
             except Exception:
                 pass
 
-        # METATRON_CHAT_STREAM_BASELINE_ROUTER_V4
+        # METATRON_CHAT_STREAM_BASELINE_ROUTER_V5
         # Durante a estabilização do runtime principal, perguntas comuns não devem
         # cair no fanout pesado. O baseline operacional responde de forma segura e
         # determinística; somente pedidos técnicos/governados seguem para o runtime.
         if _is_baseline_operational_request(message):
             try:
                 payload = await asyncio.to_thread(_baseline_operational_fastpath_in_isolated_session)
-                async for ev in _emit_result_payload(payload, routing_source="stream_baseline_router_v4"):
+                async for ev in _emit_result_payload(payload, routing_source="stream_baseline_router_v5"):
                     yield ev
                 return
             except Exception:
@@ -26042,14 +26097,14 @@ async def chat_stream(
                         "final_text": final_text,
                         "runtime_hints": {
                             "routing": {
-                                "routing_source": "stream_terminal_guard_v3",
+                                "routing_source": "stream_terminal_guard_v6",
                                 "execution_lifecycle": "timeout_terminal_guard",
                                 "route_applied": True,
                             }
                         },
                     })
                     try:
-                        logger.info("CHAT_STREAM_DONE trace_id=%s thread_id=%s source=timeout_terminal_guard_v3", trace_id, timeout_base.get("thread_id"))
+                        logger.info("CHAT_STREAM_DONE trace_id=%s thread_id=%s source=timeout_terminal_guard_v6", trace_id, timeout_base.get("thread_id"))
                     except Exception:
                         pass
                     return
