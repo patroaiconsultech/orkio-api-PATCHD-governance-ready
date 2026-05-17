@@ -25767,35 +25767,62 @@ async def chat_stream(
             "me diga o que é orkio",
             "me diga o que e orkio",
             "me fale sobre orkio",
+            "me fale sobre o orkio",
             "fale sobre orkio",
+            "fale sobre o orkio",
             "explique o orkio",
             "explique orkio",
             "qual a proposta do orkio",
+            "qual a proposta de orkio",
             "qual é a proposta do orkio",
+            "qual é a proposta de orkio",
             "qual e a proposta do orkio",
+            "qual e a proposta de orkio",
+            "qual a missão do orkio",
+            "qual a missão de orkio",
+            "qual o propósito do orkio",
+            "qual o propósito de orkio",
+            "qual o objetivo do orkio",
+            "qual o objetivo de orkio",
             "para que serve o orkio",
+            "para que serve orkio",
             "o que a plataforma orkio faz",
             "o que o orkio faz",
+            "o que orkio faz",
         ]
         if any(term in normalized for term in identity_terms):
             return True
 
-        if re.search(r"(o que é|o que e|quem é|quem e|me fale sobre|fale sobre|explique|qual a proposta|qual é a proposta|qual e a proposta|para que serve)", normalized):
-            if re.search(r"(orkio|plataforma orkio)", normalized):
-                return True
+        identity_intent = re.search(
+            r"("
+            r"o que é|o que e|"
+            r"quem é|quem e|"
+            r"me fale sobre|fale sobre|"
+            r"explique|"
+            r"qual a proposta|qual é a proposta|qual e a proposta|"
+            r"qual a missão|qual é a missão|qual e a missão|"
+            r"qual o propósito|qual e o propósito|"
+            r"qual o objetivo|qual e o objetivo|"
+            r"para que serve|"
+            r"o que faz"
+            r")",
+            normalized,
+        )
+        if identity_intent and re.search(r"(orkio|o orkio|de orkio|do orkio|plataforma orkio)", normalized):
+            return True
 
         return False
 
     def _build_institutional_identity_answer(text: str) -> str:
         return (
-            "[INSTITUTIONAL_IDENTITY_V8] Orkio é a plataforma da PatroAI para conversas, operação multiagente e execução governada. "
+            "[INSTITUTIONAL_IDENTITY_V9] Orkio é a plataforma da PatroAI para conversas, operação multiagente e execução governada. "
             "Na prática, ela conecta chat, voz, agentes especializados, memória operacional e trilhas de governança em um mesmo ambiente. "
-            "O objetivo do Orkio é organizar a interação humana com IA de forma útil, auditável e evolutiva: "
+            "A proposta do Orkio é organizar a interação humana com IA de forma útil, auditável e evolutiva: "
             "1) atender e conversar; "
             "2) coordenar agentes como Orkio, Chris e Orion; "
             "3) apoiar diagnósticos, auditorias e propostas técnicas; "
             "4) permitir evolução controlada, com governança, aprovação humana e rastreabilidade. "
-            "Se esta mensagem aparecer em produção, o IDENTITY FASTPATH V8 está ativo."
+            "Se esta mensagem aparecer em produção, o IDENTITY FASTPATH V9 está ativo."
         )
 
     def _is_baseline_operational_request(text: str) -> bool:
