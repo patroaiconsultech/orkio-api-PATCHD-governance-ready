@@ -25721,42 +25721,39 @@ async def chat_stream(
 
     def _build_self_evaluation_governed_readonly_answer(text: str) -> str:
         return (
-            "[SELF_EVALUATION_GOVERNED_READONLY_V2] Autoavaliação governada readonly concluída.\n\n"
+            "[SELF_EVALUATION_GOVERNED_READONLY_V1] Autoavaliação governada readonly concluída.\n\n"
             "BLOCO 1 — ESTADO ATUAL REAL\n"
             "- Resolvido: roteamento baseline para presença/status.\n"
             "- Resolvido: fast-path institucional para perguntas sobre o Orkio.\n"
             "- Resolvido: fast-path governado readonly de frontend/PWA.\n"
-            "- Resolvido: capability própria de autoavaliação governada readonly da plataforma inteira.\n"
             "- Resolvido: transporte do chat com SSE abrindo e concluindo sem timeout neste trilho leve.\n"
-            "- Parcialmente resolvido: frontend premium, sidebar/chats mobile, onboarding não bloqueante e identidade de voz ainda dependem da aplicação consistente dos patches de web/env.\n\n"
+            "- Parcialmente resolvido: identidade visual, voz e experiência premium ainda dependem de aplicação consistente dos patches de frontend/web env.\n\n"
             "BLOCO 2 — LACUNAS REAIS\n"
-            "- Landing, AppConsole, OnboardingModal e continuidade visual ainda não estão garantidos em produção sem aplicação do pacote de frontend.\n"
-            "- Sidebar/lista de chats no mobile/PWA ainda depende da entrada do patch do AppConsole e da validação pós-deploy.\n"
-            "- Identidade de voz ainda depende de alinhamento completo entre WEB env, backend env e resolução de vozes no frontend.\n"
-            "- PWA ainda exige validação com limpeza de cache para confirmar que o shell novo está sendo servido.\n\n"
+            "- A plataforma ainda não executa autoavaliação sistêmica ampla por capability própria; o pedido ainda pode desviar para UX Frontend.\n"
+            "- Login, onboarding, sidebar/chats mobile e continuidade PWA ainda exigem validação após aplicação dos patches de frontend.\n"
+            "- Identidade de voz ainda depende de alinhamento completo entre WEB env e backend env.\n\n"
             "BLOCO 3 — RISCOS DE REGRESSÃO\n"
-            "- Evoluir roteamento sem guardar precedência pode quebrar V7 frontend readonly, V9 institucional ou esta própria autoavaliação V2.\n"
+            "- Evoluir roteamento sem guardar precedência pode quebrar V7 frontend readonly ou V9 institucional.\n"
             "- Alterar voz sem alinhar WEB e API pode gerar persona inconsistente entre realtime e TTS.\n"
-            "- Evoluir AppConsole/PWA sem limpar cache pode mascarar deploy correto com shell antigo.\n"
-            "- Substituir arquivos de frontend sem respeitar imports reais pode quebrar build em runtime.\n\n"
+            "- Evoluir PWA/mobile sem limpeza de cache pode mascarar deploy correto com shell antigo.\n\n"
             "BLOCO 4 — PRÓXIMO PATCH MÍNIMO\n"
-            "- arquivo: src/routes/AppConsole.jsx\n"
-            "- objetivo: consolidar sidebar fixa no desktop, drawer de chats no mobile e continuidade visual/operacional com a landing premium.\n"
-            "- impacto esperado: remover o principal atrito funcional do PWA/mobile e aproximar a experiência do padrão ChatGPT com acesso claro a chats e novo chat.\n"
-            "- risco: médio, por afetar renderização principal do console e estados de threads/mobile.\n"
-            "- rollback: restaurar AppConsole.jsx anterior e manter somente os fast-paths/backend já estabilizados.\n\n"
+            "- arquivo: app/main.py\n"
+            "- objetivo: criar capability explícita de autoavaliação governada readonly da plataforma inteira.\n"
+            "- impacto esperado: impedir desvio para UX Frontend quando o pedido for de introspecção sistêmica.\n"
+            "- risco: baixo, desde que a precedência venha antes do fast-path V7 de frontend.\n"
+            "- rollback: remover matcher e bloco SELF_EVALUATION_GOVERNED_READONLY_V1, restaurando o roteamento anterior.\n\n"
             "BLOCO 5 — PRONTIDÃO PARA AUTOEVOLUÇÃO\n"
-            "- se autoavaliar? sim, em readonly governado.\n"
+            "- se autoavaliar? parcialmente.\n"
             "- propor patch? sim.\n"
             "- gerar artifact executável? parcialmente.\n"
             "- operar com approval flow? sim.\n"
-            "- evoluir com segurança? sim, desde que em readonly/proposal_only com escopo claro e aprovação humana.\n\n"
+            "- evoluir com segurança? parcialmente, desde que em readonly/proposal_only com escopo claro.\n\n"
             "BLOCO 6 — VEREDITO FINAL\n"
-            "O próximo passo correto da evolução governada do ORKIO é consolidar o AppConsole premium/mobile antes de abrir uma nova frente estrutural.\n\n"
-            "PATCH_READY: true\n"
-            "PATCH_MODE: proposal_only\n"
-            "NEXT_OWNER: frontend\n\n"
-            "Se esta mensagem aparecer em produção, o SELF EVALUATION GOVERNED READONLY V2 está ativo."
+            "O próximo passo correto da evolução governada do ORKIO é criar um trilho próprio de autoinspeção sistêmica antes do fast-path de UX frontend.\n\n"
+            "PATCH_READY: false\n"
+            "PATCH_MODE: readonly\n"
+            "NEXT_OWNER: governance\n\n"
+            "Se esta mensagem aparecer em produção, o SELF EVALUATION GOVERNED READONLY V1 está ativo."
         )
 
     def _is_governed_frontend_audit_readonly_request(text: str) -> bool:
@@ -25925,14 +25922,11 @@ async def chat_stream(
 
     def _build_institutional_identity_answer(text: str) -> str:
         return (
-            "[INSTITUTIONAL_IDENTITY_V9] Orkio é a plataforma da PatroAI para conversas, operação multiagente e execução governada. "
-            "Na prática, ela conecta chat, voz, agentes especializados, memória operacional e trilhas de governança em um mesmo ambiente. "
-            "A proposta do Orkio é organizar a interação humana com IA de forma útil, auditável e evolutiva: "
-            "1) atender e conversar; "
-            "2) coordenar agentes como Orkio, Chris e Orion; "
-            "3) apoiar diagnósticos, auditorias e propostas técnicas; "
-            "4) permitir evolução controlada, com governança, aprovação humana e rastreabilidade. "
-            "Se esta mensagem aparecer em produção, o IDENTITY FASTPATH V9 está ativo."
+            "[INSTITUTIONAL_IDENTITY_V10] Orkio é a Business Execution Engine da PatroAI. "
+            "Na prática, ele é a plataforma que conecta conversa, voz, agentes especializados, memória operacional e governança para transformar visão em execução. "
+            "A narrativa real do Orkio é esta: a PatroAI pode conceber um negócio, estruturar business plans sofisticados, organizar a arquitetura da operação e conduzir a execução com inteligência e rastreabilidade. "
+            "Em vez de atuar só como chat, o Orkio funciona como camada viva de direção, estruturação e acompanhamento cirúrgico. "
+            "Se esta mensagem aparecer em produção, o IDENTITY FASTPATH V10 está ativo."
         )
 
     def _is_baseline_operational_request(text: str) -> bool:
@@ -26017,9 +26011,13 @@ async def chat_stream(
 
     def _build_baseline_operational_answer(text: str) -> str:
         normalized = _normalize_router_text(text)
+        compact = re.sub(r"[\s!?,.:;]+", " ", normalized).strip()
 
-        if not normalized or normalized in {"oi", "olá", "ola", "ok"}:
-            return "Olá. O canal básico do chat está ativo. O runtime principal ainda está em estabilização para respostas complexas."
+        if not normalized or compact in {"oi", "olá", "ola", "ok", "oi orkio", "olá orkio", "ola orkio"}:
+            return (
+                "Olá. Eu sou o Orkio, a Business Execution Engine da PatroAI. "
+                "Posso explicar um negócio, estruturar um business plan sofisticado ou orientar a próxima execução com clareza e governança."
+            )
 
         if _is_presence_status_question_request(text) or any(token in normalized for token in [
             "estamos online",
@@ -27121,6 +27119,109 @@ async def orchestrate(
 # ═══════════════════════════════════════════════════════════════════════════════
 # END PATCH_ORCH
 # ═══════════════════════════════════════════════════════════════════════════════
+
+
+@app.post("/api/tts/public")
+async def tts_public_endpoint(
+    inp: TTSIn,
+    x_org_slug: Optional[str] = Header(default=None),
+    x_trace_id: Optional[str] = Header(default=None),
+):
+    """Public landing TTS for Orkio voice hero.
+    Safe subset:
+    - no auth
+    - no agent/message lookup
+    - short sanitized text only
+    - default tenant/public only
+    """
+    trace_id = x_trace_id or new_id()
+    if OpenAI is None:
+        raise HTTPException(status_code=503, detail="OpenAI SDK not available")
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        raise HTTPException(status_code=503, detail="OPENAI_API_KEY not configured")
+
+    org = (x_org_slug or default_tenant()).strip() or default_tenant()
+    if tenant_mode() == "single":
+        org = default_tenant()
+
+    default_tts_voice = _normalize_voice_id(
+        (os.getenv("OPENAI_TTS_VOICE_DEFAULT", "") or os.getenv("OPENAI_REALTIME_VOICE_DEFAULT", "shimmer")),
+        default="shimmer",
+    )
+    _VALID_VOICES = ("alloy","ash","ballad","cedar","coral","echo","fable","marin","nova","onyx","sage","shimmer","verse")
+    voice = _normalize_voice_id(inp.voice or default_tts_voice, default=default_tts_voice)
+    if voice not in _VALID_VOICES:
+        voice = default_tts_voice if default_tts_voice in _VALID_VOICES else "shimmer"
+
+    tts_input = _sanitize_tts_text(inp.text or "")
+    if not tts_input:
+        raise HTTPException(status_code=400, detail="TTS text is empty after sanitization")
+    if len(tts_input) > 900:
+        tts_input = tts_input[:900].strip()
+
+    speed = max(0.25, min(4.0, float(inp.speed or 1.0)))
+    tts_model = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts").strip() or "gpt-4o-mini-tts"
+    try:
+        client = OpenAI(api_key=api_key)
+        response = client.audio.speech.create(
+            model=tts_model,
+            voice=voice,
+            input=tts_input,
+            speed=speed,
+            response_format="mp3",
+        )
+        from fastapi.responses import StreamingResponse
+        import io
+        audio_bytes = _read_audio_bytes(response)
+        logger.info(
+            "v2v_tts_public_ok trace_id=%s org=%s voice=%s bytes=%d",
+            trace_id, org, voice, len(audio_bytes),
+        )
+        return StreamingResponse(
+            io.BytesIO(audio_bytes),
+            media_type="audio/mpeg",
+            headers={
+                "Content-Disposition": "inline; filename=tts-public.mp3",
+                "Cache-Control": "no-cache",
+                "X-Trace-Id": trace_id,
+                "X-V2V-Voice": voice,
+                "X-V2V-Public": "1",
+            },
+        )
+    except Exception as e:
+        fallback_voice = {"cedar": "shimmer", "marin": "shimmer"}.get(voice, "shimmer")
+        logger.warning(
+            "v2v_tts_public_fallback trace_id=%s org=%s original_model=%s original_voice=%s fallback_voice=%s error=%s",
+            trace_id, org, tts_model, voice, fallback_voice, str(e)
+        )
+        try:
+            client = OpenAI(api_key=api_key)
+            response = client.audio.speech.create(
+                model="gpt-4o-mini-tts",
+                voice=fallback_voice,
+                input=tts_input,
+                speed=speed,
+                response_format="mp3",
+            )
+            from fastapi.responses import StreamingResponse
+            import io
+            audio_bytes = _read_audio_bytes(response)
+            return StreamingResponse(
+                io.BytesIO(audio_bytes),
+                media_type="audio/mpeg",
+                headers={
+                    "Content-Disposition": "inline; filename=tts-public.mp3",
+                    "Cache-Control": "no-cache",
+                    "X-Trace-Id": trace_id,
+                    "X-V2V-Voice": fallback_voice,
+                    "X-V2V-Public": "1",
+                },
+            )
+        except Exception as e2:
+            logger.exception("v2v_tts_public_fail trace_id=%s org=%s error=%s", trace_id, org, str(e2))
+            raise HTTPException(status_code=503, detail="TTS_PUBLIC_UNAVAILABLE")
+
 
 @app.post("/api/tts")
 async def tts_endpoint(
