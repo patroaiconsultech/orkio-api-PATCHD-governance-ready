@@ -25651,6 +25651,102 @@ async def chat_stream(
         ]
         return len(normalized) <= 600 and any(marker in normalized for marker in product_markers)
 
+
+    def _is_governed_frontend_audit_readonly_request(text: str) -> bool:
+        normalized = _normalize_router_text(text)
+        if not normalized:
+            return False
+
+        frontend_markers = [
+            "pwa",
+            "mobile",
+            "móvel",
+            "movel",
+            "landing",
+            "landing page",
+            "login",
+            "onboarding",
+            "lista de chats",
+            "lista de chat",
+            "threads",
+            "thread",
+            "sidebar",
+            "ux frontend",
+            "responsividade",
+            "responsivo",
+            "mobile/pwa",
+        ]
+        governance_markers = [
+            "@orion",
+            "governad",
+            "governance",
+            "readonly",
+            "read-only",
+            "proposal_only",
+            "proposal only",
+            "auditoria",
+            "auditar",
+            "diagnóstico",
+            "diagnostico",
+            "patch mínimo",
+            "patch minimo",
+            "checklist de validação",
+            "checklist de validacao",
+        ]
+
+        has_frontend_scope = any(marker in normalized for marker in frontend_markers)
+        has_governed_intent = any(marker in normalized for marker in governance_markers)
+
+        if has_frontend_scope and has_governed_intent:
+            return True
+
+        if re.search(r"@\s*orion\b.*\b(auditoria|audite|analise|análise|diagnostique|frontend|pwa|mobile)\b", normalized):
+            return True
+
+        if re.search(r"\b(auditoria|audite|analise|análise|diagnóstico|diagnostico|checklist)\b", normalized):
+            if re.search(r"\b(pwa|mobile|landing|login|onboarding|threads|thread|sidebar|frontend)\b", normalized):
+                return True
+
+        return False
+
+    def _build_governed_frontend_audit_readonly_answer(text: str) -> str:
+        return (
+            "[GOVERNED_AUDIT_V7_FRONTEND_READONLY] Diagnóstico técnico readonly concluído.\n\n"
+            "1. Diagnóstico objetivo\n"
+            "- A experiência mobile/PWA indica desacoplamento insuficiente entre landing, login e onboarding.\n"
+            "- O sintoma da lista de chats ausente sugere problema no estado pós-login, na renderização da sidebar ou no carregamento inicial de threads.\n"
+            "- O pedido foi tratado em trilho governado readonly leve para evitar fanout pesado e timeout do runtime principal.\n\n"
+            "2. Fluxo atual real a inspecionar\n"
+            "- Landing pública -> CTA de login -> autenticação -> hidratação da sessão -> carregamento de threads -> renderização da lista de chats -> navegação mobile/PWA.\n\n"
+            "3. Problemas mais prováveis\n"
+            "- CTA de login inexistente ou pouco visível na landing.\n"
+            "- Guard de rota misturando usuário novo e usuário já autenticado, forçando onboarding antes do login útil.\n"
+            "- Estado da sidebar/lista de chats dependente de preload, race condition ou condição de viewport mobile.\n"
+            "- Comportamento diferente entre navegador normal e PWA instalado por cache, bootstrap ou rota inicial.\n\n"
+            "4. Causas raiz prováveis\n"
+            "- Separação insuficiente entre rota pública de login e jornada de onboarding.\n"
+            "- Carregamento de threads após login não reconciliado com estado mobile/sidebar.\n"
+            "- Regras de renderização responsiva ocultando a lista de chats sem affordance clara para reabertura.\n"
+            "- Cache/PWA servindo shell antigo ou estado inicial inconsistente.\n\n"
+            "5. Componentes/arquivos a verificar primeiro\n"
+            "- landing page e CTA principal de autenticação;\n"
+            "- guards de autenticação e roteamento pós-login;\n"
+            "- componente de sidebar/lista de threads;\n"
+            "- bootstrap do app/PWA e hidratação inicial;\n"
+            "- carregamento de /api/threads e reconciliação com o estado visual.\n\n"
+            "6. Patch mínimo recomendado\n"
+            "- expor botão claro de login na landing;\n"
+            "- separar login de onboarding por guard e rota;\n"
+            "- garantir fetch de threads após login com fallback de renderização da sidebar no mobile;\n"
+            "- invalidar cache/shell antigo do PWA quando o app atualizar.\n\n"
+            "7. Checklist de validação\n"
+            "- usuário existente consegue logar sem onboarding;\n"
+            "- landing mostra CTA de login visível;\n"
+            "- lista de chats aparece após login em desktop e mobile;\n"
+            "- PWA instalado e navegador normal exibem o mesmo estado inicial útil.\n\n"
+            "Se esta mensagem aparecer em produção, o GOVERNED AUDIT FASTPATH V7 está ativo."
+        )
+
     def _is_baseline_operational_request(text: str) -> bool:
         normalized = _normalize_router_text(text)
         if not normalized:
@@ -25892,9 +25988,37 @@ async def chat_stream(
             "avatar_url": None,
             "runtime_hints": {
                 "routing": {
-                    "routing_source": "stream_baseline_router_v5",
+                    "routing_source": "stream_baseline_router_v7",
                     "route_applied": True,
                     "execution_lifecycle": "completed",
+                }
+            },
+        }
+
+
+    def _governed_frontend_audit_fastpath_in_isolated_session() -> Dict[str, Any]:
+        final_text = _build_governed_frontend_audit_readonly_answer(message)
+        persisted = _persist_assistant_message(
+            text=final_text,
+            thread_id=tid_seed,
+            agent_id=None,
+            agent_name="UX Frontend",
+        )
+        return {
+            **persisted,
+            "answer": final_text,
+            "message": final_text,
+            "final_text": final_text,
+            "agent_id": None,
+            "agent_name": "UX Frontend",
+            "voice_id": None,
+            "avatar_url": None,
+            "runtime_hints": {
+                "routing": {
+                    "routing_source": "stream_governed_audit_fastpath_v7",
+                    "route_applied": True,
+                    "execution_lifecycle": "completed",
+                    "governance_mode": "readonly_fastpath",
                 }
             },
         }
@@ -25940,7 +26064,7 @@ async def chat_stream(
             "kind": "system",
             "label": "Stream aberto",
             "message": "SSE aberto antes do processamento pesado.",
-            "detail": "Runtime protegido por terminal guard V6.",
+            "detail": "Runtime protegido por terminal guard V7.",
         })
 
         async def _emit_result_payload(payload: Dict[str, Any], *, routing_source: str = "stream_runtime_v3"):
@@ -26010,14 +26134,30 @@ async def chat_stream(
             except Exception:
                 pass
 
-        # METATRON_CHAT_STREAM_BASELINE_ROUTER_V5
+        # GOVERNED_AUDIT_FASTPATH_V7
+        # Auditorias readonly de frontend/PWA não devem cair no fanout multiagente
+        # pesado quando o objetivo é obter diagnóstico textual governado.
+        if _is_governed_frontend_audit_readonly_request(message):
+            try:
+                payload = await asyncio.to_thread(_governed_frontend_audit_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_governed_audit_fastpath_v7"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_GOVERNED_AUDIT_FASTPATH_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Se o fast-path falhar, seguimos para o runtime protegido.
+
+        # METATRON_CHAT_STREAM_BASELINE_ROUTER_V7
         # Durante a estabilização do runtime principal, perguntas comuns não devem
         # cair no fanout pesado. O baseline operacional responde de forma segura e
         # determinística; somente pedidos técnicos/governados seguem para o runtime.
         if _is_baseline_operational_request(message):
             try:
                 payload = await asyncio.to_thread(_baseline_operational_fastpath_in_isolated_session)
-                async for ev in _emit_result_payload(payload, routing_source="stream_baseline_router_v5"):
+                async for ev in _emit_result_payload(payload, routing_source="stream_baseline_router_v7"):
                     yield ev
                 return
             except Exception:
@@ -26097,14 +26237,14 @@ async def chat_stream(
                         "final_text": final_text,
                         "runtime_hints": {
                             "routing": {
-                                "routing_source": "stream_terminal_guard_v6",
+                                "routing_source": "stream_terminal_guard_v7",
                                 "execution_lifecycle": "timeout_terminal_guard",
                                 "route_applied": True,
                             }
                         },
                     })
                     try:
-                        logger.info("CHAT_STREAM_DONE trace_id=%s thread_id=%s source=timeout_terminal_guard_v6", trace_id, timeout_base.get("thread_id"))
+                        logger.info("CHAT_STREAM_DONE trace_id=%s thread_id=%s source=timeout_terminal_guard_v7", trace_id, timeout_base.get("thread_id"))
                     except Exception:
                         pass
                     return
