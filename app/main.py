@@ -25753,6 +25753,67 @@ async def chat_stream(
         },
     )
 
+class OrchestrateIn(BaseModel):
+    tenant: str = Field(default_tenant(), min_length=1)
+    thread_id: Optional[str] = None
+    message: str = Field(min_length=1)
+    client_message_id: Optional[str] = None
+    trace_id: Optional[str] = None
+
+
+def _orchestrate_planner_prompt(agents_info: List[Dict[str, Any]]) -> str:
+    """Build the system prompt for the Orkio planner LLM call."""
+    agent_lines = []
+    for ag in agents_info:
+        name = ag.get("name") or "Agent"
+        desc = ag.get("description") or ag.get("system_prompt", "")[:200] or "General assistant"
+        agent_lines.append(f"- {name}: {desc}")
+    agents_block = "\n".join(agent_lines)
+    return (
+        "You are Orkio, the CEO and orchestrator of a multi-agent organization.\n"
+        "Your job is to receive a high-level task from the user and decompose it into\n"
+        "specific, actionable sub-tasks — one per agent — based on each agent's role.\n\n"
+        "Available agents:\n"
+        f"{agents_block}\n\n"
+        "RULES:\n"
+        "1. Return ONLY a valid JSON array. No markdown, no explanation, no code fences.\n"
+        "2. Each element must be: {\"agent_name\": \"<exact name>\", \"sub_task\": \"<specific instruction>\"}\n"
+        "3. Order the array by logical execution priority (who should go first).\n"
+        "4. Each sub_task must be specific and actionable — NOT the original user message.\n"
+        "5. Only include agents that are relevant to the task. Skip irrelevant ones.\n"
+        "6. Write sub_tasks in the same language as the user's message.\n"
+        "7. Maximum 8 agents per plan.\n"
+    )
+
+
+def _parse_orchestration_plan(raw: str) -> List[Dict[str, str]]:
+    """Parse the LLM planner output into a list of {agent_name, sub_task}."""
+    import re as _re
+    # Strip markdown code fences if present
+    cleaned = _re.sub(r"```(?:json)?\s*", "", raw or "").strip().rstrip("`")
+    try:
+        parsed = json.loads(cleaned)
+    except Exception:
+        # Try to find JSON array in the text
+        match = _re.search(r"\[.*\]", cleaned, _re.DOTALL)
+        if match:
+            try:
+                parsed = json.loads(match.group())
+            except Exception:
+                return []
+        else:
+            return []
+    if not isinstance(parsed, list):
+        return []
+    result = []
+    for item in parsed[:8]:
+        if isinstance(item, dict) and item.get("agent_name") and item.get("sub_task"):
+            result.append({
+                "agent_name": str(item["agent_name"]).strip(),
+                "sub_task": str(item["sub_task"]).strip(),
+            })
+    return result
+
 @app.post("/api/orchestrate")
 async def orchestrate(
     inp: OrchestrateIn,
