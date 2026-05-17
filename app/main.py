@@ -25495,7 +25495,7 @@ async def chat_stream(
     db: Session = Depends(get_db),
 ):
     """
-    METATRON_CHAT_STREAM_OPEN_FIRST_RECOVERY
+    METATRON_CHAT_STREAM_TERMINAL_GUARD_V2
 
     Recovery shim for the production chat stream.
 
@@ -25591,7 +25591,14 @@ async def chat_stream(
 
         task = asyncio.create_task(asyncio.to_thread(_run_direct_chat_in_isolated_session))
         keepalive_i = 0
-        max_wait_s = 120
+        # METATRON_CHAT_STREAM_TERMINAL_GUARD_V2
+        # The stream must never leave the UI waiting indefinitely after "stream_open".
+        # Keep the platform operational even if the heavy direct runtime stalls.
+        try:
+            max_wait_s = int(os.getenv("CHAT_STREAM_RUNTIME_TIMEOUT_S", "30") or "30")
+        except Exception:
+            max_wait_s = 30
+        max_wait_s = max(10, min(max_wait_s, 45))
         deadline = _time.time() + max_wait_s
 
         try:
@@ -25608,20 +25615,31 @@ async def chat_stream(
                         task.cancel()
                     except Exception:
                         pass
+                    final_text = "Não consegui concluir a resposta pelo runtime principal nesta tentativa. O stream foi encerrado com segurança; tente novamente em instantes."
                     yield _metatron_sse("error", {
                         **base,
                         "code": "CHAT_STREAM_BACKEND_TIMEOUT",
                         "message": "O runtime de chat excedeu o tempo máximo seguro.",
                     })
+                    yield _metatron_sse("chunk", {
+                        **base,
+                        "delta": final_text,
+                        "content": final_text,
+                    })
+                    yield _metatron_sse("agent_done", {
+                        **base,
+                        "done": True,
+                        "message": "Resposta operacional de segurança emitida.",
+                    })
                     yield _metatron_sse("done", {
                         **base,
                         "done": True,
                         "assistant_persisted": False,
-                        "final_text": "",
+                        "final_text": final_text,
                         "runtime_hints": {
                             "routing": {
-                                "routing_source": "stream_recovery_shim",
-                                "execution_lifecycle": "timeout",
+                                "routing_source": "stream_terminal_guard_v2",
+                                "execution_lifecycle": "timeout_terminal_guard",
                             }
                         },
                     })
@@ -25634,6 +25652,13 @@ async def chat_stream(
                     "n": keepalive_i,
                     "phase": "direct_runtime_wait",
                 })
+                if keepalive_i % 3 == 0:
+                    yield _metatron_sse("status", {
+                        **base,
+                        "status": "Runtime ainda processando.",
+                        "phase": "direct_runtime_wait",
+                        "elapsed_s": int(_time.time() - started_at),
+                    })
                 await asyncio.sleep(2.0)
 
             result = await task
@@ -25664,12 +25689,13 @@ async def chat_stream(
                 "phase": "answer_ready",
             })
 
-            if final_text:
-                yield _metatron_sse("chunk", {
-                    **final_base,
-                    "delta": final_text,
-                    "content": final_text,
-                })
+            if not final_text:
+                final_text = "O runtime principal concluiu sem texto final. O stream foi encerrado com segurança."
+            yield _metatron_sse("chunk", {
+                **final_base,
+                "delta": final_text,
+                "content": final_text,
+            })
 
             yield _metatron_sse("agent_done", {
                 **final_base,
@@ -25696,17 +25722,28 @@ async def chat_stream(
 
         except HTTPException as exc:
             detail = exc.detail
+            final_text = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False)
             yield _metatron_sse("error", {
                 **base,
                 "code": f"HTTP_{exc.status_code}",
-                "message": detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False),
+                "message": final_text,
                 "status_code": exc.status_code,
+            })
+            yield _metatron_sse("chunk", {
+                **base,
+                "delta": final_text,
+                "content": final_text,
+            })
+            yield _metatron_sse("agent_done", {
+                **base,
+                "done": True,
+                "message": "Erro HTTP encerrado com segurança.",
             })
             yield _metatron_sse("done", {
                 **base,
                 "done": True,
                 "assistant_persisted": False,
-                "final_text": "",
+                "final_text": final_text,
                 "runtime_hints": {
                     "routing": {
                         "routing_source": "stream_recovery_shim",
@@ -25719,16 +25756,27 @@ async def chat_stream(
                 logger.exception("CHAT_STREAM_RECOVERY_SHIM_FAILED trace_id=%s", trace_id)
             except Exception:
                 pass
+            final_text = "Falha interna no stream de chat. A tentativa foi encerrada com segurança."
             yield _metatron_sse("error", {
                 **base,
                 "code": "CHAT_STREAM_RECOVERY_SHIM_FAILED",
                 "message": str(exc),
             })
+            yield _metatron_sse("chunk", {
+                **base,
+                "delta": final_text,
+                "content": final_text,
+            })
+            yield _metatron_sse("agent_done", {
+                **base,
+                "done": True,
+                "message": "Falha interna encerrada com segurança.",
+            })
             yield _metatron_sse("done", {
                 **base,
                 "done": True,
                 "assistant_persisted": False,
-                "final_text": "",
+                "final_text": final_text,
                 "runtime_hints": {
                     "routing": {
                         "routing_source": "stream_recovery_shim",
