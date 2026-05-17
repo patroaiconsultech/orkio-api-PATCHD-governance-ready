@@ -25495,14 +25495,14 @@ async def chat_stream(
     db: Session = Depends(get_db),
 ):
     """
-    METATRON_CHAT_STREAM_RUNTIME_STABILIZER_V3
+    METATRON_CHAT_STREAM_BASELINE_ROUTER_V4
 
     Production recovery route for /api/chat/stream.
 
     Guarantees:
     - SSE opens before heavy runtime work.
-    - Simple presence/online checks respond through a fast deterministic path.
-    - Heavy /api/chat runtime runs in an isolated DB session.
+    - Common operational messages respond through a deterministic baseline path.
+    - Heavy /api/chat runtime runs only for explicit technical/governed requests.
     - If the runtime stalls, the stream emits a recoverable error + chunk + done.
     - The terminal operational message is persisted when possible so reconcile can see it.
     - No frontend should remain stuck in "Gerando resposta..." indefinitely.
@@ -25543,12 +25543,81 @@ async def chat_stream(
         except Exception:
             return {"raw": str(obj)}
 
-    def _is_presence_or_ping_request(text: str) -> bool:
+    def _normalize_router_text(text: str) -> str:
         raw = (text or "").strip().lower()
         if not raw:
+            return ""
+        normalized = re.sub(r"[^a-zà-ÿ0-9@/\-_.\s?!.:]+", " ", raw, flags=re.IGNORECASE)
+        return re.sub(r"\s+", " ", normalized).strip()
+
+    def _is_governed_runtime_request(text: str) -> bool:
+        normalized = _normalize_router_text(text)
+        if not normalized:
             return False
-        normalized = re.sub(r"[^a-zà-ÿ0-9@\s?!.:-]+", " ", raw, flags=re.IGNORECASE)
-        normalized = re.sub(r"\s+", " ", normalized).strip()
+
+        direct_terms = [
+            "proposal_only",
+            "proposal only",
+            "governança",
+            "governance",
+            "human approval",
+            "aprovação humana",
+            "readonly",
+            "read-only",
+            "patch",
+            "diff",
+            "pull request",
+            "github",
+            "commit",
+            "merge",
+            "rollback",
+            "hotfix",
+            "root cause",
+            "causa raiz",
+            "auditoria",
+            "auditar",
+            "diagnóstico técnico",
+            "diagnostico tecnico",
+            "app/main.py",
+            "main.py",
+            "api.js",
+            "appconsole",
+            "frontend",
+            "backend",
+            "fastapi",
+            "react",
+            "railway",
+            "postgres",
+            "webrtc",
+            "stage mode",
+            "v2v",
+            "sse",
+            "openai api",
+            "@orion execute",
+            "@orion patch",
+            "@auditor",
+            "@cto",
+        ]
+        if any(term in normalized for term in direct_terms):
+            return True
+
+        if re.search(r"@\s*(orion|auditor|cto)\b.*\b(patch|corrij|ajust|implemente|aplique|audite|analise|proposal|governan|execute|pr|diff|merge|commit)\b", normalized):
+            return True
+
+        if re.search(r"\b(corrija|corrigir|ajuste|ajustar|implemente|implementar|altere|alterar|aplique|executar|execute|audite|auditar|analise|analisar|diagnostique|investigue|proponha|gere|entregue|monte|prepare)\b", normalized):
+            if re.search(r"\b(main\.py|app/main\.py|api\.js|appconsole|frontend|backend|stream|sse|runtime|tenant|rbac|governan|patch|diff|github|pr\b|commit|merge|fastapi|react|railway|postgres|openai|stage mode|v2v)\b", normalized):
+                return True
+
+        return False
+
+    def _is_baseline_operational_request(text: str) -> bool:
+        normalized = _normalize_router_text(text)
+        if not normalized:
+            return True
+
+        if _is_presence_status_question_request(text):
+            return True
+
         exact = {
             "oi",
             "olá",
@@ -25565,10 +25634,22 @@ async def chat_stream(
             "orkio responda apenas ok",
             "responda apenas: ok",
             "responda apenas ok",
+            "qual o status?",
+            "qual é o status?",
+            "esta funcionando?",
+            "está funcionando?",
+            "o chat esta funcionando?",
+            "o chat está funcionando?",
+            "o chat esta estavel?",
+            "o chat está estável?",
+            "acabou o problema de runtime?",
+            "onde esta a falha?",
+            "onde está a falha?",
         }
         if normalized in exact:
             return True
-        if len(normalized) <= 80 and any(p in normalized for p in [
+
+        operational_markers = [
             "estamos online",
             "estas online",
             "estás online",
@@ -25576,9 +25657,78 @@ async def chat_stream(
             "você está online",
             "sistema online",
             "orkio online",
-        ]):
+            "acabou o problema de runtime",
+            "problema de runtime",
+            "qual o status",
+            "qual é o status",
+            "onde esta a falha",
+            "onde está a falha",
+            "está funcionando",
+            "esta funcionando",
+            "chat está funcionando",
+            "chat esta funcionando",
+            "chat está estável",
+            "chat esta estavel",
+            "canal básico",
+            "canal basico",
+            "stream está estável",
+            "stream esta estavel",
+        ]
+        if len(normalized) <= 220 and any(marker in normalized for marker in operational_markers):
             return True
-        return False
+
+        # Durante a estabilização do runtime principal, toda mensagem não governada
+        # recebe baseline operacional seguro em vez de acionar o fanout pesado.
+        return not _is_governed_runtime_request(text)
+
+    def _build_baseline_operational_answer(text: str) -> str:
+        normalized = _normalize_router_text(text)
+
+        if not normalized or normalized in {"oi", "olá", "ola", "ok"}:
+            return "Olá. O canal básico do chat está ativo. O runtime principal ainda está em estabilização para respostas complexas."
+
+        if _is_presence_status_question_request(text) or any(token in normalized for token in [
+            "estamos online",
+            "estas online",
+            "estás online",
+            "voce esta online",
+            "você está online",
+            "sistema online",
+            "orkio online",
+            "online?",
+            "ping",
+        ]):
+            return "Sim, estamos online. O transporte do chat está ativo e o canal básico está funcional."
+
+        if any(token in normalized for token in [
+            "acabou o problema de runtime",
+            "problema de runtime",
+            "runtime",
+            "está funcionando",
+            "esta funcionando",
+            "chat está funcionando",
+            "chat esta funcionando",
+            "chat está estável",
+            "chat esta estavel",
+        ]):
+            return "O transporte do chat está ativo. O runtime principal ainda está sendo estabilizado para respostas complexas, mas o canal básico está funcional."
+
+        if any(token in normalized for token in [
+            "qual o status",
+            "qual é o status",
+            "status atual",
+        ]):
+            return "Status atual: transporte do chat ativo, SSE abrindo corretamente e canal básico funcional. O runtime principal segue em estabilização."
+
+        if any(token in normalized for token in [
+            "onde está a falha",
+            "onde esta a falha",
+            "qual a falha",
+            "qual é a falha",
+        ]):
+            return "A falha atual está concentrada no runtime principal e no fanout multiagente. O transporte do chat está ativo e o canal básico continua funcional."
+
+        return "O canal básico do chat está ativo. Nesta fase, respostas comuns seguem pelo baseline operacional seguro, enquanto o runtime principal fica reservado para pedidos técnicos e governados."
 
     def _ensure_thread_and_user_message(db2: Session) -> str:
         tid = tid_seed
@@ -25668,8 +25818,8 @@ async def chat_stream(
             except Exception:
                 pass
 
-    def _presence_fastpath_in_isolated_session() -> Dict[str, Any]:
-        final_text = "Sim, estamos online. O runtime de chat está ativo e pronto para continuar."
+    def _baseline_operational_fastpath_in_isolated_session() -> Dict[str, Any]:
+        final_text = _build_baseline_operational_answer(message)
         persisted = _persist_assistant_message(
             text=final_text,
             thread_id=tid_seed,
@@ -25687,7 +25837,7 @@ async def chat_stream(
             "avatar_url": None,
             "runtime_hints": {
                 "routing": {
-                    "routing_source": "stream_presence_fastpath_v3",
+                    "routing_source": "stream_baseline_router_v4",
                     "route_applied": True,
                     "execution_lifecycle": "completed",
                 }
@@ -25805,20 +25955,22 @@ async def chat_stream(
             except Exception:
                 pass
 
-        # Fast operational path for online/ping/status messages. This avoids sending a
-        # simple health check through slow Team/multi-agent fanout.
-        if _is_presence_or_ping_request(message):
+        # METATRON_CHAT_STREAM_BASELINE_ROUTER_V4
+        # Durante a estabilização do runtime principal, perguntas comuns não devem
+        # cair no fanout pesado. O baseline operacional responde de forma segura e
+        # determinística; somente pedidos técnicos/governados seguem para o runtime.
+        if _is_baseline_operational_request(message):
             try:
-                payload = await asyncio.to_thread(_presence_fastpath_in_isolated_session)
-                async for ev in _emit_result_payload(payload, routing_source="stream_presence_fastpath_v3"):
+                payload = await asyncio.to_thread(_baseline_operational_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_baseline_router_v4"):
                     yield ev
                 return
-            except Exception as exc:
+            except Exception:
                 try:
-                    logger.exception("CHAT_STREAM_FASTPATH_FAILED trace_id=%s", trace_id)
+                    logger.exception("CHAT_STREAM_BASELINE_FASTPATH_FAILED trace_id=%s", trace_id)
                 except Exception:
                     pass
-                # Continue into protected runtime if the fastpath persistence fails.
+                # Se a persistência do baseline falhar, seguimos para o runtime protegido.
 
         task = asyncio.create_task(asyncio.to_thread(_run_direct_chat_in_isolated_session))
         keepalive_i = 0
