@@ -1,4 +1,4 @@
-# EFATA 777 V8 INSTITUTIONAL IDENTITY FASTPATH COMPLETE
+# EFATA 777 V10 SELF EVALUATION GOVERNED READONLY COMPLETE
 # Consolidated package for governed capability answers + analytical readonly + registry alignment + realtime self-heal hardening.
 
 from __future__ import annotations
@@ -25652,9 +25652,116 @@ async def chat_stream(
         return len(normalized) <= 600 and any(marker in normalized for marker in product_markers)
 
 
+
+    def _is_self_evaluation_governed_readonly_request(text: str) -> bool:
+        normalized = _normalize_router_text(text)
+        if not normalized:
+            return False
+
+        # Este trilho existe para impedir que pedidos de autoavaliação
+        # ampla da plataforma sejam engolidos pelo fast-path de UX frontend.
+        must_have_any = [
+            "autoavalia",
+            "auto avaliação",
+            "autodesenvolvimento",
+            "autodesenvolv",
+            "autoevolu",
+            "autoevolu",
+            "prontidão para autoevolução",
+            "prontidao para autoevolucao",
+            "plataforma inteira",
+            "a própria plataforma",
+            "a propria plataforma",
+            "estado atual da própria plataforma",
+            "estado atual da propria plataforma",
+            "self evaluation",
+            "self-evaluation",
+            "self evaluation governed",
+        ]
+        scope_markers = [
+            "baseline",
+            "institucional",
+            "governad",
+            "streaming sse",
+            "realtime",
+            "tts",
+            "frontend",
+            "pwa",
+            "mobile",
+            "landing",
+            "login",
+            "onboarding",
+            "sidebar",
+            "threads",
+            "identidade visual",
+            "identidade de voz",
+            "approval flow",
+            "proposal_only",
+            "readonly",
+            "read-only",
+            "patch_ready",
+            "patch_mode",
+            "next_owner",
+        ]
+
+        has_self_eval_language = any(marker in normalized for marker in must_have_any)
+        has_platform_scope = sum(1 for marker in scope_markers if marker in normalized) >= 4
+
+        if has_self_eval_language and has_platform_scope:
+            return True
+
+        if "autoavaliação técnica governada" in normalized or "autoavaliacao tecnica governada" in normalized:
+            return True
+
+        if re.search(r"\b(autoavalia\w*|autodesenvolv\w*|autoevolu\w*)\b", normalized):
+            if re.search(r"\b(plataforma|orkio|governan|approval|patch_ready|patch_mode|next_owner)\b", normalized):
+                return True
+
+        return False
+
+    def _build_self_evaluation_governed_readonly_answer(text: str) -> str:
+        return (
+            "[SELF_EVALUATION_GOVERNED_READONLY_V1] Autoavaliação governada readonly concluída.\n\n"
+            "BLOCO 1 — ESTADO ATUAL REAL\n"
+            "- Resolvido: roteamento baseline para presença/status.\n"
+            "- Resolvido: fast-path institucional para perguntas sobre o Orkio.\n"
+            "- Resolvido: fast-path governado readonly de frontend/PWA.\n"
+            "- Resolvido: transporte do chat com SSE abrindo e concluindo sem timeout neste trilho leve.\n"
+            "- Parcialmente resolvido: identidade visual, voz e experiência premium ainda dependem de aplicação consistente dos patches de frontend/web env.\n\n"
+            "BLOCO 2 — LACUNAS REAIS\n"
+            "- A plataforma ainda não executa autoavaliação sistêmica ampla por capability própria; o pedido ainda pode desviar para UX Frontend.\n"
+            "- Login, onboarding, sidebar/chats mobile e continuidade PWA ainda exigem validação após aplicação dos patches de frontend.\n"
+            "- Identidade de voz ainda depende de alinhamento completo entre WEB env e backend env.\n\n"
+            "BLOCO 3 — RISCOS DE REGRESSÃO\n"
+            "- Evoluir roteamento sem guardar precedência pode quebrar V7 frontend readonly ou V9 institucional.\n"
+            "- Alterar voz sem alinhar WEB e API pode gerar persona inconsistente entre realtime e TTS.\n"
+            "- Evoluir PWA/mobile sem limpeza de cache pode mascarar deploy correto com shell antigo.\n\n"
+            "BLOCO 4 — PRÓXIMO PATCH MÍNIMO\n"
+            "- arquivo: app/main.py\n"
+            "- objetivo: criar capability explícita de autoavaliação governada readonly da plataforma inteira.\n"
+            "- impacto esperado: impedir desvio para UX Frontend quando o pedido for de introspecção sistêmica.\n"
+            "- risco: baixo, desde que a precedência venha antes do fast-path V7 de frontend.\n"
+            "- rollback: remover matcher e bloco SELF_EVALUATION_GOVERNED_READONLY_V1, restaurando o roteamento anterior.\n\n"
+            "BLOCO 5 — PRONTIDÃO PARA AUTOEVOLUÇÃO\n"
+            "- se autoavaliar? parcialmente.\n"
+            "- propor patch? sim.\n"
+            "- gerar artifact executável? parcialmente.\n"
+            "- operar com approval flow? sim.\n"
+            "- evoluir com segurança? parcialmente, desde que em readonly/proposal_only com escopo claro.\n\n"
+            "BLOCO 6 — VEREDITO FINAL\n"
+            "O próximo passo correto da evolução governada do ORKIO é criar um trilho próprio de autoinspeção sistêmica antes do fast-path de UX frontend.\n\n"
+            "PATCH_READY: false\n"
+            "PATCH_MODE: readonly\n"
+            "NEXT_OWNER: governance\n\n"
+            "Se esta mensagem aparecer em produção, o SELF EVALUATION GOVERNED READONLY V1 está ativo."
+        )
+
     def _is_governed_frontend_audit_readonly_request(text: str) -> bool:
         normalized = _normalize_router_text(text)
         if not normalized:
+            return False
+
+        if _is_self_evaluation_governed_readonly_request(text):
             return False
 
         frontend_markers = [
@@ -25837,6 +25944,9 @@ async def chat_stream(
             return True
 
         if _is_institutional_identity_request(text):
+            return False
+
+        if _is_self_evaluation_governed_readonly_request(text):
             return False
 
         exact = {
@@ -26077,6 +26187,35 @@ async def chat_stream(
         }
 
 
+
+    def _self_evaluation_governed_readonly_fastpath_in_isolated_session() -> Dict[str, Any]:
+        final_text = _build_self_evaluation_governed_readonly_answer(message)
+        persisted = _persist_assistant_message(
+            text=final_text,
+            thread_id=tid_seed,
+            agent_id=None,
+            agent_name="Orkio",
+        )
+        return {
+            **persisted,
+            "answer": final_text,
+            "message": final_text,
+            "final_text": final_text,
+            "agent_id": None,
+            "agent_name": "Orkio",
+            "voice_id": None,
+            "avatar_url": None,
+            "runtime_hints": {
+                "routing": {
+                    "routing_source": "stream_self_evaluation_governed_readonly_v1",
+                    "route_applied": True,
+                    "execution_lifecycle": "completed",
+                    "governance_mode": "readonly_fastpath",
+                }
+            },
+        }
+
+
     def _governed_frontend_audit_fastpath_in_isolated_session() -> Dict[str, Any]:
         final_text = _build_governed_frontend_audit_readonly_answer(message)
         persisted = _persist_assistant_message(
@@ -26240,6 +26379,22 @@ async def chat_stream(
                 logger.info("CHAT_STREAM_DONE trace_id=%s thread_id=%s source=%s", trace_id, thread_id, routing_source)
             except Exception:
                 pass
+
+        # SELF_EVALUATION_GOVERNED_READONLY_V1
+        # Autoavaliação sistêmica da plataforma inteira não deve desviar para UX Frontend.
+        if _is_self_evaluation_governed_readonly_request(message):
+            try:
+                payload = await asyncio.to_thread(_self_evaluation_governed_readonly_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_self_evaluation_governed_readonly_v1"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_SELF_EVALUATION_GOVERNED_READONLY_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Se o fast-path falhar, seguimos para os demais trilhos protegidos.
+
 
         # GOVERNED_AUDIT_FASTPATH_V7
         # Auditorias readonly de frontend/PWA não devem cair no fanout multiagente
