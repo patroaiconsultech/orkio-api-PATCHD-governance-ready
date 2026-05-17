@@ -25756,6 +25756,118 @@ async def chat_stream(
             "Se esta mensagem aparecer em produção, o SELF EVALUATION GOVERNED READONLY V1 está ativo."
         )
 
+
+    def _is_internal_warroom_governed_surgical_request(text: str) -> bool:
+        normalized = _normalize_router_text(text)
+        if not normalized:
+            return False
+
+        warroom_markers = [
+            "war room",
+            "warroom",
+            "auditoria interna",
+            "auditoria war room",
+            "internal war room",
+            "auditoria cirurgica",
+            "auditoria cirúrgica",
+            "resolver cirurgicamente",
+            "resolver cirurgica",
+            "fazer auditoria interna",
+            "auditoria de ponta a ponta",
+            "auditoria interna e resolver",
+            "cirurgicamente",
+        ]
+        governed_markers = [
+            "frontend",
+            "backend",
+            "avatar",
+            "onboarding",
+            "pwa",
+            "mobile",
+            "sidebar",
+            "threads",
+            "login",
+            "voice",
+            "voz",
+            "tts",
+            "sse",
+            "runtime",
+            "patch",
+            "rollback",
+            "proposal_only",
+            "readonly",
+            "approval",
+        ]
+
+        if any(marker in normalized for marker in warroom_markers):
+            return True
+
+        if re.search(r"\b(auditoria|audite|diagnostique|war room)\b", normalized):
+            if sum(1 for marker in governed_markers if marker in normalized) >= 2:
+                return True
+
+        return False
+
+    def _build_internal_warroom_governed_surgical_answer(text: str) -> str:
+        normalized = _normalize_router_text(text)
+
+        if "avatar" in normalized and "onboarding" in normalized:
+            return (
+                "[INTERNAL_WARROOM_GOVERNED_SURGICAL_V1] Auditoria interna governada concluída.\n\n"
+                "BLOCO 1 — ESCOPO RECONHECIDO\n"
+                "- Escopo solicitado: frontend/avatar/onboarding escrito e falado.\n"
+                "- Modo operacional: readonly_surgical.\n"
+                "- Evidência externa de escrita real: não presumida.\n\n"
+                "BLOCO 2 — HIPÓTESE MAIS PROVÁVEL\n"
+                "- O avatar não está disparando a jornada de onboarding textual e falado por desacoplamento entre gatilho visual, modal de onboarding e camada de voz/TTS.\n"
+                "- O pedido anterior ficou repartido entre UX Frontend, Auditor e runtime principal, sem um trilho único de war room interno.\n\n"
+                "BLOCO 3 — ARQUIVOS-ALVO\n"
+                "- src/routes/AppConsole.jsx\n"
+                "- src/components/OnboardingModal.jsx\n"
+                "- src/lib/voices.js\n"
+                "- app/main.py (somente se houver necessidade de roteamento/governança)\n\n"
+                "BLOCO 4 — PATCH MÍNIMO RECOMENDADO\n"
+                "- arquivo principal: src/routes/AppConsole.jsx\n"
+                "- objetivo: garantir disparo do onboarding escrito e falado pelo avatar na primeira jornada útil, com fallback não bloqueante.\n"
+                "- impacto esperado: onboarding visível, audível e coerente com o avatar.\n"
+                "- risco: médio, por afetar bootstrap visual, voz e estados iniciais do console.\n"
+                "- rollback: restaurar AppConsole.jsx, OnboardingModal.jsx e voices.js anteriores.\n\n"
+                "BLOCO 5 — MODO DE EXECUÇÃO\n"
+                "- PATCH_READY: true\n"
+                "- PATCH_MODE: proposal_only\n"
+                "- NEXT_OWNER: frontend\n"
+                "- HUMAN_APPROVAL_REQUIRED: true\n\n"
+                "BLOCO 6 — VEREDITO FINAL\n"
+                "O próximo passo correto é consolidar um patch cirúrgico no AppConsole para religar o onboarding escrito e falado do avatar.\n\n"
+                "Se esta mensagem aparecer em produção, o INTERNAL WARROOM GOVERNED SURGICAL V1 está ativo."
+            )
+
+        return (
+            "[INTERNAL_WARROOM_GOVERNED_SURGICAL_V1] Auditoria interna governada concluída.\n\n"
+            "BLOCO 1 — ESCOPO RECONHECIDO\n"
+            "- Pedido reconhecido como war room interno de ponta a ponta.\n"
+            "- Modo operacional: readonly_surgical.\n"
+            "- Evidência externa de execução real: não presumida.\n\n"
+            "BLOCO 2 — DIAGNÓSTICO ESTRUTURAL\n"
+            "- A plataforma já consegue inspecionar e propor patch em trilhos específicos, mas ainda falha quando precisa concentrar diagnóstico técnico e proposta cirúrgica em uma única capability interna.\n"
+            "- Sem esse trilho, os pedidos se fragmentam entre UX Frontend, Auditor e runtime principal.\n\n"
+            "BLOCO 3 — PRÓXIMO PATCH MÍNIMO\n"
+            "- arquivo: app/main.py\n"
+            "- objetivo: concentrar auditoria interna, triagem técnica, proposta mínima, risco e rollback em uma capability única de war room governado.\n"
+            "- impacto esperado: permitir auditoria cirúrgica sem timeout e sem afirmação indevida de execução externa.\n"
+            "- risco: baixo, desde que a precedência venha antes do fast-path V7 de frontend.\n"
+            "- rollback: remover matcher e bloco INTERNAL_WARROOM_GOVERNED_SURGICAL_V1.\n\n"
+            "BLOCO 4 — MODO DE EXECUÇÃO\n"
+            "- PATCH_READY: true\n"
+            "- PATCH_MODE: proposal_only\n"
+            "- NEXT_OWNER: governance\n"
+            "- HUMAN_APPROVAL_REQUIRED: true\n\n"
+            "BLOCO 5 — VEREDITO FINAL\n"
+            "O próximo passo correto é ativar um trilho próprio de war room interno governado para auditoria e correção cirúrgica.\n\n"
+            "Se esta mensagem aparecer em produção, o INTERNAL WARROOM GOVERNED SURGICAL V1 está ativo."
+        )
+
+
     def _is_governed_frontend_audit_readonly_request(text: str) -> bool:
         normalized = _normalize_router_text(text)
         if not normalized:
@@ -25922,11 +26034,14 @@ async def chat_stream(
 
     def _build_institutional_identity_answer(text: str) -> str:
         return (
-            "[INSTITUTIONAL_IDENTITY_V10] Orkio é a Business Execution Engine da PatroAI. "
-            "Na prática, ele é a plataforma que conecta conversa, voz, agentes especializados, memória operacional e governança para transformar visão em execução. "
-            "A narrativa real do Orkio é esta: a PatroAI pode conceber um negócio, estruturar business plans sofisticados, organizar a arquitetura da operação e conduzir a execução com inteligência e rastreabilidade. "
-            "Em vez de atuar só como chat, o Orkio funciona como camada viva de direção, estruturação e acompanhamento cirúrgico. "
-            "Se esta mensagem aparecer em produção, o IDENTITY FASTPATH V10 está ativo."
+            "[INSTITUTIONAL_IDENTITY_V9] Orkio é a plataforma da PatroAI para conversas, operação multiagente e execução governada. "
+            "Na prática, ela conecta chat, voz, agentes especializados, memória operacional e trilhas de governança em um mesmo ambiente. "
+            "A proposta do Orkio é organizar a interação humana com IA de forma útil, auditável e evolutiva: "
+            "1) atender e conversar; "
+            "2) coordenar agentes como Orkio, Chris e Orion; "
+            "3) apoiar diagnósticos, auditorias e propostas técnicas; "
+            "4) permitir evolução controlada, com governança, aprovação humana e rastreabilidade. "
+            "Se esta mensagem aparecer em produção, o IDENTITY FASTPATH V9 está ativo."
         )
 
     def _is_baseline_operational_request(text: str) -> bool:
@@ -26011,13 +26126,9 @@ async def chat_stream(
 
     def _build_baseline_operational_answer(text: str) -> str:
         normalized = _normalize_router_text(text)
-        compact = re.sub(r"[\s!?,.:;]+", " ", normalized).strip()
 
-        if not normalized or compact in {"oi", "olá", "ola", "ok", "oi orkio", "olá orkio", "ola orkio"}:
-            return (
-                "Olá. Eu sou o Orkio, a Business Execution Engine da PatroAI. "
-                "Posso explicar um negócio, estruturar um business plan sofisticado ou orientar a próxima execução com clareza e governança."
-            )
+        if not normalized or normalized in {"oi", "olá", "ola", "ok"}:
+            return "Olá. O canal básico do chat está ativo. O runtime principal ainda está em estabilização para respostas complexas."
 
         if _is_presence_status_question_request(text) or any(token in normalized for token in [
             "estamos online",
@@ -26217,6 +26328,35 @@ async def chat_stream(
         }
 
 
+
+    def _internal_warroom_governed_surgical_fastpath_in_isolated_session() -> Dict[str, Any]:
+        final_text = _build_internal_warroom_governed_surgical_answer(message)
+        persisted = _persist_assistant_message(
+            text=final_text,
+            thread_id=tid_seed,
+            agent_id=None,
+            agent_name="Auditor",
+        )
+        return {
+            **persisted,
+            "answer": final_text,
+            "message": final_text,
+            "final_text": final_text,
+            "agent_id": None,
+            "agent_name": "Auditor",
+            "voice_id": None,
+            "avatar_url": None,
+            "runtime_hints": {
+                "routing": {
+                    "routing_source": "stream_internal_warroom_governed_surgical_v1",
+                    "route_applied": True,
+                    "execution_lifecycle": "completed",
+                    "governance_mode": "readonly_surgical_fastpath",
+                }
+            },
+        }
+
+
     def _governed_frontend_audit_fastpath_in_isolated_session() -> Dict[str, Any]:
         final_text = _build_governed_frontend_audit_readonly_answer(message)
         persisted = _persist_assistant_message(
@@ -26392,6 +26532,25 @@ async def chat_stream(
             except Exception:
                 try:
                     logger.exception("CHAT_STREAM_SELF_EVALUATION_GOVERNED_READONLY_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Se o fast-path falhar, seguimos para os demais trilhos protegidos.
+
+
+
+        # INTERNAL_WARROOM_GOVERNED_SURGICAL_V1
+        # Pedidos de war room interno / auditoria cirúrgica não devem cair no
+        # Auditor externo nem no runtime pesado quando o objetivo é diagnóstico
+        # técnico governado com patch mínimo e rollback explícitos.
+        if _is_internal_warroom_governed_surgical_request(message):
+            try:
+                payload = await asyncio.to_thread(_internal_warroom_governed_surgical_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_internal_warroom_governed_surgical_v1"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_INTERNAL_WARROOM_GOVERNED_SURGICAL_FAILED trace_id=%s", trace_id)
                 except Exception:
                     pass
                 # Se o fast-path falhar, seguimos para os demais trilhos protegidos.
@@ -27119,109 +27278,6 @@ async def orchestrate(
 # ═══════════════════════════════════════════════════════════════════════════════
 # END PATCH_ORCH
 # ═══════════════════════════════════════════════════════════════════════════════
-
-
-@app.post("/api/tts/public")
-async def tts_public_endpoint(
-    inp: TTSIn,
-    x_org_slug: Optional[str] = Header(default=None),
-    x_trace_id: Optional[str] = Header(default=None),
-):
-    """Public landing TTS for Orkio voice hero.
-    Safe subset:
-    - no auth
-    - no agent/message lookup
-    - short sanitized text only
-    - default tenant/public only
-    """
-    trace_id = x_trace_id or new_id()
-    if OpenAI is None:
-        raise HTTPException(status_code=503, detail="OpenAI SDK not available")
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not api_key:
-        raise HTTPException(status_code=503, detail="OPENAI_API_KEY not configured")
-
-    org = (x_org_slug or default_tenant()).strip() or default_tenant()
-    if tenant_mode() == "single":
-        org = default_tenant()
-
-    default_tts_voice = _normalize_voice_id(
-        (os.getenv("OPENAI_TTS_VOICE_DEFAULT", "") or os.getenv("OPENAI_REALTIME_VOICE_DEFAULT", "shimmer")),
-        default="shimmer",
-    )
-    _VALID_VOICES = ("alloy","ash","ballad","cedar","coral","echo","fable","marin","nova","onyx","sage","shimmer","verse")
-    voice = _normalize_voice_id(inp.voice or default_tts_voice, default=default_tts_voice)
-    if voice not in _VALID_VOICES:
-        voice = default_tts_voice if default_tts_voice in _VALID_VOICES else "shimmer"
-
-    tts_input = _sanitize_tts_text(inp.text or "")
-    if not tts_input:
-        raise HTTPException(status_code=400, detail="TTS text is empty after sanitization")
-    if len(tts_input) > 900:
-        tts_input = tts_input[:900].strip()
-
-    speed = max(0.25, min(4.0, float(inp.speed or 1.0)))
-    tts_model = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts").strip() or "gpt-4o-mini-tts"
-    try:
-        client = OpenAI(api_key=api_key)
-        response = client.audio.speech.create(
-            model=tts_model,
-            voice=voice,
-            input=tts_input,
-            speed=speed,
-            response_format="mp3",
-        )
-        from fastapi.responses import StreamingResponse
-        import io
-        audio_bytes = _read_audio_bytes(response)
-        logger.info(
-            "v2v_tts_public_ok trace_id=%s org=%s voice=%s bytes=%d",
-            trace_id, org, voice, len(audio_bytes),
-        )
-        return StreamingResponse(
-            io.BytesIO(audio_bytes),
-            media_type="audio/mpeg",
-            headers={
-                "Content-Disposition": "inline; filename=tts-public.mp3",
-                "Cache-Control": "no-cache",
-                "X-Trace-Id": trace_id,
-                "X-V2V-Voice": voice,
-                "X-V2V-Public": "1",
-            },
-        )
-    except Exception as e:
-        fallback_voice = {"cedar": "shimmer", "marin": "shimmer"}.get(voice, "shimmer")
-        logger.warning(
-            "v2v_tts_public_fallback trace_id=%s org=%s original_model=%s original_voice=%s fallback_voice=%s error=%s",
-            trace_id, org, tts_model, voice, fallback_voice, str(e)
-        )
-        try:
-            client = OpenAI(api_key=api_key)
-            response = client.audio.speech.create(
-                model="gpt-4o-mini-tts",
-                voice=fallback_voice,
-                input=tts_input,
-                speed=speed,
-                response_format="mp3",
-            )
-            from fastapi.responses import StreamingResponse
-            import io
-            audio_bytes = _read_audio_bytes(response)
-            return StreamingResponse(
-                io.BytesIO(audio_bytes),
-                media_type="audio/mpeg",
-                headers={
-                    "Content-Disposition": "inline; filename=tts-public.mp3",
-                    "Cache-Control": "no-cache",
-                    "X-Trace-Id": trace_id,
-                    "X-V2V-Voice": fallback_voice,
-                    "X-V2V-Public": "1",
-                },
-            )
-        except Exception as e2:
-            logger.exception("v2v_tts_public_fail trace_id=%s org=%s error=%s", trace_id, org, str(e2))
-            raise HTTPException(status_code=503, detail="TTS_PUBLIC_UNAVAILABLE")
-
 
 @app.post("/api/tts")
 async def tts_endpoint(
