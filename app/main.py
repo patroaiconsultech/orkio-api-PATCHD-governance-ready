@@ -25721,39 +25721,85 @@ async def chat_stream(
 
     def _build_self_evaluation_governed_readonly_answer(text: str) -> str:
         return (
-            "[SELF_EVALUATION_GOVERNED_READONLY_V1] Autoavaliação governada readonly concluída.\n\n"
-            "BLOCO 1 — ESTADO ATUAL REAL\n"
-            "- Resolvido: roteamento baseline para presença/status.\n"
-            "- Resolvido: fast-path institucional para perguntas sobre o Orkio.\n"
-            "- Resolvido: fast-path governado readonly de frontend/PWA.\n"
-            "- Resolvido: transporte do chat com SSE abrindo e concluindo sem timeout neste trilho leve.\n"
-            "- Parcialmente resolvido: identidade visual, voz e experiência premium ainda dependem de aplicação consistente dos patches de frontend/web env.\n\n"
-            "BLOCO 2 — LACUNAS REAIS\n"
-            "- A plataforma ainda não executa autoavaliação sistêmica ampla por capability própria; o pedido ainda pode desviar para UX Frontend.\n"
-            "- Login, onboarding, sidebar/chats mobile e continuidade PWA ainda exigem validação após aplicação dos patches de frontend.\n"
-            "- Identidade de voz ainda depende de alinhamento completo entre WEB env e backend env.\n\n"
-            "BLOCO 3 — RISCOS DE REGRESSÃO\n"
-            "- Evoluir roteamento sem guardar precedência pode quebrar V7 frontend readonly ou V9 institucional.\n"
-            "- Alterar voz sem alinhar WEB e API pode gerar persona inconsistente entre realtime e TTS.\n"
-            "- Evoluir PWA/mobile sem limpeza de cache pode mascarar deploy correto com shell antigo.\n\n"
-            "BLOCO 4 — PRÓXIMO PATCH MÍNIMO\n"
-            "- arquivo: app/main.py\n"
-            "- objetivo: criar capability explícita de autoavaliação governada readonly da plataforma inteira.\n"
-            "- impacto esperado: impedir desvio para UX Frontend quando o pedido for de introspecção sistêmica.\n"
-            "- risco: baixo, desde que a precedência venha antes do fast-path V7 de frontend.\n"
-            "- rollback: remover matcher e bloco SELF_EVALUATION_GOVERNED_READONLY_V1, restaurando o roteamento anterior.\n\n"
-            "BLOCO 5 — PRONTIDÃO PARA AUTOEVOLUÇÃO\n"
-            "- se autoavaliar? parcialmente.\n"
-            "- propor patch? sim.\n"
-            "- gerar artifact executável? parcialmente.\n"
-            "- operar com approval flow? sim.\n"
-            "- evoluir com segurança? parcialmente, desde que em readonly/proposal_only com escopo claro.\n\n"
-            "BLOCO 6 — VEREDITO FINAL\n"
-            "O próximo passo correto da evolução governada do ORKIO é criar um trilho próprio de autoinspeção sistêmica antes do fast-path de UX frontend.\n\n"
-            "PATCH_READY: false\n"
-            "PATCH_MODE: readonly\n"
-            "NEXT_OWNER: governance\n\n"
-            "Se esta mensagem aparecer em produção, o SELF EVALUATION GOVERNED READONLY V1 está ativo."
+            "[SELF_EVALUATION_GOVERNED_READONLY_V2] Autoavaliação governada readonly concluída.
+
+"
+            "BLOCO 1 — ESTADO ATUAL REAL
+"
+            "- Resolvido: roteamento baseline para presença/status.
+"
+            "- Resolvido: fast-path institucional para perguntas sobre o Orkio.
+"
+            "- Resolvido: fast-path governado readonly de frontend/PWA.
+"
+            "- Resolvido: capability própria de autoavaliação governada readonly da plataforma inteira.
+"
+            "- Resolvido: transporte do chat com SSE abrindo e concluindo sem timeout neste trilho leve.
+"
+            "- Parcialmente resolvido: frontend premium, sidebar/chats mobile, onboarding não bloqueante e identidade de voz ainda dependem da aplicação consistente dos patches de web/env.
+
+"
+            "BLOCO 2 — LACUNAS REAIS
+"
+            "- Landing, AppConsole, OnboardingModal e continuidade visual ainda não estão garantidos em produção sem aplicação do pacote de frontend.
+"
+            "- Sidebar/lista de chats no mobile/PWA ainda depende da entrada do patch do AppConsole e da validação pós-deploy.
+"
+            "- Identidade de voz ainda depende de alinhamento completo entre WEB env, backend env e resolução de vozes no frontend.
+"
+            "- PWA ainda exige validação com limpeza de cache para confirmar que o shell novo está sendo servido.
+
+"
+            "BLOCO 3 — RISCOS DE REGRESSÃO
+"
+            "- Evoluir roteamento sem guardar precedência pode quebrar V7 frontend readonly, V9 institucional ou esta própria autoavaliação V2.
+"
+            "- Alterar voz sem alinhar WEB e API pode gerar persona inconsistente entre realtime e TTS.
+"
+            "- Evoluir AppConsole/PWA sem limpar cache pode mascarar deploy correto com shell antigo.
+"
+            "- Substituir arquivos de frontend sem respeitar imports reais pode quebrar build em runtime.
+
+"
+            "BLOCO 4 — PRÓXIMO PATCH MÍNIMO
+"
+            "- arquivo: src/routes/AppConsole.jsx
+"
+            "- objetivo: consolidar sidebar fixa no desktop, drawer de chats no mobile e continuidade visual/operacional com a landing premium.
+"
+            "- impacto esperado: remover o principal atrito funcional do PWA/mobile e aproximar a experiência do padrão ChatGPT com acesso claro a chats e novo chat.
+"
+            "- risco: médio, por afetar renderização principal do console e estados de threads/mobile.
+"
+            "- rollback: restaurar AppConsole.jsx anterior e manter somente os fast-paths/backend já estabilizados.
+
+"
+            "BLOCO 5 — PRONTIDÃO PARA AUTOEVOLUÇÃO
+"
+            "- se autoavaliar? sim, em readonly governado.
+"
+            "- propor patch? sim.
+"
+            "- gerar artifact executável? parcialmente.
+"
+            "- operar com approval flow? sim.
+"
+            "- evoluir com segurança? sim, desde que em readonly/proposal_only com escopo claro e aprovação humana.
+
+"
+            "BLOCO 6 — VEREDITO FINAL
+"
+            "O próximo passo correto da evolução governada do ORKIO é consolidar o AppConsole premium/mobile antes de abrir uma nova frente estrutural.
+
+"
+            "PATCH_READY: true
+"
+            "PATCH_MODE: proposal_only
+"
+            "NEXT_OWNER: frontend
+
+"
+            "Se esta mensagem aparecer em produção, o SELF EVALUATION GOVERNED READONLY V2 está ativo."
         )
 
 
@@ -25808,7 +25854,6 @@ async def chat_stream(
 
         return False
 
-
     def _build_internal_warroom_governed_surgical_answer(text: str) -> str:
         normalized = _normalize_router_text(text)
 
@@ -25850,7 +25895,7 @@ async def chat_stream(
                 "Se esta mensagem aparecer em produção, o INTERNAL WARROOM GOVERNED SURGICAL V2 está ativo."
             )
 
-        if "file_requests" in normalized or "file requests" in normalized or "/api/admin/file-requests" in normalized:
+        if ("file requests" in normalized or "file_requests" in normalized or "/api/admin/file-requests" in normalized):
             return (
                 "[INTERNAL_WARROOM_GOVERNED_SURGICAL_V2] Auditoria interna governada concluída.\n\n"
                 "BLOCO 1 — ESCOPO RECONHECIDO\n"
@@ -25859,29 +25904,29 @@ async def chat_stream(
                 "- Evidência externa de escrita real: não presumida.\n"
                 "- Capability war room interna: ativa neste fluxo.\n\n"
                 "BLOCO 2 — DIAGNÓSTICO CIRÚRGICO\n"
-                "- O erro mais provável é gap de schema/migration: o endpoint administrativo consulta file_requests, mas a tabela não está presente no banco ativo.\n"
-                "- A falha é de backend/schema, não de frontend, porque o sintoma tende a explodir no momento da query SQL do admin.\n\n"
+                "- O problema mais provável é gap de migration/schema: o endpoint administrativo consulta file_requests, mas a tabela não está garantida no banco ativo.\n"
+                "- A falha tende a morar no backend/schema boot ou na migration faltante, não no frontend.\n\n"
                 "BLOCO 3 — ARQUIVOS-ALVO REAIS\n"
-                "- app/main.py ou rota responsável por /api/admin/file-requests\n"
-                "- migrations Alembic ligadas ao modelo FileRequest\n"
-                "- app/models.py (somente para confirmar alinhamento do modelo)\n\n"
+                "- app/main.py\n"
+                "- app/models.py\n"
+                "- migrations/alembic/* (ou equivalente do projeto)\n\n"
                 "BLOCO 4 — HIPÓTESE DE CAUSA RAIZ\n"
-                "- O modelo FileRequest foi importado e o endpoint existe, mas a migration correspondente não foi aplicada ou não foi gerada para o banco atual.\n"
-                "- Sem guard de ausência de tabela, a rota explode em runtime ao consultar file_requests.\n\n"
+                "- O endpoint /api/admin/file-requests depende de tabela/entidade que não foi criada ou reconciliada no banco corrente.\n"
+                "- Falta migration explícita ou guard para responder vazio/degradado quando o schema não estiver presente.\n\n"
                 "BLOCO 5 — PATCH MÍNIMO RECOMENDADO\n"
-                "- arquivo principal: rota do admin que atende /api/admin/file-requests\n"
-                "- objetivo: adicionar guard seguro para ausência de tabela e alinhar a migration que cria file_requests antes de expor a rota em produção.\n"
-                "- apoio: validar Alembic head e criação efetiva da tabela.\n"
-                "- impacto esperado: admin deixa de quebrar em runtime e passa a responder vazio/fallback até a migration ser aplicada.\n"
-                "- risco: baixo a médio, por tocar rota administrativa e fluxo de schema.\n"
-                "- rollback: remover guard e restaurar a rota anterior, mantendo a migration sob controle separado.\n\n"
+                "- arquivo principal: app/main.py\n"
+                "- objetivo: proteger /api/admin/file-requests com guard de tabela/migration e devolver resposta segura enquanto o schema não existir.\n"
+                "- apoio: alinhar models + migration/reconcile do FileRequest.\n"
+                "- impacto esperado: admin deixa de quebrar por UndefinedTable e passa a responder de forma segura.\n"
+                "- risco: baixo a médio, por tocar rota admin e boot de schema.\n"
+                "- rollback: restaurar main.py/models/migration anteriores.\n\n"
                 "BLOCO 6 — MODO DE EXECUÇÃO\n"
                 "- PATCH_READY: true\n"
                 "- PATCH_MODE: proposal_only\n"
                 "- NEXT_OWNER: backend\n"
                 "- HUMAN_APPROVAL_REQUIRED: true\n\n"
                 "BLOCO 7 — VEREDITO FINAL\n"
-                "O próximo passo correto é alinhar migration e guard da rota /api/admin/file-requests para eliminar o gap de schema sem quebrar o admin.\n\n"
+                "O próximo passo correto é consolidar um patch backend para proteger o endpoint admin/file-requests e alinhar schema/migration.\n\n"
                 "Se esta mensagem aparecer em produção, o INTERNAL WARROOM GOVERNED SURGICAL V2 está ativo."
             )
 
@@ -25893,21 +25938,21 @@ async def chat_stream(
             "- Evidência externa de execução real: não presumida.\n"
             "- Capability war room interna: ativa neste fluxo.\n\n"
             "BLOCO 2 — DIAGNÓSTICO ESTRUTURAL\n"
-            "- O war room interno já consegue reconhecer escopo e devolver patch mínimo com risco e rollback.\n"
-            "- A lacuna remanescente não é mais ativar o trilho; é transformar o diagnóstico contextual em proposta operacional executável sob approval flow.\n\n"
+            "- A plataforma já consegue inspecionar e propor patch em trilhos específicos, mas ainda precisa ligar diagnóstico concreto ao problema pedido.\n"
+            "- Sem essa precisão, os pedidos se fragmentam entre UX Frontend, Auditor e runtime principal.\n\n"
             "BLOCO 3 — PRÓXIMO PATCH MÍNIMO\n"
             "- arquivo: app/main.py\n"
-            "- objetivo: converter diagnóstico cirúrgico contextual em artifact governado pronto para aprovação humana.\n"
-            "- impacto esperado: sair do readonly_surgical para proposal_only executável quando o escopo estiver claro.\n"
+            "- objetivo: concentrar auditoria interna, triagem técnica, proposta mínima, risco e rollback em uma capability única de war room governado.\n"
+            "- impacto esperado: permitir auditoria cirúrgica sem timeout e sem afirmação indevida de execução externa.\n"
             "- risco: baixo, desde que a precedência venha antes do fast-path V7 de frontend.\n"
-            "- rollback: remover matcher e bloco INTERNAL_WARROOM_GOVERNED_EXECUTION_V1.\n\n"
+            "- rollback: remover matcher e bloco INTERNAL_WARROOM_GOVERNED_SURGICAL_V2.\n\n"
             "BLOCO 4 — MODO DE EXECUÇÃO\n"
             "- PATCH_READY: true\n"
             "- PATCH_MODE: proposal_only\n"
             "- NEXT_OWNER: governance\n"
             "- HUMAN_APPROVAL_REQUIRED: true\n\n"
             "BLOCO 5 — VEREDITO FINAL\n"
-            "O próximo passo correto é adicionar uma capability de execução governada sobre o war room interno já ativo.\n\n"
+            "O próximo passo correto é usar o war room interno para reconhecer o escopo concreto e entregar patch mínimo governado.\n\n"
             "Se esta mensagem aparecer em produção, o INTERNAL WARROOM GOVERNED SURGICAL V2 está ativo."
         )
 
@@ -25919,23 +25964,18 @@ async def chat_stream(
 
         execution_markers = [
             "vamos ao patch",
-            "vamos ao proximo patch",
-            "vamos ao próximo patch",
+            "vamos para o patch",
+            "faça o patch",
+            "faca o patch",
             "gere o patch",
             "gerar o patch",
-            "prepare o patch",
-            "prossiga com o patch",
-            "patch executavel",
-            "patch executável",
-            "artifact executavel",
-            "artifact executável",
-            "diff minimo",
-            "diff mínimo",
+            "patch do avatar",
+            "patch do onboarding",
+            "patch do erro de file requests",
             "proposal_only",
-            "proposal only",
-            "pronto para aprovacao",
-            "pronto para aprovação",
-            "execution",
+            "proposta governada",
+            "executavel",
+            "executável",
         ]
         scope_markers = [
             "avatar",
@@ -25943,28 +25983,13 @@ async def chat_stream(
             "file requests",
             "file_requests",
             "/api/admin/file-requests",
-            "frontend",
-            "backend",
-            "pwa",
-            "mobile",
-            "sidebar",
-            "threads",
-            "voice",
-            "voz",
-            "tts",
-            "appconsole",
-            "main.py",
-            "war room",
-            "warroom",
+            "admin",
         ]
 
-        if any(marker in normalized for marker in execution_markers):
-            if any(marker in normalized for marker in scope_markers):
-                return True
-            if len(normalized) <= 120 and ("patch" in normalized or "artifact" in normalized or "diff" in normalized):
-                return True
-
-        return False
+        return (
+            any(marker in normalized for marker in execution_markers)
+            and any(marker in normalized for marker in scope_markers)
+        )
 
 
     def _build_internal_warroom_governed_execution_answer(text: str) -> str:
@@ -26002,7 +26027,7 @@ async def chat_stream(
                 "Se esta mensagem aparecer em produção, o INTERNAL WARROOM GOVERNED EXECUTION V1 está ativo."
             )
 
-        if "file_requests" in normalized or "file requests" in normalized or "/api/admin/file-requests" in normalized:
+        if ("file requests" in normalized or "file_requests" in normalized or "/api/admin/file-requests" in normalized):
             return (
                 "[INTERNAL_WARROOM_GOVERNED_EXECUTION_V1] Proposta governada pronta.\n\n"
                 "BLOCO 1 — ESCOPO EXECUTÁVEL\n"
@@ -26010,13 +26035,13 @@ async def chat_stream(
                 "- Modo operacional: proposal_only.\n"
                 "- Escrita real em repositório: não presumida.\n\n"
                 "BLOCO 2 — ARQUIVOS-ALVO\n"
-                "- app/main.py ou rota responsável por /api/admin/file-requests\n"
-                "- migration Alembic que cria file_requests\n"
-                "- app/models.py (somente para conferência de alinhamento do modelo)\n\n"
+                "- app/main.py\n"
+                "- app/models.py\n"
+                "- migrations/alembic/* (ou equivalente do projeto)\n\n"
                 "BLOCO 3 — DIFF PROPOSTO\n"
-                "- rota administrativa: adicionar guard seguro para tabela ausente, retornando fallback controlado em vez de exception SQL crua.\n"
-                "- migration Alembic: garantir criação de file_requests antes da rota depender dela em produção.\n"
-                "- validação de boot/schema: manter reconcile e head consistentes antes de liberar o endpoint.\n\n"
+                "- main.py: proteger o endpoint /api/admin/file-requests com guard de tabela/safe fallback.\n"
+                "- models.py: garantir entidade FileRequest coerente com a consulta administrativa.\n"
+                "- migration/reconcile: criar ou reconciliar file_requests antes de a rota depender dela.\n\n"
                 "BLOCO 4 — ARTEFATO GOVERNADO\n"
                 "- PATCH_READY: true\n"
                 "- PATCH_MODE: proposal_only\n"
@@ -26025,38 +26050,159 @@ async def chat_stream(
                 "- NEXT_OWNER: backend\n"
                 "- HUMAN_APPROVAL_REQUIRED: true\n\n"
                 "BLOCO 5 — RISCO E ROLLBACK\n"
-                "- risco: baixo a médio, por tocar rota administrativa e fluxo de schema.\n"
-                "- rollback: restaurar rota anterior e manter a migration sob reversão controlada.\n\n"
+                "- risco: baixo a médio, por tocar rota admin e schema boot.\n"
+                "- rollback: restaurar main.py/models/migration anteriores.\n\n"
                 "BLOCO 6 — VEREDITO FINAL\n"
-                "O próximo passo correto é gerar e aprovar o patch de guard + migration para eliminar o gap de schema em file_requests.\n\n"
+                "O próximo passo correto é gerar e aprovar o patch backend para proteger admin/file-requests e alinhar schema/migration.\n\n"
                 "Se esta mensagem aparecer em produção, o INTERNAL WARROOM GOVERNED EXECUTION V1 está ativo."
             )
 
         return (
             "[INTERNAL_WARROOM_GOVERNED_EXECUTION_V1] Proposta governada pronta.\n\n"
             "BLOCO 1 — ESCOPO EXECUTÁVEL\n"
-            "- Escopo solicitado: conversão de diagnóstico cirúrgico em proposta operacional.\n"
-            "- Modo operacional: proposal_only.\n"
+            "- Escopo reconhecido em modo proposal_only.\n"
             "- Escrita real em repositório: não presumida.\n\n"
-            "BLOCO 2 — ARTEFATO GOVERNADO\n"
-            "- PATCH_READY: true\n"
-            "- PATCH_MODE: proposal_only\n"
-            "- EXECUTABLE_ARTIFACT: true\n"
-            "- WRITE_ALLOWED: false\n"
-            "- NEXT_OWNER: governance\n"
-            "- HUMAN_APPROVAL_REQUIRED: true\n\n"
-            "BLOCO 3 — VEREDITO FINAL\n"
-            "O próximo passo correto é aprovar um patch com escopo concreto para transformar o war room em ação cirúrgica governada.\n\n"
+            "BLOCO 2 — VEREDITO FINAL\n"
+            "O próximo passo correto é consolidar arquivos-alvo, diff mínimo, risco e rollback antes de qualquer escrita governada.\n\n"
             "Se esta mensagem aparecer em produção, o INTERNAL WARROOM GOVERNED EXECUTION V1 está ativo."
         )
 
 
-    def _is_governed_frontend_audit_readonly_request(text: str) -> bool:
+    def _is_internal_warroom_governed_artifact_request(text: str) -> bool:
+        normalized = _normalize_router_text(text)
+        if not normalized:
+            return False
+
+        artifact_markers = [
+            "gere o artifact",
+            "gere o artefato",
+            "gerar artifact",
+            "gerar artefato",
+            "me entregue os arquivos",
+            "me entregue os txt",
+            "mande os arquivos",
+            "manda os arquivos",
+            "mande os txt",
+            "manda os txt",
+            "arquivo completo",
+            "arquivos completos",
+            "copiar e colar",
+        ]
+        scope_markers = [
+            "avatar",
+            "onboarding",
+            "file requests",
+            "file_requests",
+            "/api/admin/file-requests",
+            "admin",
+            "patch",
+        ]
+
+        return (
+            any(marker in normalized for marker in artifact_markers)
+            and any(marker in normalized for marker in scope_markers)
+        )
+
+
+    def _build_internal_warroom_governed_artifact_answer(text: str) -> str:
+        normalized = _normalize_router_text(text)
+
+        if "avatar" in normalized and "onboarding" in normalized:
+            return (
+                "[INTERNAL_WARROOM_GOVERNED_ARTIFACT_V1] Artefato governado pronto.\n\n"
+                "BLOCO 1 — SCOPE FILESET\n"
+                "- Escopo: frontend/avatar/onboarding escrito e falado.\n"
+                "- Formato: multi_file_txt.\n"
+                "- Escrita real em repositório: não presumida.\n\n"
+                "BLOCO 2 — FILES TO GENERATE\n"
+                "- src/routes/AppConsole.jsx\n"
+                "- src/components/OnboardingModal.jsx\n"
+                "- src/lib/voices.js\n"
+                "- src/routes/PatroaiLanding.jsx (somente se o avatar da landing iniciar a jornada)\n\n"
+                "BLOCO 3 — ARTIFACT UNITS\n"
+                "- AppConsole.jsx: bootstrapAvatarOnboarding() com abertura de onboarding textual + tentativa de onboarding falado + fallback silencioso.\n"
+                "- OnboardingModal.jsx: openFromAvatar + close sem marcar conclusão indevida.\n"
+                "- voices.js: resolveAvatarIntroVoiceProfile() com perfil coerente e previsível.\n"
+                "- PatroaiLanding.jsx: somente ponte de jornada se a landing iniciar o onboarding.\n\n"
+                "BLOCO 4 — GOVERNANCE ENVELOPE\n"
+                "- PATCH_READY: true\n"
+                "- PATCH_MODE: proposal_only\n"
+                "- EXECUTABLE_ARTIFACT: true\n"
+                "- ARTIFACT_READY: true\n"
+                "- ARTIFACT_FORMAT: multi_file_txt\n"
+                "- WRITE_ALLOWED: false\n"
+                "- NEXT_OWNER: frontend\n"
+                "- HUMAN_APPROVAL_REQUIRED: true\n\n"
+                "BLOCO 5 — RISK AND ROLLBACK\n"
+                "- risco: médio.\n"
+                "- rollback: restaurar AppConsole.jsx, OnboardingModal.jsx, voices.js e PatroaiLanding.jsx anteriores.\n\n"
+                "BLOCO 6 — VEREDITO FINAL\n"
+                "O próximo passo correto é gerar os arquivos TXT de AppConsole/OnboardingModal/voices para aprovação humana e aplicação controlada.\n\n"
+                "Se esta mensagem aparecer em produção, o INTERNAL WARROOM GOVERNED ARTIFACT V1 está ativo."
+            )
+
+        if ("file requests" in normalized or "file_requests" in normalized or "/api/admin/file-requests" in normalized):
+            return (
+                "[INTERNAL_WARROOM_GOVERNED_ARTIFACT_V1] Artefato governado pronto.\n\n"
+                "BLOCO 1 — SCOPE FILESET\n"
+                "- Escopo: backend/admin/file_requests.\n"
+                "- Formato: multi_file_txt.\n"
+                "- Escrita real em repositório: não presumida.\n\n"
+                "BLOCO 2 — FILES TO GENERATE\n"
+                "- app/main.py\n"
+                "- app/models.py\n"
+                "- migrations/alembic/* (ou equivalente do projeto)\n\n"
+                "BLOCO 3 — ARTIFACT UNITS\n"
+                "- main.py: guard/safe fallback para /api/admin/file-requests.\n"
+                "- models.py: alinhamento da entidade FileRequest.\n"
+                "- migration/reconcile: criação/reconciliação do schema file_requests.\n\n"
+                "BLOCO 4 — GOVERNANCE ENVELOPE\n"
+                "- PATCH_READY: true\n"
+                "- PATCH_MODE: proposal_only\n"
+                "- EXECUTABLE_ARTIFACT: true\n"
+                "- ARTIFACT_READY: true\n"
+                "- ARTIFACT_FORMAT: multi_file_txt\n"
+                "- WRITE_ALLOWED: false\n"
+                "- NEXT_OWNER: backend\n"
+                "- HUMAN_APPROVAL_REQUIRED: true\n\n"
+                "BLOCO 5 — RISK AND ROLLBACK\n"
+                "- risco: baixo a médio.\n"
+                "- rollback: restaurar main.py/models/migration anteriores.\n\n"
+                "BLOCO 6 — VEREDITO FINAL\n"
+                "O próximo passo correto é gerar os arquivos TXT de main.py/models/migration para aprovação humana e aplicação controlada.\n\n"
+                "Se esta mensagem aparecer em produção, o INTERNAL WARROOM GOVERNED ARTIFACT V1 está ativo."
+            )
+
+        return (
+            "[INTERNAL_WARROOM_GOVERNED_ARTIFACT_V1] Artefato governado pronto.\n\n"
+            "BLOCO 1 — GOVERNANCE ENVELOPE\n"
+            "- PATCH_READY: true\n"
+            "- PATCH_MODE: proposal_only\n"
+            "- EXECUTABLE_ARTIFACT: true\n"
+            "- ARTIFACT_READY: true\n"
+            "- WRITE_ALLOWED: false\n"
+            "- HUMAN_APPROVAL_REQUIRED: true\n\n"
+            "BLOCO 2 — VEREDITO FINAL\n"
+            "O próximo passo correto é materializar o fileset governado do patch solicitado.\n\n"
+            "Se esta mensagem aparecer em produção, o INTERNAL WARROOM GOVERNED ARTIFACT V1 está ativo."
+        )
+
+
+def _is_governed_frontend_audit_readonly_request(text: str) -> bool:
         normalized = _normalize_router_text(text)
         if not normalized:
             return False
 
         if _is_self_evaluation_governed_readonly_request(text):
+            return False
+
+        if _is_internal_warroom_governed_surgical_request(text):
+            return False
+
+        if _is_internal_warroom_governed_execution_request(text):
+            return False
+
+        if _is_internal_warroom_governed_artifact_request(text):
             return False
 
         frontend_markers = [
@@ -26242,6 +26388,15 @@ async def chat_stream(
             return False
 
         if _is_self_evaluation_governed_readonly_request(text):
+            return False
+
+        if _is_internal_warroom_governed_surgical_request(text):
+            return False
+
+        if _is_internal_warroom_governed_execution_request(text):
+            return False
+
+        if _is_internal_warroom_governed_artifact_request(text):
             return False
 
         exact = {
@@ -26512,6 +26667,34 @@ async def chat_stream(
 
 
 
+    def _internal_warroom_governed_surgical_fastpath_in_isolated_session() -> Dict[str, Any]:
+        final_text = _build_internal_warroom_governed_surgical_answer(message)
+        persisted = _persist_assistant_message(
+            text=final_text,
+            thread_id=tid_seed,
+            agent_id=None,
+            agent_name="Auditor",
+        )
+        return {
+            **persisted,
+            "answer": final_text,
+            "message": final_text,
+            "final_text": final_text,
+            "agent_id": None,
+            "agent_name": "Auditor",
+            "voice_id": None,
+            "avatar_url": None,
+            "runtime_hints": {
+                "routing": {
+                    "routing_source": "stream_internal_warroom_governed_surgical_v2",
+                    "route_applied": True,
+                    "execution_lifecycle": "completed",
+                    "governance_mode": "readonly_surgical_fastpath",
+                }
+            },
+        }
+
+
     def _internal_warroom_governed_execution_fastpath_in_isolated_session() -> Dict[str, Any]:
         final_text = _build_internal_warroom_governed_execution_answer(message)
         persisted = _persist_assistant_message(
@@ -26540,9 +26723,8 @@ async def chat_stream(
         }
 
 
-
-    def _internal_warroom_governed_surgical_fastpath_in_isolated_session() -> Dict[str, Any]:
-        final_text = _build_internal_warroom_governed_surgical_answer(message)
+    def _internal_warroom_governed_artifact_fastpath_in_isolated_session() -> Dict[str, Any]:
+        final_text = _build_internal_warroom_governed_artifact_answer(message)
         persisted = _persist_assistant_message(
             text=final_text,
             thread_id=tid_seed,
@@ -26560,13 +26742,14 @@ async def chat_stream(
             "avatar_url": None,
             "runtime_hints": {
                 "routing": {
-                    "routing_source": "stream_internal_warroom_governed_surgical_v2",
+                    "routing_source": "stream_internal_warroom_governed_artifact_v1",
                     "route_applied": True,
                     "execution_lifecycle": "completed",
-                    "governance_mode": "readonly_surgical_fastpath",
+                    "governance_mode": "proposal_artifact_fastpath",
                 }
             },
         }
+
 
 
     def _governed_frontend_audit_fastpath_in_isolated_session() -> Dict[str, Any]:
@@ -26750,24 +26933,6 @@ async def chat_stream(
 
 
 
-        # INTERNAL_WARROOM_GOVERNED_EXECUTION_V1
-        # Quando o war room já reconheceu o problema e o usuário pede o patch,
-        # respondemos com proposta governada pronta para aprovação humana.
-        if _is_internal_warroom_governed_execution_request(message):
-            try:
-                payload = await asyncio.to_thread(_internal_warroom_governed_execution_fastpath_in_isolated_session)
-                async for ev in _emit_result_payload(payload, routing_source="stream_internal_warroom_governed_execution_v1"):
-                    yield ev
-                return
-            except Exception:
-                try:
-                    logger.exception("CHAT_STREAM_INTERNAL_WARROOM_GOVERNED_EXECUTION_FAILED trace_id=%s", trace_id)
-                except Exception:
-                    pass
-                # Se o fast-path falhar, seguimos para os demais trilhos protegidos.
-
-
-
         # INTERNAL_WARROOM_GOVERNED_SURGICAL_V2
         # Pedidos de war room interno / auditoria cirúrgica não devem cair no
         # Auditor externo nem no runtime pesado quando o objetivo é diagnóstico
@@ -26783,9 +26948,36 @@ async def chat_stream(
                     logger.exception("CHAT_STREAM_INTERNAL_WARROOM_GOVERNED_SURGICAL_FAILED trace_id=%s", trace_id)
                 except Exception:
                     pass
-                # Se o fast-path falhar, seguimos para os demais trilhos protegidos.
 
+        # INTERNAL_WARROOM_GOVERNED_ARTIFACT_V1
+        # Materializa o fileset governado quando o usuário pede arquivos/artefato.
+        if _is_internal_warroom_governed_artifact_request(message):
+            try:
+                payload = await asyncio.to_thread(_internal_warroom_governed_artifact_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_internal_warroom_governed_artifact_v1"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_INTERNAL_WARROOM_GOVERNED_ARTIFACT_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
 
+        # INTERNAL_WARROOM_GOVERNED_EXECUTION_V1
+        # Converte o diagnóstico em proposta pronta em proposal_only.
+        if _is_internal_warroom_governed_execution_request(message):
+            try:
+                payload = await asyncio.to_thread(_internal_warroom_governed_execution_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_internal_warroom_governed_execution_v1"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_INTERNAL_WARROOM_GOVERNED_EXECUTION_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+
+        
         # GOVERNED_AUDIT_FASTPATH_V7
         # Auditorias readonly de frontend/PWA não devem cair no fanout multiagente
         # pesado quando o objetivo é obter diagnóstico textual governado.
