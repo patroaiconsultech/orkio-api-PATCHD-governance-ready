@@ -1,115 +1,86 @@
-"""PATCH v7.3.0 — governed evolution core
+"""Alembic migration environment for Orkio API.
 
-Revision ID: 0034_patch_governed_evolution_core
-Revises: 0033_patch_hybrid_wallet_billing
-Create Date: 2026-04-20
-
-AO-01 reconcile note:
-This migration is intentionally idempotent for production databases that
-already received part of the governed evolution schema through boot-time
-reconciliation or previous failed deploy attempts.
+PATCH AO-01:
+- Restores a valid Alembic env.py after the file was overwritten by migration content.
+- Uses DATABASE_PUBLIC_URL / DATABASE_URL_PUBLIC / DATABASE_URL from runtime env.
+- Registers app.models so Base.metadata contains all ORM tables.
 """
-from alembic import op
-import sqlalchemy as sa
 
-revision = "0034_patch_governed_evolution_core"
-down_revision = "0033_patch_hybrid_wallet_billing"
-branch_labels = None
-depends_on = None
+from __future__ import annotations
 
+import os
+from logging.config import fileConfig
 
-def _table_exists(table_name: str) -> bool:
-    bind = op.get_bind()
-    inspector = sa.inspect(bind)
-    return table_name in inspector.get_table_names()
+from alembic import context
+from sqlalchemy import engine_from_config, pool
+
+from app.db import Base
+from app import models  # noqa: F401 - import registers ORM models on Base.metadata
 
 
-def _index_exists(table_name: str, index_name: str) -> bool:
-    bind = op.get_bind()
-    inspector = sa.inspect(bind)
-    try:
-        return any(idx.get("name") == index_name for idx in inspector.get_indexes(table_name))
-    except Exception:
-        return False
+config = context.config
+
+if config.config_file_name is not None:
+    fileConfig(config.config_file_name)
 
 
-def upgrade():
-    if not _table_exists("evolution_proposals"):
-        op.create_table(
-            "evolution_proposals",
-            sa.Column("id", sa.String(), primary_key=True),
-            sa.Column("org_slug", sa.String(), nullable=False, server_default="system"),
-            sa.Column("fingerprint", sa.String(), nullable=False),
-            sa.Column("code", sa.String(), nullable=False),
-            sa.Column("severity", sa.String(), nullable=False),
-            sa.Column("category", sa.String(), nullable=False),
-            sa.Column("source", sa.String(), nullable=False),
-            sa.Column("action", sa.String(), nullable=False),
-            sa.Column("status", sa.String(), nullable=False, server_default="awaiting_master_approval"),
-            sa.Column("title", sa.String(), nullable=True),
-            sa.Column("summary", sa.Text(), nullable=True),
-            sa.Column("finding_json", sa.Text(), nullable=True),
-            sa.Column("issue_json", sa.Text(), nullable=True),
-            sa.Column("decision_json", sa.Text(), nullable=True),
-            sa.Column("approval_note", sa.Text(), nullable=True),
-            sa.Column("rejection_note", sa.Text(), nullable=True),
-            sa.Column("first_detected_at", sa.BigInteger(), nullable=False),
-            sa.Column("last_detected_at", sa.BigInteger(), nullable=False),
-            sa.Column("detected_count", sa.Integer(), nullable=False, server_default="1"),
-            sa.Column("approved_by", sa.String(), nullable=True),
-            sa.Column("approved_at", sa.BigInteger(), nullable=True),
-            sa.Column("rejected_by", sa.String(), nullable=True),
-            sa.Column("rejected_at", sa.BigInteger(), nullable=True),
-            sa.Column("last_trace_id", sa.String(), nullable=True),
-            sa.Column("last_execution_status", sa.String(), nullable=True),
-            sa.Column("created_at", sa.BigInteger(), nullable=False),
-            sa.Column("updated_at", sa.BigInteger(), nullable=False),
+target_metadata = Base.metadata
+
+
+def _runtime_database_url() -> str:
+    url = (
+        os.getenv("DATABASE_PUBLIC_URL", "").strip().strip('"').strip("'")
+        or os.getenv("DATABASE_URL_PUBLIC", "").strip().strip('"').strip("'")
+        or os.getenv("DATABASE_URL", "").strip().strip('"').strip("'")
+    )
+    url = url.replace("Postgres.railway.internal", "postgres.railway.internal")
+    if url.startswith("postgres://"):
+        url = "postgresql://" + url[len("postgres://") :]
+    return url
+
+
+def run_migrations_offline() -> None:
+    """Run migrations in offline mode."""
+    url = _runtime_database_url() or config.get_main_option("sqlalchemy.url")
+    context.configure(
+        url=url,
+        target_metadata=target_metadata,
+        literal_binds=True,
+        compare_type=True,
+        dialect_opts={"paramstyle": "named"},
+    )
+
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+def run_migrations_online() -> None:
+    """Run migrations in online mode."""
+    runtime_url = _runtime_database_url()
+    section = config.get_section(config.config_ini_section, {})
+    if runtime_url:
+        section = dict(section)
+        section["sqlalchemy.url"] = runtime_url
+
+    connectable = engine_from_config(
+        section,
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
+        pool_pre_ping=True,
+    )
+
+    with connectable.connect() as connection:
+        context.configure(
+            connection=connection,
+            target_metadata=target_metadata,
+            compare_type=True,
         )
 
-    if not _index_exists("evolution_proposals", "ix_evolution_proposals_org_status"):
-        op.create_index("ix_evolution_proposals_org_status", "evolution_proposals", ["org_slug", "status"])
-    if not _index_exists("evolution_proposals", "ix_evolution_proposals_status_updated"):
-        op.create_index("ix_evolution_proposals_status_updated", "evolution_proposals", ["status", "updated_at"])
-    if not _index_exists("evolution_proposals", "ux_evolution_proposals_fingerprint"):
-        op.create_index("ux_evolution_proposals_fingerprint", "evolution_proposals", ["fingerprint"], unique=True)
-
-    if not _table_exists("evolution_executions"):
-        op.create_table(
-            "evolution_executions",
-            sa.Column("id", sa.String(), primary_key=True),
-            sa.Column("org_slug", sa.String(), nullable=False, server_default="system"),
-            sa.Column("proposal_id", sa.String(), nullable=False),
-            sa.Column("status", sa.String(), nullable=False),
-            sa.Column("mode", sa.String(), nullable=False, server_default="manual"),
-            sa.Column("actor_ref", sa.String(), nullable=True),
-            sa.Column("trace_id", sa.String(), nullable=True),
-            sa.Column("result_json", sa.Text(), nullable=True),
-            sa.Column("error_text", sa.Text(), nullable=True),
-            sa.Column("started_at", sa.BigInteger(), nullable=True),
-            sa.Column("completed_at", sa.BigInteger(), nullable=True),
-            sa.Column("created_at", sa.BigInteger(), nullable=False),
-            sa.Column("updated_at", sa.BigInteger(), nullable=False),
-        )
-
-    if not _index_exists("evolution_executions", "ix_evolution_executions_proposal_created"):
-        op.create_index("ix_evolution_executions_proposal_created", "evolution_executions", ["proposal_id", "created_at"])
-    if not _index_exists("evolution_executions", "ix_evolution_executions_status_created"):
-        op.create_index("ix_evolution_executions_status_created", "evolution_executions", ["status", "created_at"])
+        with context.begin_transaction():
+            context.run_migrations()
 
 
-def downgrade():
-    if _table_exists("evolution_executions"):
-        if _index_exists("evolution_executions", "ix_evolution_executions_status_created"):
-            op.drop_index("ix_evolution_executions_status_created", table_name="evolution_executions")
-        if _index_exists("evolution_executions", "ix_evolution_executions_proposal_created"):
-            op.drop_index("ix_evolution_executions_proposal_created", table_name="evolution_executions")
-        op.drop_table("evolution_executions")
-
-    if _table_exists("evolution_proposals"):
-        if _index_exists("evolution_proposals", "ux_evolution_proposals_fingerprint"):
-            op.drop_index("ux_evolution_proposals_fingerprint", table_name="evolution_proposals")
-        if _index_exists("evolution_proposals", "ix_evolution_proposals_status_updated"):
-            op.drop_index("ix_evolution_proposals_status_updated", table_name="evolution_proposals")
-        if _index_exists("evolution_proposals", "ix_evolution_proposals_org_status"):
-            op.drop_index("ix_evolution_proposals_org_status", table_name="evolution_proposals")
-        op.drop_table("evolution_proposals")
+if context.is_offline_mode():
+    run_migrations_offline()
+else:
+    run_migrations_online()
