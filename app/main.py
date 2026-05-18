@@ -8566,6 +8566,31 @@ def _github_extract_paths_from_text(user_text: str) -> List[str]:
 
 
 
+def _extract_known_roster_agents_from_text(text: str) -> List[str]:
+    raw = str(text or "")
+    if not raw.strip():
+        return []
+    aliases = {
+        "orkio": "orkio",
+        "chris": "chris",
+        "orion": "orion",
+        "auditor": "auditor",
+        "ux frontend": "ux_frontend",
+        "team": "team",
+    }
+    found: List[str] = []
+    lowered = raw.lower()
+    for key, value in aliases.items():
+        if key in lowered and value not in found:
+            found.append(value)
+    mentions = re.findall(r"@([A-Za-z0-9_\-]{2,64})", raw)
+    for item in mentions:
+        slug = aliases.get(str(item).lower(), str(item).lower())
+        if slug not in found:
+            found.append(slug)
+    return found
+
+
 def _github_is_simple_chat_approval_message(user_text: str) -> bool:
     low = str(user_text or "").strip().lower()
     if not low:
@@ -26059,6 +26084,21 @@ async def chat_stream(
         if not normalized:
             return False
 
+        # Blindagem para impedir que conversas comuns entrem no trilho de artifact.
+        baseline_like_markers = [
+            "oi",
+            "olá",
+            "ola",
+            "estamos online",
+            "me fale sobre orkio",
+            "o que é orkio",
+            "qual a proposta de orkio",
+            "status",
+            "responda apenas ok",
+        ]
+        if normalized in baseline_like_markers:
+            return False
+
         artifact_markers = [
             "gere o artifact",
             "gere o artefato",
@@ -26173,6 +26213,113 @@ async def chat_stream(
             "O próximo passo correto é materializar o fileset governado do patch solicitado com conteúdo real por arquivo.\n\n"
             "Se esta mensagem aparecer em produção, o INTERNAL WARROOM GOVERNED ARTIFACT V3 está ativo."
         )
+
+    def _persist_assistant_message(
+        *,
+        text: str,
+        thread_id: Optional[str],
+        agent_id: Optional[str] = None,
+        agent_name: str = "Orkio",
+    ) -> Dict[str, Any]:
+        db2 = SessionLocal()
+        try:
+            tid = str(thread_id or tid_seed or "").strip()
+
+            if not tid:
+                t = Thread(
+                    id=new_id(),
+                    org_slug=org,
+                    title="Nova conversa",
+                    created_at=now_ts(),
+                )
+                db2.add(t)
+                db2.commit()
+                tid = t.id
+                try:
+                    _ensure_thread_owner(db2, org, tid, uid)
+                except Exception:
+                    try:
+                        db2.rollback()
+                    except Exception:
+                        pass
+            else:
+                t = db2.execute(
+                    select(Thread).where(
+                        Thread.id == tid,
+                        Thread.org_slug == org,
+                    )
+                ).scalar_one_or_none()
+                if not t:
+                    t = Thread(
+                        id=tid,
+                        org_slug=org,
+                        title="Nova conversa",
+                        created_at=now_ts(),
+                    )
+                    db2.add(t)
+                    db2.commit()
+                elif user.get("role") != "admin":
+                    try:
+                        _require_thread_member(db2, org, tid, uid)
+                    except Exception:
+                        try:
+                            db2.rollback()
+                        except Exception:
+                            pass
+
+            try:
+                _get_or_create_user_message(
+                    db2,
+                    org,
+                    tid,
+                    user,
+                    message,
+                    client_message_id,
+                )
+                db2.commit()
+            except Exception:
+                try:
+                    db2.rollback()
+                except Exception:
+                    pass
+
+            m_ass = Message(
+                id=new_id(),
+                org_slug=org,
+                thread_id=tid,
+                role="assistant",
+                content=str(text or "").strip(),
+                agent_id=agent_id,
+                agent_name=agent_name,
+                created_at=now_ts(),
+            )
+            db2.add(m_ass)
+            db2.commit()
+            return {
+                "thread_id": tid,
+                "assistant_message_id": m_ass.id,
+                "assistant_persisted": True,
+            }
+        except Exception:
+            try:
+                db2.rollback()
+            except Exception:
+                pass
+            try:
+                logger.exception("CHAT_STREAM_PERSIST_ASSISTANT_FAILED trace_id=%s", trace_id)
+            except Exception:
+                pass
+            return {
+                "thread_id": thread_id or tid_seed,
+                "assistant_message_id": None,
+                "assistant_persisted": False,
+            }
+        finally:
+            try:
+                db2.close()
+            except Exception:
+                pass
+
 
     def _internal_warroom_governed_artifact_fastpath_in_isolated_session() -> Dict[str, Any]:
         final_text = _build_internal_warroom_governed_artifact_answer(message)
