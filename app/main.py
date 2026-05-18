@@ -26563,6 +26563,98 @@ async def chat_stream(
             "Se esta mensagem aparecer em produção, o IDENTITY FASTPATH V9 está ativo."
         )
 
+    def _is_baseline_operational_request(text: str) -> bool:
+        normalized = _normalize_router_text(text)
+        if not normalized:
+            return False
+
+        direct_markers = {
+            "oi",
+            "olá",
+            "ola",
+            "bom dia",
+            "boa tarde",
+            "boa noite",
+            "estamos online",
+            "está online",
+            "esta online",
+            "estamos de volta",
+            "podemos seguir",
+            "ok",
+            "teste",
+        }
+        if normalized in direct_markers:
+            return True
+
+        if len(normalized) <= 24 and normalized in {
+            "oi orkio",
+            "ola orkio",
+            "olá orkio",
+            "hello",
+            "hi",
+        }:
+            return True
+
+        conflict_markers = [
+            "patch",
+            "artifact",
+            "artefato",
+            "auditoria",
+            "war room",
+            "proposal_only",
+            "frontend",
+            "pwa",
+            "onboarding",
+            "@orion",
+            "@chris",
+            "@team",
+            "me fale sobre orkio",
+            "o que é orkio",
+            "qual a proposta de orkio",
+        ]
+        if any(marker in normalized for marker in conflict_markers):
+            return False
+
+        return False
+
+
+    def _build_baseline_operational_answer(text: str) -> str:
+        normalized = _normalize_router_text(text)
+        if normalized in {"estamos online", "está online", "esta online"}:
+            return "Sim, estamos online. O runtime de chat está ativo e pronto para continuar."
+        if normalized in {"oi", "olá", "ola", "oi orkio", "ola orkio", "olá orkio", "bom dia", "boa tarde", "boa noite", "hello", "hi"}:
+            return "Olá. O canal básico do chat está ativo e pronto para continuar."
+        if normalized in {"podemos seguir", "estamos de volta", "ok", "teste"}:
+            return "Sim. O canal básico do chat está ativo e pronto para seguir."
+        return "O canal básico do chat está ativo e pronto para continuar."
+
+
+    def _baseline_operational_fastpath_in_isolated_session() -> Dict[str, Any]:
+        final_text = _build_baseline_operational_answer(message)
+        persisted = _persist_assistant_message(
+            text=final_text,
+            thread_id=tid_seed,
+            agent_id=None,
+            agent_name="Orkio",
+        )
+        return {
+            **persisted,
+            "answer": final_text,
+            "message": final_text,
+            "final_text": final_text,
+            "agent_id": None,
+            "agent_name": "Orkio",
+            "voice_id": None,
+            "avatar_url": None,
+            "runtime_hints": {
+                "routing": {
+                    "routing_source": "stream_baseline_operational_fastpath_v22",
+                    "route_applied": True,
+                    "execution_lifecycle": "completed",
+                }
+            },
+        }
+
     def _institutional_identity_fastpath_in_isolated_session() -> Dict[str, Any]:
         final_text = _build_institutional_identity_answer(message)
         persisted = _persist_assistant_message(
