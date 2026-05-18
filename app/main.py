@@ -25653,6 +25653,25 @@ async def chat_stream(
                 "Posso seguir pelo caminho estável: explicar minhas capacidades, continuar a conversa com o contexto do onboarding "
                 "ou registrar o diagnóstico técnico para correção."
             )
+        internal_runtime_markers = [
+            "PLATFORM_SELF_AUDIT_READY",
+            "PLATFORM_SELF_AUDIT_DISPATCH_EXECUTED",
+            "technical_summary:",
+            "provider: platform",
+            "event: PLATFORM_",
+            "delivery_contract:",
+        ]
+        if any(marker.lower() in raw.lower() for marker in internal_runtime_markers):
+            try:
+                if _is_beta_planning_request(message):
+                    return _build_beta_planning_answer(message)
+            except Exception:
+                pass
+            return (
+                "Recebi uma saída técnica interna do runtime, mas ela não é adequada para a conversa final. "
+                "Vou seguir pelo modo conversacional seguro: posso montar um plano, organizar próximos passos, "
+                "explicar capacidades ou registrar um diagnóstico técnico explícito se você pedir."
+            )
         return raw
 
     def _normalize_router_text(text: str) -> str:
@@ -26860,6 +26879,196 @@ async def chat_stream(
         return "O canal básico do chat está ativo e pronto para continuar."
 
 
+    def _is_beta_planning_request(text: str) -> bool:
+        """
+        AO-06_INTENT_GUARD_BETA_PLAN_FASTPATH:
+        Pedidos comuns de planejamento beta/testes não devem acionar self-audit,
+        platform governance ou artefatos internos. Este trilho é conversacional,
+        útil e seguro para usuário final.
+        """
+        raw = _normalize_router_text(text)
+        if not raw:
+            return False
+
+        explicit_governance_markers = [
+            "war room",
+            "warroom",
+            "auditoria",
+            "auditoria tecnica",
+            "auditoria técnica",
+            "readonly audit",
+            "read-only audit",
+            "inspecione runtime",
+            "inspecionar runtime",
+            "diagnóstico técnico",
+            "diagnostico tecnico",
+            "platform self audit",
+            "self audit",
+            "governance artifact",
+            "artifact governance",
+            "proposal_only",
+            "patch",
+            "diff",
+            "commit",
+            "pull request",
+            "github",
+            "migration",
+            "alembic",
+            "app/main.py",
+            "orion_internal.py",
+            "intent_engine.py",
+        ]
+        if any(marker in raw for marker in explicit_governance_markers):
+            return False
+
+        planning_markers = [
+            "me ajuda a montar",
+            "me ajude a montar",
+            "montar um plano",
+            "criar um plano",
+            "fazer um plano",
+            "plano de testes",
+            "plano beta",
+            "roteiro de teste",
+            "roteiro de testes",
+            "checklist de teste",
+            "checklist de testes",
+            "organizar beta",
+            "organizar lançamento",
+            "organizar lancamento",
+            "liberar a plataforma",
+            "liberar usuários",
+            "liberar usuarios",
+            "preparar testes",
+            "preparar beta",
+            "turbinar a plataforma",
+            "turbinar essa plataforma",
+            "melhorar a plataforma para liberar",
+            "próximos passos para liberar",
+            "proximos passos para liberar",
+        ]
+        beta_markers = [
+            "beta",
+            "usuários beta",
+            "usuarios beta",
+            "teste fechado",
+            "testes fechados",
+            "testes com usuários",
+            "testes com usuarios",
+            "usuários de teste",
+            "usuarios de teste",
+            "piloto",
+            "homologação",
+            "homologacao",
+            "rollout",
+            "lançamento controlado",
+            "lancamento controlado",
+        ]
+        product_markers = [
+            "plataforma",
+            "orkio",
+            "patroai",
+            "app",
+            "pwa",
+            "usuários",
+            "usuarios",
+            "clientes",
+            "testadores",
+        ]
+
+        has_planning = any(marker in raw for marker in planning_markers)
+        has_beta = any(marker in raw for marker in beta_markers)
+        has_product = any(marker in raw for marker in product_markers)
+
+        if has_planning and (has_beta or has_product):
+            return True
+        if "plano de testes" in raw and (has_beta or has_product):
+            return True
+        if "como testar" in raw and has_product:
+            return True
+        if "como liberar" in raw and (has_beta or has_product):
+            return True
+
+        return False
+
+
+    def _build_beta_planning_answer(text: str) -> str:
+        onboarding_digest = _build_stream_onboarding_context_digest()
+        context_block = ""
+        if onboarding_digest:
+            context_block = "\n\nContexto que vou considerar a partir do onboarding:\n" + onboarding_digest
+
+        return (
+            "Claro. Vamos transformar isso em um beta fechado simples, seguro e mensurável para 5 usuários.\n\n"
+            "1. Objetivo do beta\n"
+            "- Validar se o usuário consegue entrar, entender a proposta, conversar com o Orkio e sair com valor prático em poucos minutos.\n"
+            "- Medir estabilidade real: login, onboarding, chat, troca de mensagens, áudio/TTS quando disponível, threads e continuidade de contexto.\n\n"
+            "2. Seleção dos 5 usuários\n"
+            "- 2 usuários próximos e pacientes para achar bugs básicos.\n"
+            "- 2 usuários com perfil de cliente real para avaliar valor percebido.\n"
+            "- 1 usuário mais crítico/técnico para testar limites, clareza e confiança.\n\n"
+            "3. Preparação antes de convidar\n"
+            "- Criar uma conta de teste para cada usuário.\n"
+            "- Enviar instruções curtas: objetivo, link, tempo esperado de teste e canal para feedback.\n"
+            "- Definir uma planilha/log com: usuário, dispositivo, navegador/PWA, horário, fluxo testado, problema, severidade e print.\n\n"
+            "4. Roteiro mínimo de teste\n"
+            "- Abrir a landing e identificar onde entrar/criar conta.\n"
+            "- Fazer cadastro ou login.\n"
+            "- Concluir onboarding.\n"
+            "- Enviar: olá.\n"
+            "- Perguntar: o que tu sabes fazer?\n"
+            "- Pedir uma tarefa prática do próprio contexto do usuário.\n"
+            "- Criar ou alternar conversa, se disponível.\n"
+            "- Testar em mobile/PWA quando possível.\n\n"
+            "5. Critérios de sucesso\n"
+            "- 5/5 conseguem entrar sem ajuda direta.\n"
+            "- 5/5 recebem pelo menos uma resposta útil no chat.\n"
+            "- 4/5 entendem o que o Orkio faz.\n"
+            "- Nenhum erro interno aparece na conversa.\n"
+            "- Nenhum fluxo crítico fica preso em “Gerando resposta”.\n\n"
+            "6. Critérios de NO-GO\n"
+            "- Login/cadastro falha para mais de 1 usuário.\n"
+            "- Chat responde com erro técnico interno.\n"
+            "- Onboarding não conclui ou perde contexto em todos os testes.\n"
+            "- PWA/mobile impede uso básico.\n\n"
+            "7. Operação do beta\n"
+            "- D0: teste interno final com você e admin.\n"
+            "- D1: liberar para 2 usuários próximos.\n"
+            "- D2: corrigir bloqueadores.\n"
+            "- D3: liberar para mais 3 usuários.\n"
+            "- D5/D7: consolidar aprendizados e decidir GO/NO-GO para ampliar.\n\n"
+            "Meu veredito operacional: liberar primeiro para 2 usuários controlados, corrigir bloqueadores em até 24h e só então abrir para os 5."
+            + context_block
+        )
+
+
+    def _beta_planning_fastpath_in_isolated_session() -> Dict[str, Any]:
+        final_text = _build_beta_planning_answer(message)
+        persisted = _persist_assistant_message(
+            text=final_text,
+            thread_id=tid_seed,
+            agent_id=None,
+            agent_name="Orkio",
+        )
+        return {
+            **persisted,
+            "answer": final_text,
+            "message": final_text,
+            "final_text": final_text,
+            "agent_id": None,
+            "agent_name": "Orkio",
+            "voice_id": None,
+            "avatar_url": None,
+            "runtime_hints": {
+                "routing": {
+                    "routing_source": "stream_beta_planning_fastpath_ao06",
+                    "route_applied": True,
+                    "execution_lifecycle": "completed",
+                }
+            },
+        }
+
+
     def _build_capabilities_baseline_answer(text: str) -> str:
         onboarding_digest = _build_stream_onboarding_context_digest()
         context_block = ""
@@ -27068,6 +27277,22 @@ async def chat_stream(
                 logger.info("CHAT_STREAM_DONE trace_id=%s thread_id=%s source=%s", trace_id, thread_id, routing_source)
             except Exception:
                 pass
+
+        # AO-06_BETA_PLANNING_FASTPATH
+        # Pedidos comuns de plano beta/testes devem responder como conversa útil,
+        # não como PLATFORM_SELF_AUDIT_READY ou governance artifact.
+        if _is_beta_planning_request(message):
+            try:
+                payload = await asyncio.to_thread(_beta_planning_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_beta_planning_fastpath_ao06"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_BETA_PLANNING_FASTPATH_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Se o fast-path falhar, o terminal guard/sanitizer ainda protege a UI.
 
         # SELF_EVALUATION_GOVERNED_READONLY_V2
         # Autoavaliação sistêmica da plataforma inteira não deve desviar para UX Frontend.
