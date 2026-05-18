@@ -25619,6 +25619,42 @@ async def chat_stream(
         except Exception:
             return {"raw": str(obj)}
 
+    def _looks_like_internal_exception_text(text: str) -> bool:
+        raw = str(text or "").strip()
+        if not raw:
+            return False
+        lowered = raw.lower()
+        internal_markers = [
+            "nameerror",
+            "traceback",
+            "undefinedtable",
+            "duplicatecolumn",
+            "duplicatetable",
+            "sqlalchemy.exc",
+            "psycopg2.errors",
+            "is not defined",
+            "_extract_known_roster_agents_from_text",
+            "object has no attribute",
+            "noneType",
+            "nonetype",
+            "stack trace",
+            "/app/app/",
+            "file \"/app/",
+        ]
+        return any(marker in lowered for marker in internal_markers)
+
+    def _sanitize_visible_stream_text(text: str) -> str:
+        raw = str(text or "").strip()
+        if not raw:
+            return raw
+        if _looks_like_internal_exception_text(raw):
+            return (
+                "Encontrei uma falha interna no runtime desta resposta, mas ela foi encerrada com segurança. "
+                "Posso seguir pelo caminho estável: explicar minhas capacidades, continuar a conversa com o contexto do onboarding "
+                "ou registrar o diagnóstico técnico para correção."
+            )
+        return raw
+
     def _normalize_router_text(text: str) -> str:
         raw = (text or "").strip().lower()
         if not raw:
@@ -26679,6 +26715,83 @@ async def chat_stream(
         return False
 
 
+    def _looks_like_capabilities_question(text: str) -> bool:
+        """
+        AO-04_CAPABILITIES_BASELINE:
+        Perguntas simples sobre "o que tu sabes fazer" não devem acionar o
+        runtime pesado nem o roteador de roster enquanto ele estiver em estabilização.
+        """
+        normalized = _baseline_text_key(text)
+        raw = _normalize_router_text(text)
+        if not normalized and not raw:
+            return False
+
+        conflict_markers = [
+            "patch",
+            "artifact",
+            "artefato",
+            "diff",
+            "commit",
+            "deploy",
+            "migration",
+            "alembic",
+            "sql",
+            "github",
+            "war room",
+            "proposal_only",
+            "aprovação humana",
+            "aprovacao humana",
+        ]
+        # Se for pedido técnico/governado explícito, deixa o trilho governado cuidar.
+        if any(marker in raw for marker in conflict_markers):
+            return False
+
+        direct_patterns = [
+            r"\bo\s+que\s+(tu|você|voce)\s+(sabes|sabe|consegue|pode)\s+fazer\b",
+            r"\bo\s+que\s+(tu|você|voce)\s+faz\b",
+            r"\bcomo\s+(tu|você|voce)\s+pode\s+me\s+ajudar\b",
+            r"\bno\s+que\s+(tu|você|voce)\s+pode\s+me\s+ajudar\b",
+            r"\bquais\s+(são\s+|sao\s+)?(as\s+)?(suas\s+)?capacidades\b",
+            r"\bquais\s+agentes\s+(existem|temos|estão|estao)\b",
+            r"\bquem\s+(são|sao)\s+(os\s+)?agentes\b",
+            r"\bquem\s+(é|e)\s+(a\s+)?(chris|orion|team|orkio)\b",
+            r"\bo\s+que\s+(a\s+)?(chris|orion|team|orkio)\s+faz\b",
+        ]
+        if any(re.search(pattern, raw, flags=re.IGNORECASE) for pattern in direct_patterns):
+            return True
+
+        exact_markers = {
+            "o que tu sabes fazer",
+            "o que você sabe fazer",
+            "o que voce sabe fazer",
+            "o que tu sabe fazer",
+            "o que você faz",
+            "o que voce faz",
+            "como tu pode me ajudar",
+            "como você pode me ajudar",
+            "como voce pode me ajudar",
+            "quais agentes existem",
+            "quais agentes temos",
+            "quem são os agentes",
+            "quem sao os agentes",
+            "capacidades",
+            "suas capacidades",
+            "quem é chris",
+            "quem e chris",
+            "quem é a chris",
+            "quem e a chris",
+            "quem é orion",
+            "quem e orion",
+            "quem é o orion",
+            "quem e o orion",
+            "quem é team",
+            "quem e team",
+            "quem é o team",
+            "quem e o team",
+        }
+        return normalized in exact_markers
+
+
     def _build_stream_onboarding_context_digest() -> str:
         try:
             db_ctx = SessionLocal()
@@ -26745,6 +26858,51 @@ async def chat_stream(
         if onboarding_digest:
             return "O canal básico do chat está ativo e pronto para continuar. Contexto preservado:\n\n" + onboarding_digest
         return "O canal básico do chat está ativo e pronto para continuar."
+
+
+    def _build_capabilities_baseline_answer(text: str) -> str:
+        onboarding_digest = _build_stream_onboarding_context_digest()
+        context_block = ""
+        if onboarding_digest:
+            context_block = "\n\nContexto que vou considerar a partir do onboarding:\n" + onboarding_digest
+
+        return (
+            "Consigo te ajudar em quatro frentes principais:\n\n"
+            "1. Orkio — conversa principal, organização do contexto, criação de planos, diagnóstico inicial, priorização e coordenação da jornada.\n"
+            "2. Chris — apoio estratégico de produto, negócio, experiência, narrativa, posicionamento e clareza para decisões.\n"
+            "3. Orion — arquitetura, backend, frontend, runtime, governança, patches, deploy e análise técnica operacional.\n"
+            "4. Team — acionamento coordenado do squad quando a tarefa precisa de múltiplas especialidades, com diagnóstico, patch mínimo, risco e checklist.\n\n"
+            "Neste momento, para manter estabilidade, perguntas simples de capacidades são respondidas por este caminho seguro, sem acionar o runtime pesado. "
+            "Para avançar, você pode me pedir algo como: diagnosticar um problema, melhorar uma página, revisar um fluxo, planejar um patch, organizar uma estratégia ou continuar a conversa a partir do seu onboarding."
+            + context_block
+        )
+
+
+    def _capabilities_baseline_fastpath_in_isolated_session() -> Dict[str, Any]:
+        final_text = _build_capabilities_baseline_answer(message)
+        persisted = _persist_assistant_message(
+            text=final_text,
+            thread_id=tid_seed,
+            agent_id=None,
+            agent_name="Orkio",
+        )
+        return {
+            **persisted,
+            "answer": final_text,
+            "message": final_text,
+            "final_text": final_text,
+            "agent_id": None,
+            "agent_name": "Orkio",
+            "voice_id": None,
+            "avatar_url": None,
+            "runtime_hints": {
+                "routing": {
+                    "routing_source": "stream_capabilities_baseline_fastpath_ao04",
+                    "route_applied": True,
+                    "execution_lifecycle": "completed",
+                }
+            },
+        }
 
 
     def _baseline_operational_fastpath_in_isolated_session() -> Dict[str, Any]:
@@ -26867,6 +27025,7 @@ async def chat_stream(
 
             if not final_text:
                 final_text = "O runtime principal concluiu sem texto final. O stream foi encerrado com segurança."
+            final_text = _sanitize_visible_stream_text(final_text)
 
             try:
                 logger.info("CHAT_STREAM_FIRST_CHUNK trace_id=%s thread_id=%s chars=%s", trace_id, thread_id, len(final_text))
@@ -27013,6 +27172,22 @@ async def chat_stream(
                     pass
                 # Se o fast-path falhar, seguimos para o baseline protegido.
 
+        # AO-04_CAPABILITIES_BASELINE_FASTPATH
+        # Perguntas simples sobre capacidades/roster não devem acionar runtime pesado
+        # enquanto o roteador multiagente estiver em estabilização.
+        if _looks_like_capabilities_question(message):
+            try:
+                payload = await asyncio.to_thread(_capabilities_baseline_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_capabilities_baseline_fastpath_ao04"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_CAPABILITIES_BASELINE_FASTPATH_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Se o fast-path falhar, o terminal guard ainda sanitiza a exceção.
+
         # METATRON_CHAT_STREAM_BASELINE_ROUTER_V8
         # Durante a estabilização do runtime principal, perguntas comuns não devem
         # cair no fanout pesado. O baseline operacional responde de forma segura e
@@ -27157,6 +27332,7 @@ async def chat_stream(
         except HTTPException as exc:
             detail = exc.detail
             final_text = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False)
+            final_text = _sanitize_visible_stream_text(final_text)
             persisted = await asyncio.to_thread(
                 _persist_assistant_message,
                 text=final_text,
@@ -27223,7 +27399,7 @@ async def chat_stream(
             yield _metatron_sse("error", {
                 **fatal_base,
                 "code": "CHAT_STREAM_FATAL",
-                "message": str(exc),
+                "message": final_text,
                 "recoverable": True,
             })
             yield _metatron_sse("chunk", {
