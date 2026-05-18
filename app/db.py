@@ -708,6 +708,56 @@ def _reconcile_files_schema_boot():
         print("FILES_SCHEMA_RECONCILE_DB_BOOT_FAILED", str(e))
 
 
+
+def _reconcile_file_requests_schema_boot():
+    """Idempotent safety net for schema drift in file_requests.
+
+    This does not replace Alembic. It protects production when a previous
+    deployment stamped or skipped migrations and the admin endpoint reaches
+    FileRequest before the table exists.
+    """
+    if ENGINE is None:
+        return
+
+    try:
+        with ENGINE.begin() as conn:
+            conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS file_requests (
+                id VARCHAR PRIMARY KEY,
+                org_slug VARCHAR NOT NULL,
+                file_id VARCHAR NOT NULL,
+                requested_by_user_id VARCHAR NULL,
+                requested_by_user_name VARCHAR NULL,
+                status VARCHAR NOT NULL DEFAULT 'pending',
+                created_at BIGINT NOT NULL,
+                resolved_at BIGINT NULL,
+                resolved_by_admin_id VARCHAR NULL
+            )
+            """))
+
+            stmts = [
+                "ALTER TABLE IF EXISTS file_requests ADD COLUMN IF NOT EXISTS org_slug VARCHAR",
+                "ALTER TABLE IF EXISTS file_requests ADD COLUMN IF NOT EXISTS file_id VARCHAR",
+                "ALTER TABLE IF EXISTS file_requests ADD COLUMN IF NOT EXISTS requested_by_user_id VARCHAR",
+                "ALTER TABLE IF EXISTS file_requests ADD COLUMN IF NOT EXISTS requested_by_user_name VARCHAR",
+                "ALTER TABLE IF EXISTS file_requests ADD COLUMN IF NOT EXISTS status VARCHAR DEFAULT 'pending'",
+                "ALTER TABLE IF EXISTS file_requests ADD COLUMN IF NOT EXISTS created_at BIGINT",
+                "ALTER TABLE IF EXISTS file_requests ADD COLUMN IF NOT EXISTS resolved_at BIGINT",
+                "ALTER TABLE IF EXISTS file_requests ADD COLUMN IF NOT EXISTS resolved_by_admin_id VARCHAR",
+                "UPDATE file_requests SET status = 'pending' WHERE status IS NULL",
+                "UPDATE file_requests SET created_at = EXTRACT(EPOCH FROM NOW())::BIGINT WHERE created_at IS NULL",
+                "CREATE INDEX IF NOT EXISTS ix_file_requests_org_slug ON file_requests (org_slug)",
+                "CREATE INDEX IF NOT EXISTS ix_file_requests_file_id ON file_requests (file_id)",
+                "CREATE INDEX IF NOT EXISTS ix_file_requests_status ON file_requests (status)",
+                "CREATE INDEX IF NOT EXISTS ix_file_requests_org_status_created ON file_requests (org_slug, status, created_at DESC)",
+            ]
+            for stmt in stmts:
+                conn.execute(text(stmt))
+
+        print("FILE_REQUESTS_SCHEMA_RECONCILE_DB_BOOT_OK")
+    except Exception as e:
+        print("FILE_REQUESTS_SCHEMA_RECONCILE_DB_BOOT_FAILED", str(e))
+
 def _reconcile_evolution_governance_schema_boot():
     if ENGINE is None:
         return
@@ -916,6 +966,7 @@ _reconcile_core_auth_schema_boot()
 _reconcile_agents_schema_boot()
 _reconcile_collab_and_realtime_schema_boot()
 _reconcile_files_schema_boot()
+_reconcile_file_requests_schema_boot()
 _reconcile_evolution_governance_schema_boot()
 
 
