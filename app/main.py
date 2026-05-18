@@ -20916,6 +20916,43 @@ def _build_runtime_enrichment(
     ]
     thread_dispatch_contract = _last_structured_dispatch_from_history(prev_serialized)
     context = {"summary": f"{len(prev_messages)} previous messages"} if prev_messages else {}
+
+    # AO-03_ONBOARDING_CONTEXT_BRIDGE
+    # The onboarding form is currently persisted on the User row. The runtime
+    # planner did not receive these fields, so the first chat after onboarding
+    # behaved as if the user had no context. Keep this additive and defensive:
+    # no schema change, no new table, no migration dependency.
+    try:
+        if uid:
+            onboarding_user = db.execute(
+                select(User).where(User.id == uid, User.org_slug == org)
+            ).scalar_one_or_none()
+            if onboarding_user is not None:
+                def _ctx_text(value: Any, limit: int = 700) -> Optional[str]:
+                    raw = str(value or "").strip()
+                    return raw[:limit] if raw else None
+
+                onboarding_context = {
+                    "company": _ctx_text(getattr(onboarding_user, "company", None), 220),
+                    "profile_role": _ctx_text(getattr(onboarding_user, "profile_role", None), 220),
+                    "user_type": _ctx_text(getattr(onboarding_user, "user_type", None), 80),
+                    "intent": _ctx_text(getattr(onboarding_user, "intent", None), 120),
+                    "country": _ctx_text(getattr(onboarding_user, "country", None), 40),
+                    "language": _ctx_text(getattr(onboarding_user, "language", None), 40),
+                    "notes": _ctx_text(getattr(onboarding_user, "notes", None), 900),
+                    "onboarding_completed": bool(getattr(onboarding_user, "onboarding_completed", False)),
+                }
+                onboarding_context = {k: v for k, v in onboarding_context.items() if v not in (None, "", False)}
+                if onboarding_context:
+                    context["onboarding_context"] = onboarding_context
+                    context["user_context_available"] = True
+                    context["continuity_source"] = "user_onboarding_profile"
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
     if destination_contract:
         try:
             context.update(_efata777_contract_for_intent_context(destination_contract))
@@ -26577,8 +26614,18 @@ async def chat_stream(
             "Se esta mensagem aparecer em produção, o IDENTITY FASTPATH V9 está ativo."
         )
 
-    def _is_baseline_operational_request(text: str) -> bool:
+    def _baseline_text_key(text: str) -> str:
         normalized = _normalize_router_text(text)
+        # AO-03_STREAM_GREETING_FASTPATH
+        # _normalize_router_text intentionally preserves punctuation for many
+        # routers, but greetings like "olá!" must still hit the lightweight
+        # baseline instead of going to the heavy runtime.
+        normalized = normalized.strip(" \t\r\n.,!?¡¿;:…")
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+        return normalized
+
+    def _is_baseline_operational_request(text: str) -> bool:
+        normalized = _baseline_text_key(text)
         if not normalized:
             return False
 
@@ -26632,14 +26679,71 @@ async def chat_stream(
         return False
 
 
+    def _build_stream_onboarding_context_digest() -> str:
+        try:
+            db_ctx = SessionLocal()
+            try:
+                u_ctx = db_ctx.execute(
+                    select(User).where(User.id == uid, User.org_slug == org)
+                ).scalar_one_or_none()
+                if not u_ctx:
+                    return ""
+
+                parts: List[str] = []
+                name = str(getattr(u_ctx, "name", None) or "").strip()
+                company = str(getattr(u_ctx, "company", None) or "").strip()
+                role = str(getattr(u_ctx, "profile_role", None) or "").strip()
+                user_type = str(getattr(u_ctx, "user_type", None) or "").strip()
+                intent = str(getattr(u_ctx, "intent", None) or "").strip()
+                country = str(getattr(u_ctx, "country", None) or "").strip()
+                language = str(getattr(u_ctx, "language", None) or "").strip()
+                notes = str(getattr(u_ctx, "notes", None) or "").strip()
+
+                if name:
+                    parts.append(f"Nome: {name}")
+                if company:
+                    parts.append(f"Empresa/projeto: {company}")
+                if role:
+                    parts.append(f"Papel: {role}")
+                if user_type:
+                    parts.append(f"Perfil: {user_type}")
+                if intent:
+                    parts.append(f"Intenção: {intent}")
+                if country or language:
+                    parts.append("Localização/idioma: " + " · ".join([x for x in [country, language] if x]))
+                if notes:
+                    parts.append("Notas do onboarding: " + notes[:700])
+
+                return "\n".join(parts).strip()
+            finally:
+                try:
+                    db_ctx.close()
+                except Exception:
+                    pass
+        except Exception:
+            return ""
+
     def _build_baseline_operational_answer(text: str) -> str:
-        normalized = _normalize_router_text(text)
+        normalized = _baseline_text_key(text)
+        onboarding_digest = _build_stream_onboarding_context_digest()
         if normalized in {"estamos online", "está online", "esta online"}:
+            if onboarding_digest:
+                return "Sim, estamos online. O runtime de chat está ativo e o contexto do onboarding foi preservado.\n\n" + onboarding_digest
             return "Sim, estamos online. O runtime de chat está ativo e pronto para continuar."
         if normalized in {"oi", "olá", "ola", "oi orkio", "ola orkio", "olá orkio", "bom dia", "boa tarde", "boa noite", "hello", "hi"}:
+            if onboarding_digest:
+                return (
+                    "Olá. Recebi seu onboarding e vou usar esse contexto para orientar a conversa a partir daqui.\n\n"
+                    + onboarding_digest
+                    + "\n\nComo posso te ajudar agora?"
+                )
             return "Olá. O canal básico do chat está ativo e pronto para continuar."
         if normalized in {"podemos seguir", "estamos de volta", "ok", "teste"}:
+            if onboarding_digest:
+                return "Sim. O canal básico do chat está ativo, com o contexto do onboarding preservado.\n\n" + onboarding_digest
             return "Sim. O canal básico do chat está ativo e pronto para seguir."
+        if onboarding_digest:
+            return "O canal básico do chat está ativo e pronto para continuar. Contexto preservado:\n\n" + onboarding_digest
         return "O canal básico do chat está ativo e pronto para continuar."
 
 
