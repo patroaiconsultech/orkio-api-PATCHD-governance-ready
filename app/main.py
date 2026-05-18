@@ -1797,7 +1797,7 @@ def _is_summit_eligible_user(u: Optional[User]) -> bool:
     return (
         usage_tier.startswith("summit_")
         or signup_source == "investor"
-        or signup_code_label == "efata777"
+        or signup_code_label == "efatah777"
         or product_scope == "full"
     )
 
@@ -2099,8 +2099,8 @@ def _seed_default_summit_codes(db: Session, org: str = "public") -> None:
             "created_by": "system_seed",
         },
         {
-            "id": "seed_efata777_public",
-            "plain_code": "EFATA777",
+            "id": "seed_efatah777_public",
+            "plain_code": "EFATAH777",
             "label": "Investidor",
             "source": "investor",
             "max_uses": 200,
@@ -3414,7 +3414,7 @@ def get_current_user(authorization: Optional[str] = Header(default=None)) -> Dic
         summit_eligible = (
             str(payload.get("usage_tier") or "").startswith("summit_")
             or str(payload.get("signup_source") or "").lower() == "investor"
-            or str(payload.get("signup_code_label") or "").lower() == "efata777"
+            or str(payload.get("signup_code_label") or "").lower() == "efatah777"
             or str(payload.get("product_scope") or "").lower() == "full"
         )
 
@@ -3923,18 +3923,20 @@ app = FastAPI(title="Orkio API", version=APP_VERSION)
 
 
 
-# AO-11_ADMIN_CONTROLLED_EVOLUTION_PROPOSAL_LIFECYCLE
-# Proposal-only governance bridge.
+
+# AO-13_PTE_ADMIN_EVOLUTION_PERSISTENCE
+# Proposal lifecycle persistence bridge for PTE (Plano Técnico de Evolução).
 #
-# This store is intentionally non-executing: it creates auditable proposal records
-# that can be approved/rejected by Admin, but it does not write code, commit,
-# deploy, run migrations, or activate the evolution loop.
-#
-# NOTE: first implementation is in-process for low-risk rollout. A later AO can
-# promote this to DB-backed EvolutionProposal/EvolutionExecution models once the
-# Admin UX and contract are validated.
+# Contract:
+# - Orion may create proposal_only records.
+# - Admin may list/detail/approve/reject.
+# - No code writing, no commit, no deploy, no migration execution, no runtime patch runner.
+# - Data is persisted in DB when available, with in-process fallback only as resilience.
+# - Execution table is bootstrapped as inert foundation; execution remains disabled.
 _ADMIN_EVOLUTION_PROPOSAL_LOCK = _threading.RLock()
 _ADMIN_EVOLUTION_PROPOSALS: Dict[str, Dict[str, Any]] = {}
+_ADMIN_EVOLUTION_DB_BOOT_OK = False
+_ADMIN_EVOLUTION_DB_BOOT_ERROR = ""
 
 
 def _admin_evolution_now() -> int:
@@ -3944,13 +3946,163 @@ def _admin_evolution_now() -> int:
         return int(time.time())
 
 
+def _admin_evolution_json_dump(value: Any) -> str:
+    try:
+        return json.dumps(value if value is not None else [], ensure_ascii=False)
+    except Exception:
+        return "[]"
+
+
+def _admin_evolution_json_load(value: Any, default: Any = None) -> Any:
+    if default is None:
+        default = []
+    try:
+        if value is None:
+            return default
+        if isinstance(value, (list, dict)):
+            return value
+        raw = str(value or "").strip()
+        if not raw:
+            return default
+        return json.loads(raw)
+    except Exception:
+        return default
+
+
+def _admin_evolution_bool(value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return False
+    return str(value).strip().lower() in {"1", "true", "yes", "y", "on"}
+
+
+def _admin_evolution_bootstrap_db_schema() -> bool:
+    """
+    AO-13: idempotent DB bootstrap for proposal persistence.
+    This is intentionally additive and non-destructive.
+    It does not enable execution and does not alter existing governance tables.
+    """
+    global _ADMIN_EVOLUTION_DB_BOOT_OK, _ADMIN_EVOLUTION_DB_BOOT_ERROR
+    if _ADMIN_EVOLUTION_DB_BOOT_OK:
+        return True
+    if _env_flag("DISABLE_ADMIN_EVOLUTION_DB_PERSISTENCE", default=False):
+        _ADMIN_EVOLUTION_DB_BOOT_ERROR = "disabled_by_env"
+        return False
+    try:
+        with ENGINE.begin() as conn:
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS admin_evolution_proposals (
+                    proposal_id TEXT PRIMARY KEY,
+                    org_slug TEXT NOT NULL DEFAULT 'public',
+                    status TEXT NOT NULL DEFAULT 'pending_approval',
+                    mode TEXT NOT NULL DEFAULT 'proposal_only',
+                    created_by TEXT DEFAULT '',
+                    thread_id TEXT DEFAULT '',
+                    source TEXT DEFAULT '',
+                    source_message TEXT DEFAULT '',
+                    title TEXT DEFAULT '',
+                    summary TEXT DEFAULT '',
+                    risk TEXT DEFAULT 'medium',
+                    target_files_json TEXT DEFAULT '[]',
+                    rollback_plan TEXT DEFAULT '',
+                    checklist_json TEXT DEFAULT '[]',
+                    write_allowed BOOLEAN NOT NULL DEFAULT FALSE,
+                    execution_allowed BOOLEAN NOT NULL DEFAULT FALSE,
+                    human_approval_required BOOLEAN NOT NULL DEFAULT TRUE,
+                    created_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL,
+                    approved_at BIGINT,
+                    approved_by TEXT DEFAULT '',
+                    rejected_at BIGINT,
+                    rejected_by TEXT DEFAULT '',
+                    execution_id TEXT DEFAULT '',
+                    execution_status TEXT NOT NULL DEFAULT 'not_started'
+                )
+            """))
+            conn.execute(text("""
+                CREATE INDEX IF NOT EXISTS ix_admin_evolution_proposals_org_status_updated
+                ON admin_evolution_proposals (org_slug, status, updated_at)
+            """))
+            conn.execute(text("""
+                CREATE TABLE IF NOT EXISTS admin_evolution_executions (
+                    execution_id TEXT PRIMARY KEY,
+                    proposal_id TEXT NOT NULL,
+                    org_slug TEXT NOT NULL DEFAULT 'public',
+                    status TEXT NOT NULL DEFAULT 'not_started',
+                    mode TEXT NOT NULL DEFAULT 'disabled_until_admin_execution_runner',
+                    created_by TEXT DEFAULT '',
+                    approved_by TEXT DEFAULT '',
+                    risk TEXT DEFAULT 'medium',
+                    rollback_plan TEXT DEFAULT '',
+                    smoke_checklist_json TEXT DEFAULT '[]',
+                    result_json TEXT DEFAULT '{}',
+                    created_at BIGINT NOT NULL,
+                    updated_at BIGINT NOT NULL,
+                    started_at BIGINT,
+                    finished_at BIGINT
+                )
+            """))
+            conn.execute(text("""
+                CREATE INDEX IF NOT EXISTS ix_admin_evolution_executions_proposal_status_updated
+                ON admin_evolution_executions (proposal_id, status, updated_at)
+            """))
+        _ADMIN_EVOLUTION_DB_BOOT_OK = True
+        _ADMIN_EVOLUTION_DB_BOOT_ERROR = ""
+        try:
+            logger.info("ADMIN_EVOLUTION_SCHEMA_BOOT_OK persistence=db mode=proposal_only execution_enabled=false")
+        except Exception:
+            pass
+        return True
+    except Exception as e:
+        _ADMIN_EVOLUTION_DB_BOOT_OK = False
+        _ADMIN_EVOLUTION_DB_BOOT_ERROR = str(e)[:300]
+        try:
+            logger.exception("ADMIN_EVOLUTION_SCHEMA_BOOT_FAILED fallback=memory error=%s", _ADMIN_EVOLUTION_DB_BOOT_ERROR)
+        except Exception:
+            pass
+        return False
+
+
+@app.on_event("startup")
+def _startup_admin_evolution_pte_schema():
+    # Best-effort: API startup must not crash because of the proposal bridge.
+    _admin_evolution_bootstrap_db_schema()
+
+
 def _admin_evolution_public_row(row: Dict[str, Any]) -> Dict[str, Any]:
     safe = dict(row or {})
+    if "target_files_json" in safe:
+        safe["target_files"] = _admin_evolution_json_load(safe.pop("target_files_json", None), [])
+    if "checklist_json" in safe:
+        safe["checklist"] = _admin_evolution_json_load(safe.pop("checklist_json", None), [])
+    for key in ("write_allowed", "execution_allowed", "human_approval_required"):
+        if key in safe:
+            safe[key] = _admin_evolution_bool(safe.get(key))
     # Never expose raw secrets or hidden runtime objects if future fields are added.
     for key in list(safe.keys()):
         if "secret" in str(key).lower() or "token" in str(key).lower():
             safe.pop(key, None)
+    safe.setdefault("write_allowed", False)
+    safe.setdefault("execution_allowed", False)
+    safe.setdefault("human_approval_required", True)
+    safe.setdefault("execution_status", "not_started")
+    safe.setdefault("mode", "proposal_only")
     return safe
+
+
+def _admin_evolution_mapping_to_public(mapping: Any) -> Dict[str, Any]:
+    try:
+        row = dict(mapping or {})
+    except Exception:
+        row = {}
+    return _admin_evolution_public_row(row)
+
+
+def _admin_evolution_memory_put(row: Dict[str, Any]) -> Dict[str, Any]:
+    with _ADMIN_EVOLUTION_PROPOSAL_LOCK:
+        _ADMIN_EVOLUTION_PROPOSALS[str(row.get("proposal_id") or "")] = dict(row)
+    return _admin_evolution_public_row(row)
 
 
 def _admin_evolution_create_proposal(
@@ -3975,7 +4127,7 @@ def _admin_evolution_create_proposal(
         "org_slug": str(org_slug or "public"),
         "created_by": str(user_id or ""),
         "thread_id": str(thread_id or ""),
-        "source": "chat_orion_ao11",
+        "source": "chat_orion_ao13",
         "source_message": str(source_message or "")[:4000],
         "title": str(title or "Orion evolution proposal").strip(),
         "summary": str(summary or "").strip(),
@@ -3995,29 +4147,127 @@ def _admin_evolution_create_proposal(
         "execution_id": "",
         "execution_status": "not_started",
     }
-    with _ADMIN_EVOLUTION_PROPOSAL_LOCK:
-        _ADMIN_EVOLUTION_PROPOSALS[proposal_id] = dict(row)
+
+    if _admin_evolution_bootstrap_db_schema():
+        db = SessionLocal()
+        try:
+            db.execute(text("""
+                INSERT INTO admin_evolution_proposals (
+                    proposal_id, org_slug, status, mode, created_by, thread_id, source, source_message,
+                    title, summary, risk, target_files_json, rollback_plan, checklist_json,
+                    write_allowed, execution_allowed, human_approval_required,
+                    created_at, updated_at, approved_at, approved_by, rejected_at, rejected_by,
+                    execution_id, execution_status
+                ) VALUES (
+                    :proposal_id, :org_slug, :status, :mode, :created_by, :thread_id, :source, :source_message,
+                    :title, :summary, :risk, :target_files_json, :rollback_plan, :checklist_json,
+                    :write_allowed, :execution_allowed, :human_approval_required,
+                    :created_at, :updated_at, :approved_at, :approved_by, :rejected_at, :rejected_by,
+                    :execution_id, :execution_status
+                )
+            """), {
+                **{k: v for k, v in row.items() if k not in {"target_files", "checklist"}},
+                "target_files_json": _admin_evolution_json_dump(row.get("target_files")),
+                "checklist_json": _admin_evolution_json_dump(row.get("checklist")),
+            })
+            db.commit()
+            try:
+                logger.info(
+                    "ADMIN_EVOLUTION_PROPOSAL_CREATED proposal_id=%s status=%s org=%s persistence=db execution_enabled=false",
+                    proposal_id,
+                    row["status"],
+                    row["org_slug"],
+                )
+            except Exception:
+                pass
+            return _admin_evolution_public_row(row)
+        except Exception as e:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            try:
+                logger.exception("ADMIN_EVOLUTION_PROPOSAL_DB_CREATE_FAILED proposal_id=%s fallback=memory error=%s", proposal_id, str(e)[:200])
+            except Exception:
+                pass
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
     try:
         logger.info(
-            "ADMIN_EVOLUTION_PROPOSAL_CREATED proposal_id=%s status=%s org=%s",
+            "ADMIN_EVOLUTION_PROPOSAL_CREATED proposal_id=%s status=%s org=%s persistence=memory_fallback execution_enabled=false",
             proposal_id,
             row["status"],
             row["org_slug"],
         )
     except Exception:
         pass
-    return _admin_evolution_public_row(row)
+    return _admin_evolution_memory_put(row)
 
 
 def _admin_evolution_get_proposal(proposal_id: str) -> Optional[Dict[str, Any]]:
+    pid = str(proposal_id or "").strip()
+    if not pid:
+        return None
+    if _admin_evolution_bootstrap_db_schema():
+        db = SessionLocal()
+        try:
+            res = db.execute(text("""
+                SELECT * FROM admin_evolution_proposals
+                WHERE proposal_id = :proposal_id
+                LIMIT 1
+            """), {"proposal_id": pid}).mappings().first()
+            if res:
+                return _admin_evolution_mapping_to_public(res)
+        except Exception as e:
+            try:
+                logger.exception("ADMIN_EVOLUTION_PROPOSAL_DB_GET_FAILED proposal_id=%s error=%s", pid, str(e)[:200])
+            except Exception:
+                pass
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
     with _ADMIN_EVOLUTION_PROPOSAL_LOCK:
-        row = _ADMIN_EVOLUTION_PROPOSALS.get(str(proposal_id or "").strip())
+        row = _ADMIN_EVOLUTION_PROPOSALS.get(pid)
         return _admin_evolution_public_row(row) if isinstance(row, dict) else None
 
 
 def _admin_evolution_list_proposals(*, status: Optional[str] = None, org_slug: Optional[str] = None) -> List[Dict[str, Any]]:
     status_norm = str(status or "").strip().lower()
     org_norm = str(org_slug or "").strip()
+    if _admin_evolution_bootstrap_db_schema():
+        db = SessionLocal()
+        try:
+            where = []
+            params: Dict[str, Any] = {}
+            if status_norm:
+                where.append("LOWER(status) = :status")
+                params["status"] = status_norm
+            if org_norm:
+                where.append("org_slug = :org_slug")
+                params["org_slug"] = org_norm
+            sql = "SELECT * FROM admin_evolution_proposals"
+            if where:
+                sql += " WHERE " + " AND ".join(where)
+            sql += " ORDER BY updated_at DESC LIMIT 200"
+            rows = db.execute(text(sql), params).mappings().all()
+            return [_admin_evolution_mapping_to_public(x) for x in rows]
+        except Exception as e:
+            try:
+                logger.exception("ADMIN_EVOLUTION_PROPOSAL_DB_LIST_FAILED error=%s", str(e)[:200])
+            except Exception:
+                pass
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
     with _ADMIN_EVOLUTION_PROPOSAL_LOCK:
         rows = list(_ADMIN_EVOLUTION_PROPOSALS.values())
     out: List[Dict[str, Any]] = []
@@ -4039,6 +4289,76 @@ def _admin_evolution_update_status(proposal_id: str, *, status: str, actor: str)
     if status_norm not in {"approved", "rejected"}:
         raise HTTPException(status_code=400, detail="invalid_status")
     now = _admin_evolution_now()
+
+    if _admin_evolution_bootstrap_db_schema():
+        db = SessionLocal()
+        try:
+            row = db.execute(text("""
+                SELECT * FROM admin_evolution_proposals
+                WHERE proposal_id = :proposal_id
+                LIMIT 1
+            """), {"proposal_id": pid}).mappings().first()
+            if not row:
+                raise HTTPException(status_code=404, detail="proposal_not_found")
+            public = _admin_evolution_mapping_to_public(row)
+            if str(public.get("status") or "") not in {"pending_approval", "draft"}:
+                raise HTTPException(status_code=409, detail="proposal_not_pending")
+
+            if status_norm == "approved":
+                db.execute(text("""
+                    UPDATE admin_evolution_proposals
+                    SET status = 'approved',
+                        updated_at = :updated_at,
+                        approved_at = :approved_at,
+                        approved_by = :actor,
+                        execution_allowed = FALSE,
+                        execution_status = 'not_started'
+                    WHERE proposal_id = :proposal_id
+                """), {"proposal_id": pid, "updated_at": now, "approved_at": now, "actor": str(actor or "")})
+            else:
+                db.execute(text("""
+                    UPDATE admin_evolution_proposals
+                    SET status = 'rejected',
+                        updated_at = :updated_at,
+                        rejected_at = :rejected_at,
+                        rejected_by = :actor,
+                        execution_allowed = FALSE,
+                        execution_status = 'not_started'
+                    WHERE proposal_id = :proposal_id
+                """), {"proposal_id": pid, "updated_at": now, "rejected_at": now, "actor": str(actor or "")})
+            db.commit()
+            fresh = db.execute(text("""
+                SELECT * FROM admin_evolution_proposals
+                WHERE proposal_id = :proposal_id
+                LIMIT 1
+            """), {"proposal_id": pid}).mappings().first()
+            try:
+                logger.info(
+                    "ADMIN_EVOLUTION_PROPOSAL_%s proposal_id=%s actor=%s persistence=db execution_enabled=false",
+                    status_norm.upper(),
+                    pid,
+                    actor,
+                )
+            except Exception:
+                pass
+            return _admin_evolution_mapping_to_public(fresh)
+        except HTTPException:
+            raise
+        except Exception as e:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            try:
+                logger.exception("ADMIN_EVOLUTION_PROPOSAL_DB_STATUS_FAILED proposal_id=%s error=%s", pid, str(e)[:200])
+            except Exception:
+                pass
+        finally:
+            try:
+                db.close()
+            except Exception:
+                pass
+
     with _ADMIN_EVOLUTION_PROPOSAL_LOCK:
         row = _ADMIN_EVOLUTION_PROPOSALS.get(pid)
         if not isinstance(row, dict):
@@ -4050,17 +4370,64 @@ def _admin_evolution_update_status(proposal_id: str, *, status: str, actor: str)
         if status_norm == "approved":
             row["approved_at"] = now
             row["approved_by"] = str(actor or "")
-            row["execution_allowed"] = False  # AO-11 remains proposal-only.
+            row["execution_allowed"] = False
         else:
             row["rejected_at"] = now
             row["rejected_by"] = str(actor or "")
             row["execution_allowed"] = False
+        row["execution_status"] = "not_started"
         _ADMIN_EVOLUTION_PROPOSALS[pid] = dict(row)
     try:
-        logger.info("ADMIN_EVOLUTION_PROPOSAL_%s proposal_id=%s actor=%s", status_norm.upper(), pid, actor)
+        logger.info("ADMIN_EVOLUTION_PROPOSAL_%s proposal_id=%s actor=%s persistence=memory_fallback", status_norm.upper(), pid, actor)
     except Exception:
         pass
     return _admin_evolution_public_row(row)
+
+
+def _admin_evolution_list_executions(*, proposal_id: Optional[str] = None, status: Optional[str] = None, org_slug: Optional[str] = None) -> List[Dict[str, Any]]:
+    """
+    AO-13: read-only execution foundation.
+    No execution is created or run by this endpoint.
+    """
+    if not _admin_evolution_bootstrap_db_schema():
+        return []
+    db = SessionLocal()
+    try:
+        where = []
+        params: Dict[str, Any] = {}
+        if proposal_id:
+            where.append("proposal_id = :proposal_id")
+            params["proposal_id"] = str(proposal_id)
+        if status:
+            where.append("LOWER(status) = :status")
+            params["status"] = str(status).lower()
+        if org_slug:
+            where.append("org_slug = :org_slug")
+            params["org_slug"] = str(org_slug)
+        sql = "SELECT * FROM admin_evolution_executions"
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY updated_at DESC LIMIT 200"
+        rows = db.execute(text(sql), params).mappings().all()
+        out = []
+        for row in rows:
+            d = dict(row or {})
+            d["smoke_checklist"] = _admin_evolution_json_load(d.pop("smoke_checklist_json", None), [])
+            d["result"] = _admin_evolution_json_load(d.pop("result_json", None), {})
+            out.append(_admin_evolution_public_row(d))
+        return out
+    except Exception as e:
+        try:
+            logger.exception("ADMIN_EVOLUTION_EXECUTION_DB_LIST_FAILED error=%s", str(e)[:200])
+        except Exception:
+            pass
+        return []
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
 
 
 # METATRON_SELF_EVOLUTION_HEALTH_ENDPOINT
@@ -5403,15 +5770,15 @@ def _get_feature_flag(db: Session, org: str, key: str) -> Optional[str]:
 
 def _is_summit_auto_approved_code(raw_access_code: Optional[str], signup_code_label: Optional[str], signup_source: Optional[str]) -> bool:
     """
-    Summit access code EFATA777 must auto-approve without manual admin approval.
+    Summit access code EFATAH777 must auto-approve without manual admin approval.
     Compatible with legacy states where the signal may live in label/source.
     """
     raw = (raw_access_code or "").strip().lower()
     label = (signup_code_label or "").strip().lower()
     source = (signup_source or "").strip().lower()
-    if raw == "efata777":
+    if raw == "efatah777":
         return True
-    if label == "efata777":
+    if label == "efatah777":
         return True
     if source == "investor":
         return True
@@ -5450,7 +5817,7 @@ def register(inp: RegisterIn, request: Request = None, x_org_slug: Optional[str]
             raise HTTPException(status_code=403, detail="Access code is required in Summit mode.")
 
         normalized_input_code = (inp.access_code or "").strip().lower()
-        if normalized_input_code != "efata777":
+        if normalized_input_code != "efatah777":
             logger.warning("REGISTER_DENIED reason=non_investor_code ip=%s org=%s", ip, org)
             raise HTTPException(status_code=403, detail="Only investor access is enabled for this Summit build.")
 
@@ -5468,7 +5835,7 @@ def register(inp: RegisterIn, request: Request = None, x_org_slug: Optional[str]
         normalized_signup_source = (sc.source or "").strip().lower()
         normalized_signup_label = (sc.label or "").strip().lower()
 
-        if normalized_signup_source != "investor" and normalized_signup_label != "efata777":
+        if normalized_signup_source != "investor" and normalized_signup_label != "efatah777":
             logger.warning("REGISTER_DENIED reason=non_investor_signup_source ip=%s org=%s", ip, org)
             raise HTTPException(status_code=403, detail="Only investor access is enabled for this Summit build.")
 
@@ -22700,7 +23067,7 @@ def admin_evolution_proposal_approve(
         "ok": True,
         "decision": "approved",
         "execution_enabled": False,
-        "message": "Proposta aprovada para próxima etapa governada. AO-11 não executa código automaticamente.",
+        "message": "Proposta aprovada para próxima etapa governada. AO-13 não executa código automaticamente.",
         "proposal": row,
     }
 
@@ -22720,6 +23087,56 @@ def admin_evolution_proposal_reject(
         "execution_enabled": False,
         "message": "Proposta rejeitada. Nenhuma execução foi iniciada.",
         "proposal": row,
+    }
+
+
+@app.get("/api/admin/evolution/executions")
+def admin_evolution_executions(
+    proposal_id: Optional[str] = None,
+    status: Optional[str] = None,
+    x_org_slug: Optional[str] = Header(default=None),
+    _admin=Depends(require_admin_access),
+):
+    """
+    AO-13: read-only execution foundation.
+    This endpoint lists execution records if future controlled runners create them.
+    It does not start, schedule, or run any execution.
+    """
+    org = get_org(x_org_slug)
+    rows = _admin_evolution_list_executions(proposal_id=proposal_id, status=status, org_slug=org)
+    return {
+        "ok": True,
+        "mode": "read_only_execution_foundation",
+        "execution_enabled": False,
+        "count": len(rows),
+        "executions": rows,
+    }
+
+
+@app.get("/api/admin/evolution/proposals/{proposal_id}/execution-plan")
+def admin_evolution_proposal_execution_plan(
+    proposal_id: str,
+    _admin=Depends(require_admin_access),
+):
+    """
+    AO-13: provides an inert execution plan bridge for Admin visibility.
+    It confirms that approval does not automatically execute anything.
+    """
+    row = _admin_evolution_get_proposal(proposal_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="proposal_not_found")
+    return {
+        "ok": True,
+        "proposal_id": proposal_id,
+        "proposal_status": row.get("status"),
+        "execution_enabled": False,
+        "execution_status": row.get("execution_status") or "not_started",
+        "next_required_stage": "AO-14 controlled dry-run/execution runner, after explicit Admin approval",
+        "smoke_tests_required": True,
+        "rollback_plan_required": True,
+        "message": "AO-13 persiste proposta e decisão Admin, mas não executa código.",
+        "rollback_plan": row.get("rollback_plan") or "",
+        "checklist": row.get("checklist") or [],
     }
 
 
@@ -27446,7 +27863,7 @@ async def chat_stream(
 
     def _build_orion_evolution_proposal_summary(text: str) -> Dict[str, Any]:
         return {
-            "title": "AO-11 — Admin Controlled Evolution Proposal Lifecycle",
+            "title": "AO-13 — PTE Admin Evolution Persistence",
             "summary": (
                 "Criar o primeiro ciclo governado proposal_only: Orion gera proposta em pending_approval, "
                 "Admin lista/aprova/rejeita, e nenhuma execução automática ocorre. A etapa prepara a ponte "
@@ -27464,11 +27881,11 @@ async def chat_stream(
             ),
             "checklist": [
                 "@Orion leitura executiva continua respondendo.",
-                "@Orion gere uma proposta de evolução proposal_only cria proposal_id.",
+                "@Orion gere uma proposta de evolução proposal_only cria proposal_id persistente.",
                 "Admin lista a proposta.",
                 "Admin aprova ou rejeita a proposta.",
                 "Nenhum commit, deploy, migration ou escrita de repo ocorre.",
-                "Logs registram proposal_id e status.",
+                "Logs registram proposal_id, status e persistence=db quando disponível.",
             ],
         }
 
@@ -27527,7 +27944,7 @@ async def chat_stream(
             "proposal_status": proposal.get("status"),
             "runtime_hints": {
                 "routing": {
-                    "routing_source": "stream_orion_evolution_proposal_fastpath_ao11",
+                    "routing_source": "stream_orion_evolution_proposal_fastpath_ao13",
                     "route_applied": True,
                     "execution_lifecycle": "proposal_created_pending_approval",
                     "write_allowed": False,
@@ -27756,7 +28173,7 @@ async def chat_stream(
         if _is_orion_evolution_proposal_only_request(message):
             try:
                 payload = await asyncio.to_thread(_orion_evolution_proposal_fastpath_in_isolated_session)
-                async for ev in _emit_result_payload(payload, routing_source="stream_orion_evolution_proposal_fastpath_ao11"):
+                async for ev in _emit_result_payload(payload, routing_source="stream_orion_evolution_proposal_fastpath_ao13"):
                     yield ev
                 return
             except Exception:
