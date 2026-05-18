@@ -26515,6 +26515,54 @@ async def chat_stream(
             },
         }
 
+    def _is_institutional_identity_request(text: str) -> bool:
+        normalized = _normalize_router_text(text)
+        if not normalized:
+            return False
+
+        identity_markers = [
+            "me fale sobre orkio",
+            "me diga o que é orkio",
+            "o que é orkio",
+            "o que eh orkio",
+            "qual a proposta de orkio",
+            "qual a proposta do orkio",
+            "fale sobre orkio",
+            "fale sobre o orkio",
+            "quem é orkio",
+            "quem e orkio",
+            "sobre orkio",
+            "sobre o orkio",
+        ]
+
+        conflict_markers = [
+            "patch",
+            "artifact",
+            "artefato",
+            "auditoria",
+            "war room",
+            "proposal_only",
+            "executar patch",
+            "@orion",
+            "@chris",
+        ]
+        if any(marker in normalized for marker in conflict_markers):
+            return False
+
+        return any(marker in normalized for marker in identity_markers)
+
+
+    def _build_institutional_identity_answer(text: str) -> str:
+        return (
+            "[INSTITUTIONAL_IDENTITY_V9] Orkio é a plataforma da PatroAI para conversas, operação multiagente e execução governada. "
+            "Na prática, ela conecta chat, voz, agentes especializados, memória operacional e trilhas de governança em um mesmo ambiente. "
+            "A proposta do Orkio é organizar a interação humana com IA de forma útil, auditável e evolutiva: "
+            "1) atender e conversar; 2) coordenar agentes como Orkio, Chris e Orion; "
+            "3) apoiar diagnósticos, auditorias e propostas técnicas; "
+            "4) permitir evolução controlada, com governança, aprovação humana e rastreabilidade. "
+            "Se esta mensagem aparecer em produção, o IDENTITY FASTPATH V9 está ativo."
+        )
+
     def _institutional_identity_fastpath_in_isolated_session() -> Dict[str, Any]:
         final_text = _build_institutional_identity_answer(message)
         persisted = _persist_assistant_message(
