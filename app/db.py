@@ -28,14 +28,18 @@ def make_engine():
         return None
     pool_size = int(os.getenv("DB_POOL_SIZE", "5"))
     max_overflow = int(os.getenv("DB_MAX_OVERFLOW", "10"))
-    pool_timeout = int(os.getenv("DB_POOL_TIMEOUT", "30"))
+    pool_timeout = int(os.getenv("DB_POOL_TIMEOUT", "15"))
     connect_timeout = int(os.getenv("DB_CONNECT_TIMEOUT", "5"))
+    pool_recycle = int(os.getenv("DB_POOL_RECYCLE_SECONDS", "180"))
     return create_engine(
         url,
         pool_pre_ping=True,
         pool_size=pool_size,
         max_overflow=max_overflow,
         pool_timeout=pool_timeout,
+        pool_recycle=pool_recycle,
+        pool_use_lifo=True,
+        pool_reset_on_return="rollback",
         connect_args={"connect_timeout": connect_timeout},
     )
 
