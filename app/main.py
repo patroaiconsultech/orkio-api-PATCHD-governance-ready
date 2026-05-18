@@ -27069,6 +27069,120 @@ async def chat_stream(
         }
 
 
+    def _is_orion_executive_audit_request(text: str) -> bool:
+        """
+        AO-10_ORION_EXECUTIVE_AUDIT_FASTPATH:
+        Pedidos explícitos ao @Orion por leitura executiva/auditoria consultiva
+        devem responder em trilho leve, determinístico e readonly, antes do
+        runtime pesado multiagente.
+
+        Este fast-path NÃO cria patch, NÃO executa código, NÃO escreve em repo
+        e NÃO ativa autoevolução. Ele apenas entrega diagnóstico executivo e
+        aponta o próximo passo governado.
+        """
+        raw = _normalize_router_text(text)
+        if not raw:
+            return False
+
+        has_orion = (
+            "@orion" in raw
+            or " orion " in f" {raw} "
+            or raw.startswith("orion ")
+            or "para o orion" in raw
+            or "chame o orion" in raw
+        )
+        if not has_orion:
+            return False
+
+        executive_markers = [
+            "leitura executiva",
+            "prioridade mais importante",
+            "proximo melhor passo",
+            "próximo melhor passo",
+            "melhor proximo passo",
+            "melhor próximo passo",
+            "diagnostico executivo",
+            "diagnóstico executivo",
+            "veredito",
+            "o que devemos fazer agora",
+            "qual o proximo passo",
+            "qual o próximo passo",
+            "prioridade agora",
+            "proxima acao",
+            "próxima ação",
+            "proxima ação",
+            "auditoria interna",
+            "ponta a ponta",
+            "autoevolucao",
+            "autoevolução",
+            "admin",
+            "governanca",
+            "governança",
+        ]
+        return any(marker in raw for marker in executive_markers)
+
+
+    def _build_orion_executive_audit_answer(text: str) -> str:
+        onboarding_digest = _build_stream_onboarding_context_digest()
+        context_block = ""
+        if onboarding_digest:
+            context_block = "\n\nContexto considerado:\n" + onboarding_digest
+
+        return (
+            "Leitura executiva Orion — readonly.\n\n"
+            "1. Prioridade atual\n"
+            "Colocar a auditoria interna ponta a ponta para responder de forma determinística antes de ampliar beta ou ativar qualquer autoevolução. O fluxo básico do chat já avançou, mas comandos operacionais de @Orion ainda precisam de um trilho leve, governado e confiável.\n\n"
+            "2. Causa provável\n"
+            "O pedido executivo está caindo no runtime pesado/dispatch interno em vez de passar primeiro por um contrato consultivo leve. Quando esse runtime demora ou falha, o terminal guard encerra com fallback seguro, mas não entrega diagnóstico útil para Admin.\n\n"
+            "3. Próximo patch recomendado\n"
+            "AO-10 — Orion Executive Audit Fastpath + Admin Governance Bridge. Escopo inicial: backend-only, readonly/proposal_only, sem execução automática, sem migrations e sem tocar no checkpoint técnico atual.\n\n"
+            "4. Risco\n"
+            "Baixo para o fast-path executivo, desde que ele apenas responda diagnóstico e não aplique mudanças. Médio para autoevolução se houver execução sem aprovação humana, por isso o loop automático deve permanecer desligado até o fluxo Admin estar completo.\n\n"
+            "5. Checklist de validação\n"
+            "- @Orion responde leitura executiva sem fallback genérico.\n"
+            "- A resposta inclui prioridade, causa, patch recomendado, risco e veredito.\n"
+            "- Nenhuma exceção Python aparece para o usuário.\n"
+            "- O stream finaliza e a UI sai de “Gerando resposta”.\n"
+            "- Proposta de patch só nasce quando o usuário pedir explicitamente proposal_only.\n"
+            "- Nenhuma escrita, commit, deploy ou execução ocorre sem aprovação Admin.\n\n"
+            "6. Ponte para autoevolução controlada\n"
+            "A arquitetura correta é: auditoria consultiva → proposta em draft/pending_approval → aprovação Admin → execução controlada → smoke test → rollback plan → trilha auditável. A execução nunca deve acontecer diretamente em produção ou na main sem aprovação.\n\n"
+            "7. Veredito\n"
+            "GO para implementar o fast-path executivo AO-10. NO-GO para autoevolução executável ampla até existir aprovação Admin, proposal_id, execution_id, smoke test e rollback plan."
+            + context_block
+        )
+
+
+    def _orion_executive_audit_fastpath_in_isolated_session() -> Dict[str, Any]:
+        final_text = _build_orion_executive_audit_answer(message)
+        persisted = _persist_assistant_message(
+            text=final_text,
+            thread_id=tid_seed,
+            agent_id="orion",
+            agent_name="Orion",
+        )
+        return {
+            **persisted,
+            "answer": final_text,
+            "message": final_text,
+            "final_text": final_text,
+            "agent_id": "orion",
+            "agent_name": "Orion",
+            "voice_id": None,
+            "avatar_url": None,
+            "runtime_hints": {
+                "routing": {
+                    "routing_source": "stream_orion_executive_audit_fastpath_ao10",
+                    "route_applied": True,
+                    "execution_lifecycle": "readonly_completed",
+                    "write_allowed": False,
+                    "human_approval_required": True,
+                    "proposal_only": False,
+                }
+            },
+        }
+
+
     def _build_capabilities_baseline_answer(text: str) -> str:
         onboarding_digest = _build_stream_onboarding_context_digest()
         context_block = ""
@@ -27277,6 +27391,22 @@ async def chat_stream(
                 logger.info("CHAT_STREAM_DONE trace_id=%s thread_id=%s source=%s", trace_id, thread_id, routing_source)
             except Exception:
                 pass
+
+        # AO-10_ORION_EXECUTIVE_AUDIT_FASTPATH
+        # Leituras executivas explícitas para @Orion devem responder em trilho
+        # leve, readonly e determinístico antes de qualquer runtime pesado.
+        if _is_orion_executive_audit_request(message):
+            try:
+                payload = await asyncio.to_thread(_orion_executive_audit_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_orion_executive_audit_fastpath_ao10"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_ORION_EXECUTIVE_AUDIT_FASTPATH_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Se o fast-path falhar, o terminal guard/sanitizer ainda protege a UI.
 
         # AO-06_BETA_PLANNING_FASTPATH
         # Pedidos comuns de plano beta/testes devem responder como conversa útil,
