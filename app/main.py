@@ -4829,9 +4829,18 @@ async def audit_middleware(request: Request, call_next):
         "/api/realtime",
         "/api/audio_transcriptions",
     }
+    DB_HOT_PATHS = {
+        "/api/auth/login",
+        "/api/auth/register",
+        "/api/auth/otp/verify",
+        "/api/auth/heartbeat",
+        "/api/agents/capabilities",
+    }
 
-    # Skip noisy and streaming endpoints
-    if path.startswith("/api/health") or path in ("/", "/health") or path in STREAMING_PATHS:
+    # Skip noisy, streaming and login-critical endpoints.
+    # WAR_ROOM_AUTH_DB_POOL_V1: these routes must not spend an extra DB checkout
+    # in the audit middleware while auth/console recovery is being validated.
+    if path.startswith("/api/health") or path in ("/", "/health") or path in STREAMING_PATHS or path in DB_HOT_PATHS:
         return await call_next(request)
 
     try:
@@ -4854,7 +4863,8 @@ async def audit_middleware(request: Request, call_next):
 
     # Best-effort audit (never block the response)
     try:
-        if path.startswith("/api/") and SessionLocal is not None:
+        audit_db_enabled = _env_flag("AUDIT_DB_ENABLED", default=False)
+        if audit_db_enabled and path.startswith("/api/") and SessionLocal is not None:
             latency_ms = int((time.time() - start) * 1000)
             status_code = int(getattr(response, "status_code", 0) or 0)
             rid = ensure_request_id(request)
@@ -5509,7 +5519,11 @@ def login(inp: LoginIn, x_org_slug: Optional[str] = Header(default=None), db: Se
         raise HTTPException(status_code=403, detail="Acesso ao Summit encerrado.")
 
     # Summit 2FA: password + OTP (OTP is issued only after password verification)
-    require_otp = _env_flag("SUMMIT_REQUIRE_OTP", default=_is_production_env())
+    # WAR_ROOM_AUTH_DB_POOL_V1:
+    # OTP must be explicitly enabled only after the e-mail provider is confirmed.
+    # Production default cannot require OTP, otherwise users can be locked out when
+    # the mail provider is not configured or delivery is degraded.
+    require_otp = _env_flag("SUMMIT_REQUIRE_OTP", default=False)
     otp_for_admins = (os.getenv("SUMMIT_OTP_FOR_ADMINS", "false").lower() in ("1", "true", "yes"))
     if require_otp and (u.role != "admin" or otp_for_admins):
         logger.warning(
