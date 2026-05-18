@@ -26916,10 +26916,10 @@ async def chat_stream(
         keepalive_i = 0
 
         try:
-            max_wait_s = int(os.getenv("CHAT_STREAM_RUNTIME_TIMEOUT_S", "75") or "75")
+            max_wait_s = int(os.getenv("CHAT_STREAM_RUNTIME_TIMEOUT_S", "150") or "150")
         except Exception:
-            max_wait_s = 75
-        max_wait_s = max(20, min(max_wait_s, 90))
+            max_wait_s = 150
+        max_wait_s = max(30, min(max_wait_s, 180))
         deadline = _time.time() + max_wait_s
 
         try:
