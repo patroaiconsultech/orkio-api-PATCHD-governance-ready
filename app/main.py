@@ -3922,6 +3922,147 @@ async def _auth_rate_limit(request: Request) -> None:
 app = FastAPI(title="Orkio API", version=APP_VERSION)
 
 
+
+# AO-11_ADMIN_CONTROLLED_EVOLUTION_PROPOSAL_LIFECYCLE
+# Proposal-only governance bridge.
+#
+# This store is intentionally non-executing: it creates auditable proposal records
+# that can be approved/rejected by Admin, but it does not write code, commit,
+# deploy, run migrations, or activate the evolution loop.
+#
+# NOTE: first implementation is in-process for low-risk rollout. A later AO can
+# promote this to DB-backed EvolutionProposal/EvolutionExecution models once the
+# Admin UX and contract are validated.
+_ADMIN_EVOLUTION_PROPOSAL_LOCK = _threading.RLock()
+_ADMIN_EVOLUTION_PROPOSALS: Dict[str, Dict[str, Any]] = {}
+
+
+def _admin_evolution_now() -> int:
+    try:
+        return now_ts()
+    except Exception:
+        return int(time.time())
+
+
+def _admin_evolution_public_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    safe = dict(row or {})
+    # Never expose raw secrets or hidden runtime objects if future fields are added.
+    for key in list(safe.keys()):
+        if "secret" in str(key).lower() or "token" in str(key).lower():
+            safe.pop(key, None)
+    return safe
+
+
+def _admin_evolution_create_proposal(
+    *,
+    org_slug: str,
+    user_id: Optional[str],
+    thread_id: Optional[str],
+    source_message: str,
+    title: str,
+    summary: str,
+    risk: str,
+    target_files: Optional[List[str]] = None,
+    rollback_plan: str = "",
+    checklist: Optional[List[str]] = None,
+) -> Dict[str, Any]:
+    proposal_id = "evo_" + uuid.uuid4().hex[:12]
+    now = _admin_evolution_now()
+    row = {
+        "proposal_id": proposal_id,
+        "status": "pending_approval",
+        "mode": "proposal_only",
+        "org_slug": str(org_slug or "public"),
+        "created_by": str(user_id or ""),
+        "thread_id": str(thread_id or ""),
+        "source": "chat_orion_ao11",
+        "source_message": str(source_message or "")[:4000],
+        "title": str(title or "Orion evolution proposal").strip(),
+        "summary": str(summary or "").strip(),
+        "risk": str(risk or "medium").strip(),
+        "target_files": list(target_files or []),
+        "rollback_plan": str(rollback_plan or "").strip(),
+        "checklist": list(checklist or []),
+        "write_allowed": False,
+        "execution_allowed": False,
+        "human_approval_required": True,
+        "created_at": now,
+        "updated_at": now,
+        "approved_at": None,
+        "approved_by": "",
+        "rejected_at": None,
+        "rejected_by": "",
+        "execution_id": "",
+        "execution_status": "not_started",
+    }
+    with _ADMIN_EVOLUTION_PROPOSAL_LOCK:
+        _ADMIN_EVOLUTION_PROPOSALS[proposal_id] = dict(row)
+    try:
+        logger.info(
+            "ADMIN_EVOLUTION_PROPOSAL_CREATED proposal_id=%s status=%s org=%s",
+            proposal_id,
+            row["status"],
+            row["org_slug"],
+        )
+    except Exception:
+        pass
+    return _admin_evolution_public_row(row)
+
+
+def _admin_evolution_get_proposal(proposal_id: str) -> Optional[Dict[str, Any]]:
+    with _ADMIN_EVOLUTION_PROPOSAL_LOCK:
+        row = _ADMIN_EVOLUTION_PROPOSALS.get(str(proposal_id or "").strip())
+        return _admin_evolution_public_row(row) if isinstance(row, dict) else None
+
+
+def _admin_evolution_list_proposals(*, status: Optional[str] = None, org_slug: Optional[str] = None) -> List[Dict[str, Any]]:
+    status_norm = str(status or "").strip().lower()
+    org_norm = str(org_slug or "").strip()
+    with _ADMIN_EVOLUTION_PROPOSAL_LOCK:
+        rows = list(_ADMIN_EVOLUTION_PROPOSALS.values())
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        if status_norm and str(row.get("status") or "").lower() != status_norm:
+            continue
+        if org_norm and str(row.get("org_slug") or "") != org_norm:
+            continue
+        out.append(_admin_evolution_public_row(row))
+    out.sort(key=lambda x: int(x.get("updated_at") or 0), reverse=True)
+    return out
+
+
+def _admin_evolution_update_status(proposal_id: str, *, status: str, actor: str) -> Dict[str, Any]:
+    pid = str(proposal_id or "").strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="proposal_id_required")
+    status_norm = str(status or "").strip().lower()
+    if status_norm not in {"approved", "rejected"}:
+        raise HTTPException(status_code=400, detail="invalid_status")
+    now = _admin_evolution_now()
+    with _ADMIN_EVOLUTION_PROPOSAL_LOCK:
+        row = _ADMIN_EVOLUTION_PROPOSALS.get(pid)
+        if not isinstance(row, dict):
+            raise HTTPException(status_code=404, detail="proposal_not_found")
+        if str(row.get("status") or "") not in {"pending_approval", "draft"}:
+            raise HTTPException(status_code=409, detail="proposal_not_pending")
+        row["status"] = status_norm
+        row["updated_at"] = now
+        if status_norm == "approved":
+            row["approved_at"] = now
+            row["approved_by"] = str(actor or "")
+            row["execution_allowed"] = False  # AO-11 remains proposal-only.
+        else:
+            row["rejected_at"] = now
+            row["rejected_by"] = str(actor or "")
+            row["execution_allowed"] = False
+        _ADMIN_EVOLUTION_PROPOSALS[pid] = dict(row)
+    try:
+        logger.info("ADMIN_EVOLUTION_PROPOSAL_%s proposal_id=%s actor=%s", status_norm.upper(), pid, actor)
+    except Exception:
+        pass
+    return _admin_evolution_public_row(row)
+
+
 # METATRON_SELF_EVOLUTION_HEALTH_ENDPOINT
 @app.get("/api/internal/self-evolution-health")
 def self_evolution_health():
@@ -22508,6 +22649,80 @@ def admin_overview(_admin=Depends(require_admin_access), db: Session = Depends(g
     }
 
 
+
+@app.get("/api/admin/evolution/proposals")
+def admin_evolution_proposals(
+    status: Optional[str] = None,
+    x_org_slug: Optional[str] = Header(default=None),
+    _admin=Depends(require_admin_access),
+):
+    """
+    AO-11: Admin can list proposal-only evolution drafts/pending approvals.
+    This endpoint is read-only and does not execute proposals.
+    """
+    org = get_org(x_org_slug)
+    rows = _admin_evolution_list_proposals(status=status, org_slug=org)
+    return {
+        "ok": True,
+        "mode": "proposal_only",
+        "execution_enabled": False,
+        "count": len(rows),
+        "proposals": rows,
+    }
+
+
+@app.get("/api/admin/evolution/proposals/{proposal_id}")
+def admin_evolution_proposal_detail(
+    proposal_id: str,
+    _admin=Depends(require_admin_access),
+):
+    row = _admin_evolution_get_proposal(proposal_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="proposal_not_found")
+    return {
+        "ok": True,
+        "mode": "proposal_only",
+        "execution_enabled": False,
+        "proposal": row,
+    }
+
+
+@app.post("/api/admin/evolution/proposals/{proposal_id}/approve")
+def admin_evolution_proposal_approve(
+    proposal_id: str,
+    _admin=Depends(require_admin_access),
+):
+    actor = ""
+    if isinstance(_admin, dict):
+        actor = str(_admin.get("email") or _admin.get("sub") or "")
+    row = _admin_evolution_update_status(proposal_id, status="approved", actor=actor)
+    return {
+        "ok": True,
+        "decision": "approved",
+        "execution_enabled": False,
+        "message": "Proposta aprovada para próxima etapa governada. AO-11 não executa código automaticamente.",
+        "proposal": row,
+    }
+
+
+@app.post("/api/admin/evolution/proposals/{proposal_id}/reject")
+def admin_evolution_proposal_reject(
+    proposal_id: str,
+    _admin=Depends(require_admin_access),
+):
+    actor = ""
+    if isinstance(_admin, dict):
+        actor = str(_admin.get("email") or _admin.get("sub") or "")
+    row = _admin_evolution_update_status(proposal_id, status="rejected", actor=actor)
+    return {
+        "ok": True,
+        "decision": "rejected",
+        "execution_enabled": False,
+        "message": "Proposta rejeitada. Nenhuma execução foi iniciada.",
+        "proposal": row,
+    }
+
+
 if not _is_production_env() or _env_flag("ENABLE_ADMIN_DEBUG_WRITE_TEST", default=False):
     @app.post("/api/admin/debug/write-test")
     def admin_debug_write_test(_admin=Depends(require_admin_access), x_org_slug: Optional[str] = Header(default=None), db: Session = Depends(get_db)):
@@ -27183,6 +27398,149 @@ async def chat_stream(
         }
 
 
+    def _is_orion_evolution_proposal_only_request(text: str) -> bool:
+        """
+        AO-11_ADMIN_CONTROLLED_EVOLUTION_PROPOSAL_LIFECYCLE:
+        Cria proposta governada somente quando o usuário pedir explicitamente
+        proposal_only/proposta. Não executa código.
+        """
+        raw = _normalize_router_text(text)
+        if not raw:
+            return False
+        has_orion = (
+            "@orion" in raw
+            or " orion " in f" {raw} "
+            or raw.startswith("orion ")
+            or "para o orion" in raw
+            or "chame o orion" in raw
+        )
+        if not has_orion:
+            return False
+        proposal_markers = [
+            "proposal_only",
+            "proposal only",
+            "proposta de evolucao",
+            "proposta de evolução",
+            "gere uma proposta",
+            "gerar uma proposta",
+            "crie uma proposta",
+            "criar uma proposta",
+            "proposta governada",
+            "pending_approval",
+            "draft",
+        ]
+        evolution_markers = [
+            "autoevolucao",
+            "autoevolução",
+            "evolucao controlada",
+            "evolução controlada",
+            "admin",
+            "aprovacao admin",
+            "aprovação admin",
+            "patch",
+            "execucao controlada",
+            "execução controlada",
+        ]
+        return any(x in raw for x in proposal_markers) and any(x in raw for x in evolution_markers)
+
+
+    def _build_orion_evolution_proposal_summary(text: str) -> Dict[str, Any]:
+        return {
+            "title": "AO-11 — Admin Controlled Evolution Proposal Lifecycle",
+            "summary": (
+                "Criar o primeiro ciclo governado proposal_only: Orion gera proposta em pending_approval, "
+                "Admin lista/aprova/rejeita, e nenhuma execução automática ocorre. A etapa prepara a ponte "
+                "para execução controlada futura com smoke tests e rollback."
+            ),
+            "risk": "baixo_medio",
+            "target_files": [
+                "app/main.py",
+                "admin API: /api/admin/evolution/proposals",
+                "futuro frontend admin: Evolution Console",
+            ],
+            "rollback_plan": (
+                "Reverter o bloco AO-11 em app/main.py: helpers de proposta, endpoints admin/evolution "
+                "e fast-path proposal_only. Como AO-11 não executa código nem migrations, não há rollback de banco."
+            ),
+            "checklist": [
+                "@Orion leitura executiva continua respondendo.",
+                "@Orion gere uma proposta de evolução proposal_only cria proposal_id.",
+                "Admin lista a proposta.",
+                "Admin aprova ou rejeita a proposta.",
+                "Nenhum commit, deploy, migration ou escrita de repo ocorre.",
+                "Logs registram proposal_id e status.",
+            ],
+        }
+
+
+    def _orion_evolution_proposal_fastpath_in_isolated_session() -> Dict[str, Any]:
+        spec = _build_orion_evolution_proposal_summary(message)
+        proposal = _admin_evolution_create_proposal(
+            org_slug=org,
+            user_id=uid,
+            thread_id=tid_seed,
+            source_message=message,
+            title=spec["title"],
+            summary=spec["summary"],
+            risk=spec["risk"],
+            target_files=spec["target_files"],
+            rollback_plan=spec["rollback_plan"],
+            checklist=spec["checklist"],
+        )
+        proposal_id = str(proposal.get("proposal_id") or "")
+        final_text = (
+            "Proposta de evolução controlada criada — proposal_only.\n\n"
+            f"proposal_id: {proposal_id}\n"
+            f"status: {proposal.get('status')}\n"
+            f"título: {proposal.get('title')}\n\n"
+            "1. Resumo\n"
+            f"{proposal.get('summary')}\n\n"
+            "2. Risco\n"
+            f"{proposal.get('risk')}\n\n"
+            "3. Arquivos/áreas prováveis\n"
+            + "\n".join([f"- {x}" for x in list(proposal.get("target_files") or [])])
+            + "\n\n4. Rollback\n"
+            f"{proposal.get('rollback_plan')}\n\n"
+            "5. Checklist\n"
+            + "\n".join([f"- {x}" for x in list(proposal.get("checklist") or [])])
+            + "\n\n6. Governança\n"
+            "Nenhuma escrita, commit, deploy, migration ou execução foi iniciada. "
+            "O Admin pode aprovar ou rejeitar pelos endpoints /api/admin/evolution/proposals.\n\n"
+            "Veredito: GO para aprovação/rejeição Admin. NO-GO para execução automática."
+        )
+        persisted = _persist_assistant_message(
+            text=final_text,
+            thread_id=tid_seed,
+            agent_id="orion",
+            agent_name="Orion",
+        )
+        return {
+            **persisted,
+            "answer": final_text,
+            "message": final_text,
+            "final_text": final_text,
+            "agent_id": "orion",
+            "agent_name": "Orion",
+            "voice_id": None,
+            "avatar_url": None,
+            "proposal_id": proposal_id,
+            "proposal_status": proposal.get("status"),
+            "runtime_hints": {
+                "routing": {
+                    "routing_source": "stream_orion_evolution_proposal_fastpath_ao11",
+                    "route_applied": True,
+                    "execution_lifecycle": "proposal_created_pending_approval",
+                    "write_allowed": False,
+                    "execution_allowed": False,
+                    "human_approval_required": True,
+                    "proposal_only": True,
+                    "proposal_id": proposal_id,
+                }
+            },
+        }
+
+
+
     def _build_capabilities_baseline_answer(text: str) -> str:
         onboarding_digest = _build_stream_onboarding_context_digest()
         context_block = ""
@@ -27391,6 +27749,22 @@ async def chat_stream(
                 logger.info("CHAT_STREAM_DONE trace_id=%s thread_id=%s source=%s", trace_id, thread_id, routing_source)
             except Exception:
                 pass
+
+        # AO-11_ADMIN_CONTROLLED_EVOLUTION_PROPOSAL_LIFECYCLE
+        # Criação de proposta proposal_only deve vencer a leitura executiva genérica,
+        # mas continuar sem execução automática.
+        if _is_orion_evolution_proposal_only_request(message):
+            try:
+                payload = await asyncio.to_thread(_orion_evolution_proposal_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_orion_evolution_proposal_fastpath_ao11"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_ORION_EVOLUTION_PROPOSAL_FASTPATH_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Se falhar, os guards existentes ainda protegem a UI.
 
         # AO-10_ORION_EXECUTIVE_AUDIT_FASTPATH
         # Leituras executivas explícitas para @Orion devem responder em trilho
