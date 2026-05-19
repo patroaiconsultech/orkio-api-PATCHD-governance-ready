@@ -4020,6 +4020,14 @@ def _admin_evolution_bootstrap_db_schema() -> bool:
                     execution_status TEXT NOT NULL DEFAULT 'not_started'
                 )
             """))
+            # AO-16B: schema compatibility guard for existing production tables.
+            # CREATE TABLE IF NOT EXISTS does not add columns to an already existing table.
+            # These ALTERs are additive, idempotent and required by the AO-16 dry-run update path.
+            for _stmt in (
+                "ALTER TABLE admin_evolution_proposals ADD COLUMN IF NOT EXISTS execution_id TEXT DEFAULT ''",
+                "ALTER TABLE admin_evolution_proposals ADD COLUMN IF NOT EXISTS execution_status TEXT NOT NULL DEFAULT 'not_started'"
+            ):
+                conn.execute(text(_stmt))
             conn.execute(text("""
                 CREATE INDEX IF NOT EXISTS ix_admin_evolution_proposals_org_status_updated
                 ON admin_evolution_proposals (org_slug, status, updated_at)
@@ -4043,6 +4051,24 @@ def _admin_evolution_bootstrap_db_schema() -> bool:
                     finished_at BIGINT
                 )
             """))
+            # AO-16B: execution table compatibility guard.
+            # Keep the dry-run ledger compatible with earlier readonly execution foundations.
+            for _stmt in (
+                "ALTER TABLE admin_evolution_executions ADD COLUMN IF NOT EXISTS result_json TEXT DEFAULT '{}'",
+                "ALTER TABLE admin_evolution_executions ADD COLUMN IF NOT EXISTS smoke_checklist_json TEXT DEFAULT '[]'",
+                "ALTER TABLE admin_evolution_executions ADD COLUMN IF NOT EXISTS mode TEXT NOT NULL DEFAULT 'disabled_until_admin_execution_runner'",
+                "ALTER TABLE admin_evolution_executions ADD COLUMN IF NOT EXISTS created_by TEXT DEFAULT ''",
+                "ALTER TABLE admin_evolution_executions ADD COLUMN IF NOT EXISTS approved_by TEXT DEFAULT ''",
+                "ALTER TABLE admin_evolution_executions ADD COLUMN IF NOT EXISTS risk TEXT DEFAULT 'medium'",
+                "ALTER TABLE admin_evolution_executions ADD COLUMN IF NOT EXISTS rollback_plan TEXT DEFAULT ''",
+                "ALTER TABLE admin_evolution_executions ADD COLUMN IF NOT EXISTS started_at BIGINT",
+                "ALTER TABLE admin_evolution_executions ADD COLUMN IF NOT EXISTS finished_at BIGINT",
+                "ALTER TABLE admin_evolution_executions ADD COLUMN IF NOT EXISTS updated_at BIGINT NOT NULL DEFAULT 0",
+                "ALTER TABLE admin_evolution_executions ADD COLUMN IF NOT EXISTS created_at BIGINT NOT NULL DEFAULT 0",
+                "ALTER TABLE admin_evolution_executions ADD COLUMN IF NOT EXISTS org_slug TEXT NOT NULL DEFAULT 'public'",
+                "ALTER TABLE admin_evolution_executions ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'not_started'"
+            ):
+                conn.execute(text(_stmt))
             conn.execute(text("""
                 CREATE INDEX IF NOT EXISTS ix_admin_evolution_executions_proposal_status_updated
                 ON admin_evolution_executions (proposal_id, status, updated_at)
@@ -4088,6 +4114,25 @@ def _admin_evolution_public_row(row: Dict[str, Any]) -> Dict[str, Any]:
     safe.setdefault("human_approval_required", True)
     safe.setdefault("execution_status", "not_started")
     safe.setdefault("mode", "proposal_only")
+
+    # AO-16 — Controlled Evolution Dry-Run metadata.
+    # This is intentionally conservative: real execution remains blocked.
+    status_norm = str(safe.get("status") or "").strip().lower()
+    execution_status = str(safe.get("execution_status") or "not_started").strip().lower()
+    can_dry_run = status_norm == "approved" and execution_status not in {"dry_run_completed", "running", "started"}
+    safe["can_dry_run"] = bool(can_dry_run)
+    safe["can_execute_real"] = False
+    safe["execution_enabled"] = False
+    if status_norm == "pending_approval":
+        safe["next_state"] = "waiting_admin_decision"
+    elif status_norm == "approved" and can_dry_run:
+        safe["next_state"] = "approved_waiting_dry_run"
+    elif status_norm == "approved" and execution_status == "dry_run_completed":
+        safe["next_state"] = "dry_run_ready_real_execution_blocked"
+    elif status_norm == "rejected":
+        safe["next_state"] = "decision_final_rejected"
+    else:
+        safe["next_state"] = "readonly"
     return safe
 
 
@@ -4428,6 +4473,222 @@ def _admin_evolution_list_executions(*, proposal_id: Optional[str] = None, statu
         except Exception:
             pass
 
+
+
+# ================================
+# AO-16 — Controlled Evolution Dry-Run Runner
+# ================================
+
+def _admin_evolution_default_smoke_checklist(proposal: Dict[str, Any]) -> List[str]:
+    base = [
+        "API sobe sem erro de import/sintaxe.",
+        "/api/health retorna 200.",
+        "Login/Admin continuam funcionando.",
+        "Nenhuma escrita real em repo, commit, deploy ou migration é executada.",
+        "Rollback plan está presente.",
+    ]
+    extra = []
+    try:
+        extra = [str(x).strip() for x in list(proposal.get("checklist") or []) if str(x).strip()]
+    except Exception:
+        extra = []
+    out: List[str] = []
+    for item in base + extra:
+        if item and item not in out:
+            out.append(item)
+    return out[:20]
+
+
+def _admin_evolution_build_diff_preview(proposal: Dict[str, Any]) -> str:
+    title = str(proposal.get("title") or "Evolução governada").strip()
+    summary = str(proposal.get("summary") or "").strip()
+    target_files = [str(x).strip() for x in list(proposal.get("target_files") or []) if str(x).strip()]
+    if not target_files:
+        target_files = ["app/main.py"]
+    lines = [
+        "AO-16 CONTROLLED DRY-RUN DIFF PREVIEW",
+        "",
+        f"Proposal: {proposal.get('proposal_id') or 'n/d'}",
+        f"Title: {title}",
+        "",
+        "This is a non-executable preview. No file was written, committed, migrated or deployed.",
+        "",
+        "Target files:",
+    ]
+    for path in target_files:
+        lines.append(f"- {path}")
+    lines.extend([
+        "",
+        "Conceptual change:",
+        f"+ {summary or 'Implementar evolução governada com dry-run, smoke plan e rollback obrigatório.'}",
+        "",
+        "Blocked real actions:",
+        "- write_repository=false",
+        "- commit=false",
+        "- deploy=false",
+        "- migration=false",
+        "- main_branch_write=false",
+    ])
+    return "\n".join(lines)
+
+
+def _admin_evolution_create_dry_run_execution(
+    proposal_id: str,
+    *,
+    actor: str = "",
+    org_slug: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Create a governed dry-run execution record for an approved proposal.
+
+    AO-16 contract:
+    - requires proposal.status == approved
+    - creates execution_id
+    - records diff_preview/smoke_plan/rollback_plan
+    - does not write files
+    - does not commit
+    - does not deploy
+    - does not run migrations
+    - keeps real execution disabled
+    """
+    pid = str(proposal_id or "").strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="proposal_id_required")
+    proposal = _admin_evolution_get_proposal(pid)
+    if not proposal:
+        raise HTTPException(status_code=404, detail="proposal_not_found")
+
+    status_norm = str(proposal.get("status") or "").strip().lower()
+    if status_norm != "approved":
+        raise HTTPException(status_code=409, detail="proposal_must_be_approved_before_dry_run")
+
+    org = str(org_slug or proposal.get("org_slug") or "public").strip() or "public"
+    now = _admin_evolution_now()
+    execution_id = "exec_" + uuid.uuid4().hex[:12]
+    smoke_plan = _admin_evolution_default_smoke_checklist(proposal)
+    rollback_plan = str(proposal.get("rollback_plan") or "").strip()
+    if not rollback_plan:
+        rollback_plan = "Rollback seguro: não há alteração real neste dry-run. Para voltar ao estado anterior, ignore a execução dry-run e mantenha a proposta sem execução real."
+
+    diff_preview = _admin_evolution_build_diff_preview(proposal)
+    result = {
+        "ok": True,
+        "proposal_id": pid,
+        "execution_id": execution_id,
+        "status": "dry_run_completed",
+        "dry_run": True,
+        "execution_enabled": False,
+        "can_execute_real": False,
+        "write_allowed": False,
+        "commit_allowed": False,
+        "deploy_allowed": False,
+        "migration_allowed": False,
+        "main_branch_write_allowed": False,
+        "diff_preview": diff_preview,
+        "smoke_plan": smoke_plan,
+        "smoke_result": {
+            "ok": True,
+            "mode": "simulated",
+            "passed": smoke_plan,
+            "failed": [],
+            "note": "Smoke tests planejados/simulados no AO-16. Nenhum comando destrutivo foi executado.",
+        },
+        "rollback_plan": rollback_plan,
+        "blocked_actions": ["write_repository", "commit", "deploy", "migration", "main_branch_write"],
+        "next_required_stage": "AO-17 branch/PR runner only after explicit Admin approval and executable artifact validation",
+    }
+
+    if not _admin_evolution_bootstrap_db_schema():
+        raise HTTPException(status_code=503, detail="evolution_schema_unavailable")
+
+    db = SessionLocal()
+    try:
+        db.execute(text("""
+            INSERT INTO admin_evolution_executions (
+                execution_id, proposal_id, org_slug, status, mode, created_by, approved_by,
+                risk, rollback_plan, smoke_checklist_json, result_json,
+                created_at, updated_at, started_at, finished_at
+            ) VALUES (
+                :execution_id, :proposal_id, :org_slug, :status, :mode, :created_by, :approved_by,
+                :risk, :rollback_plan, :smoke_checklist_json, :result_json,
+                :created_at, :updated_at, :started_at, :finished_at
+            )
+        """), {
+            "execution_id": execution_id,
+            "proposal_id": pid,
+            "org_slug": org,
+            "status": "dry_run_completed",
+            "mode": "controlled_dry_run_no_write",
+            "created_by": str(actor or ""),
+            "approved_by": str(proposal.get("approved_by") or ""),
+            "risk": str(proposal.get("risk") or "medium"),
+            "rollback_plan": rollback_plan,
+            "smoke_checklist_json": _admin_evolution_json_dump(smoke_plan),
+            "result_json": _admin_evolution_json_dump(result),
+            "created_at": now,
+            "updated_at": now,
+            "started_at": now,
+            "finished_at": now,
+        })
+        db.execute(text("""
+            UPDATE admin_evolution_proposals
+            SET execution_id = :execution_id,
+                execution_status = 'dry_run_completed',
+                execution_allowed = FALSE,
+                updated_at = :updated_at
+            WHERE proposal_id = :proposal_id
+        """), {
+            "proposal_id": pid,
+            "execution_id": execution_id,
+            "updated_at": now,
+        })
+        db.commit()
+        try:
+            logger.info(
+                "ADMIN_EVOLUTION_DRY_RUN_COMPLETED proposal_id=%s execution_id=%s actor=%s execution_enabled=false write_allowed=false",
+                pid,
+                execution_id,
+                actor,
+            )
+        except Exception:
+            pass
+    except HTTPException:
+        raise
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        try:
+            logger.exception("ADMIN_EVOLUTION_DRY_RUN_FAILED proposal_id=%s error=%s", pid, str(e)[:240])
+        except Exception:
+            pass
+        raise HTTPException(status_code=500, detail="dry_run_creation_failed")
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+    fresh = _admin_evolution_get_proposal(pid) or proposal
+    return {
+        "ok": True,
+        "mode": "controlled_dry_run",
+        "proposal_id": pid,
+        "proposal_status": fresh.get("status") or "approved",
+        "execution_id": execution_id,
+        "execution_status": "dry_run_completed",
+        "execution_enabled": False,
+        "can_execute_real": False,
+        "write_allowed": False,
+        "dry_run": True,
+        "proposal": fresh,
+        "result": result,
+        "diff_preview": diff_preview,
+        "smoke_plan": smoke_plan,
+        "smoke_result": result["smoke_result"],
+        "rollback_plan": rollback_plan,
+        "message": "AO-16 dry-run concluído. Nenhuma escrita, commit, deploy ou migration foi executada.",
+    }
 
 
 # METATRON_SELF_EVOLUTION_HEALTH_ENDPOINT
@@ -23024,15 +23285,17 @@ def admin_evolution_proposals(
     _admin=Depends(require_admin_access),
 ):
     """
-    AO-11: Admin can list proposal-only evolution drafts/pending approvals.
+    AO-11/AO-16: Admin can list proposal-only evolution drafts/pending approvals.
     This endpoint is read-only and does not execute proposals.
     """
     org = get_org(x_org_slug)
     rows = _admin_evolution_list_proposals(status=status, org_slug=org)
     return {
         "ok": True,
-        "mode": "proposal_only",
+        "mode": "proposal_only_with_controlled_dry_run",
         "execution_enabled": False,
+        "can_execute_real": False,
+        "dry_run_endpoint": "/api/admin/evolution/proposals/{proposal_id}/dry-run",
         "count": len(rows),
         "proposals": rows,
     }
@@ -23048,8 +23311,10 @@ def admin_evolution_proposal_detail(
         raise HTTPException(status_code=404, detail="proposal_not_found")
     return {
         "ok": True,
-        "mode": "proposal_only",
+        "mode": "proposal_only_with_controlled_dry_run",
         "execution_enabled": False,
+        "can_execute_real": False,
+        "can_dry_run": bool(row.get("can_dry_run")),
         "proposal": row,
     }
 
@@ -23067,7 +23332,10 @@ def admin_evolution_proposal_approve(
         "ok": True,
         "decision": "approved",
         "execution_enabled": False,
-        "message": "Proposta aprovada para próxima etapa governada. AO-13 não executa código automaticamente.",
+        "can_execute_real": False,
+        "can_dry_run": bool(row.get("can_dry_run")),
+        "next_required_stage": "AO-16 controlled dry-run",
+        "message": "Proposta aprovada para dry-run governado. Nenhuma execução real foi iniciada.",
         "proposal": row,
     }
 
@@ -23085,6 +23353,8 @@ def admin_evolution_proposal_reject(
         "ok": True,
         "decision": "rejected",
         "execution_enabled": False,
+        "can_execute_real": False,
+        "can_dry_run": False,
         "message": "Proposta rejeitada. Nenhuma execução foi iniciada.",
         "proposal": row,
     }
@@ -23098,16 +23368,16 @@ def admin_evolution_executions(
     _admin=Depends(require_admin_access),
 ):
     """
-    AO-13: read-only execution foundation.
-    This endpoint lists execution records if future controlled runners create them.
-    It does not start, schedule, or run any execution.
+    AO-16: read-only list of controlled dry-run execution records.
+    This endpoint lists executions; it does not start real execution.
     """
     org = get_org(x_org_slug)
     rows = _admin_evolution_list_executions(proposal_id=proposal_id, status=status, org_slug=org)
     return {
         "ok": True,
-        "mode": "read_only_execution_foundation",
+        "mode": "controlled_dry_run_records",
         "execution_enabled": False,
+        "can_execute_real": False,
         "count": len(rows),
         "executions": rows,
     }
@@ -23119,25 +23389,48 @@ def admin_evolution_proposal_execution_plan(
     _admin=Depends(require_admin_access),
 ):
     """
-    AO-13: provides an inert execution plan bridge for Admin visibility.
+    AO-16: provides a controlled dry-run plan bridge for Admin visibility.
     It confirms that approval does not automatically execute anything.
     """
     row = _admin_evolution_get_proposal(proposal_id)
     if not row:
         raise HTTPException(status_code=404, detail="proposal_not_found")
+    can_dry_run = bool(row.get("can_dry_run"))
     return {
         "ok": True,
         "proposal_id": proposal_id,
         "proposal_status": row.get("status"),
         "execution_enabled": False,
+        "can_execute_real": False,
+        "can_dry_run": can_dry_run,
+        "dry_run_endpoint": f"/api/admin/evolution/proposals/{proposal_id}/dry-run",
         "execution_status": row.get("execution_status") or "not_started",
-        "next_required_stage": "AO-14 controlled dry-run/execution runner, after explicit Admin approval",
+        "next_required_stage": "AO-16 controlled dry-run" if can_dry_run else row.get("next_state") or "readonly",
         "smoke_tests_required": True,
         "rollback_plan_required": True,
-        "message": "AO-13 persiste proposta e decisão Admin, mas não executa código.",
+        "message": "AO-16 permite dry-run governado. Não executa escrita, commit, deploy ou migration.",
         "rollback_plan": row.get("rollback_plan") or "",
         "checklist": row.get("checklist") or [],
     }
+
+
+@app.post("/api/admin/evolution/proposals/{proposal_id}/dry-run")
+def admin_evolution_proposal_dry_run(
+    proposal_id: str,
+    x_org_slug: Optional[str] = Header(default=None),
+    _admin=Depends(require_admin_access),
+):
+    """
+    AO-16: Controlled Evolution Dry-Run Runner.
+
+    Creates an execution_id and records diff/smoke/rollback preview.
+    Real execution remains disabled by contract.
+    """
+    actor = ""
+    if isinstance(_admin, dict):
+        actor = str(_admin.get("email") or _admin.get("sub") or "")
+    org = get_org(x_org_slug)
+    return _admin_evolution_create_dry_run_execution(proposal_id, actor=actor, org_slug=org)
 
 
 if not _is_production_env() or _env_flag("ENABLE_ADMIN_DEBUG_WRITE_TEST", default=False):
@@ -25544,6 +25837,22 @@ def governance_execute_approved_patch(
     if not tid:
         raise HTTPException(status_code=400, detail="thread_id required.")
 
+    # AO-16 hard gate: side-channel execution endpoint cannot perform real writes.
+    # The Admin Evolution flow must use /api/admin/evolution/proposals/{proposal_id}/dry-run first.
+    if not bool(getattr(inp, "dry_run", False)):
+        return {
+            "ok": False,
+            "status": "real_execution_blocked_by_ao16",
+            "patch_mode": "controlled_dry_run_required",
+            "write_allowed": False,
+            "execution_enabled": False,
+            "can_execute_real": False,
+            "message": (
+                "AO-16 bloqueou execução real. Use dry_run=true ou o endpoint "
+                "/api/admin/evolution/proposals/{proposal_id}/dry-run. Nenhuma escrita, commit, deploy ou migration foi executada."
+            ),
+        }
+
     payload = dict(user or {})
     claim = _github_write_claim_active_approval_for_execution(org, tid, payload)
     approval = claim.get("approval") if isinstance(claim, dict) else None
@@ -25603,6 +25912,62 @@ def governance_execute_approved_patch(
 
     scope_files = [str(x).strip() for x in list(approval.get("scope_files") or approval.get("requested_paths") or []) if str(x).strip()]
     requested_actions = [str(x).strip() for x in list(approval.get("requested_actions") or approval.get("actions_allowed") or []) if str(x).strip()]
+
+    # AO-16: this route may only produce a dry-run summary. It must not create
+    # branch, commit, PR, deployment or migration from chat-side approval.
+    dry_run_result = {
+        "ok": True,
+        "status": "dry_run_completed",
+        "patch_mode": "controlled_dry_run",
+        "write_allowed": False,
+        "execution_enabled": False,
+        "can_execute_real": False,
+        "human_approved": True,
+        "thread_id": tid,
+        "scope_files": scope_files,
+        "requested_actions": requested_actions,
+        "smoke_plan": [
+            "Validar escopo aprovado.",
+            "Validar arquivos-alvo declarados.",
+            "Validar rollback plan antes de execução real futura.",
+            "Confirmar que nenhuma escrita real ocorreu neste dry-run.",
+        ],
+        "rollback_plan": str(approval.get("rollback_plan") or "Nenhuma alteração real foi aplicada neste dry-run."),
+        "message": (
+            "AO-16 dry-run concluído para aprovação ativa. Nenhuma branch, commit, PR, deploy, migration ou escrita real foi executada."
+        ),
+    }
+    try:
+        dry_run_text_out = (
+            "GOVERNED PATCH DRY-RUN RESPONSE\n\n"
+            "- status: dry_run_completed\n"
+            "- patch_mode: controlled_dry_run\n"
+            "- write_allowed: false\n"
+            "- execution_enabled: false\n"
+            "- can_execute_real: false\n"
+            f"- thread_id: {tid}\n\n"
+            "Resultado:\n"
+            "AO-16 dry-run concluído para aprovação ativa. Nenhuma branch, commit, PR, deploy, migration ou escrita real foi executada."
+        )
+        msg = Message(
+            id=new_id(),
+            org_slug=org,
+            thread_id=tid,
+            user_id=uid,
+            user_name=str(user.get("name") or ""),
+            role="assistant",
+            content=dry_run_text_out,
+            agent_id="orion",
+            agent_name="Orion",
+            created_at=now_ts(),
+        )
+        db.add(msg)
+        db.commit()
+    except Exception:
+        try: db.rollback()
+        except Exception: pass
+    return dry_run_result
+
     # Current proposal fast-path stores a governance proposal and approval, but
     # its diff preview is intentionally non-executable ("pendente de refinamento").
     # Until an executable artifact/diff is persisted, block application honestly.
