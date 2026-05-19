@@ -27301,6 +27301,190 @@ async def chat_stream(
             "Se esta mensagem aparecer em produção, o IDENTITY FASTPATH V9 está ativo."
         )
 
+
+
+    # AO-15_NEW_USER_SIMPLE_AGENT_PRODUCT_FASTPATH_V1
+    # Backend-only fast-path para restaurar resposta útil de usuário novo
+    # em perguntas simples sobre Orkio/Chris antes do runtime pesado.
+
+    def _strip_agent_mentions_for_router(text: str) -> str:
+        """Normaliza menções como @Orkio/@Chris para o roteador conversacional leve."""
+        normalized = _normalize_router_text(text)
+        if not normalized:
+            return ""
+        normalized = re.sub(r"@\s*(orkio|chris|orion|team)\b", r"\1", normalized, flags=re.IGNORECASE)
+        normalized = normalized.replace("@orkio", "orkio").replace("@chris", "chris")
+        return re.sub(r"\s+", " ", normalized).strip()
+
+
+    def _is_orkio_platform_explanation_request(text: str) -> bool:
+        normalized = _strip_agent_mentions_for_router(text)
+        if not normalized:
+            return False
+
+        # Não sequestrar pedidos técnicos/governados.
+        blocked = [
+            "patch", "diff", "commit", "deploy", "migration", "alembic",
+            "auditoria", "war room", "proposal_only", "runtime", "sse",
+            "backend", "frontend", "github",
+        ]
+        if any(marker in normalized for marker in blocked):
+            return False
+
+        platform_markers = [
+            "fale sobre a plataforma orkio",
+            "me fale sobre a plataforma orkio",
+            "me fala sobre a plataforma orkio",
+            "explique a plataforma orkio",
+            "o que é a plataforma orkio",
+            "o que e a plataforma orkio",
+            "fale sobre orkio",
+            "fale sobre o orkio",
+            "me fale sobre orkio",
+            "me fala sobre orkio",
+            "o que é orkio",
+            "o que e orkio",
+            "para que serve orkio",
+            "como usar orkio",
+        ]
+        return any(marker in normalized for marker in platform_markers)
+
+
+    def _build_orkio_platform_explanation_answer(text: str) -> str:
+        onboarding_digest = _build_stream_onboarding_context_digest()
+        context_block = ""
+        if onboarding_digest:
+            context_block = "\n\nContexto que vou considerar a partir do seu onboarding:\n" + onboarding_digest
+
+        return (
+            "Orkio é a plataforma da PatroAI para organizar contexto, conversas e agentes de IA em um fluxo único de trabalho.\n\n"
+            "Em termos simples: ele funciona como um copiloto operacional. Você entra, faz o onboarding, compartilha seu objetivo e passa a conversar com agentes que ajudam a estruturar decisões, planos, análises e próximos passos.\n\n"
+            "O que ele faz agora no beta:\n"
+            "1. entende o contexto inicial do usuário;\n"
+            "2. mantém a conversa organizada em threads;\n"
+            "3. permite acionar agentes como Orkio, Chris, Orion e Team;\n"
+            "4. ajuda a transformar ideias em planos, diagnósticos, roteiros e decisões;\n"
+            "5. prepara a base para governança, auditoria e evolução controlada da plataforma.\n\n"
+            "Como usar neste beta:\n"
+            "- peça um plano prático;\n"
+            "- peça uma análise estratégica;\n"
+            "- peça um roteiro de testes;\n"
+            "- chame Chris para posicionamento e negócios;\n"
+            "- chame Orion para arquitetura, auditoria técnica e governança.\n\n"
+            "Próximos comandos úteis:\n"
+            "- “Chris, analisa minha proposta e sugere um posicionamento.”\n"
+            "- “Orkio, organize meus próximos passos.”\n"
+            "- “Orion, faça uma leitura executiva técnica.”"
+            + context_block
+        )
+
+
+    def _is_chris_proposal_analysis_request(text: str) -> bool:
+        normalized = _strip_agent_mentions_for_router(text)
+        if not normalized:
+            return False
+
+        # Evitar capturar pedidos técnicos.
+        technical_markers = [
+            "patch", "diff", "commit", "deploy", "migration", "alembic",
+            "backend", "frontend", "runtime", "sse", "github", "war room",
+            "auditoria técnica", "auditoria tecnica",
+        ]
+        if any(marker in normalized for marker in technical_markers):
+            return False
+
+        has_chris = "chris" in normalized
+        proposal_markers = [
+            "analisa minha proposta",
+            "analise minha proposta",
+            "analisar minha proposta",
+            "posicionamento",
+            "proposta",
+            "beta",
+            "pitch",
+            "modelo de negócio",
+            "modelo de negocio",
+            "estratégia",
+            "estrategia",
+        ]
+        if has_chris and any(marker in normalized for marker in proposal_markers):
+            return True
+
+        # Também cobrir pedido sem menção explícita, quando a intenção for clara.
+        if "posicionamento" in normalized and ("beta" in normalized or "proposta" in normalized):
+            return True
+
+        return False
+
+
+    def _build_chris_proposal_analysis_answer(text: str) -> str:
+        onboarding_digest = _build_stream_onboarding_context_digest()
+        context_block = ""
+        if onboarding_digest:
+            context_block = "\n\nContexto considerado do onboarding:\n" + onboarding_digest
+
+        return (
+            "Claro. Vou fazer uma análise inicial no papel da Chris, com foco em posicionamento, clareza de proposta e beta.\n\n"
+            "Leitura rápida da proposta:\n"
+            "A ideia precisa ser comunicada como uma plataforma de agentes que reduz complexidade operacional e ajuda o usuário a sair de uma conversa genérica para um plano prático, organizado e acionável.\n\n"
+            "Posicionamento mais claro para o beta:\n"
+            "“Orkio é um copiloto de agentes da PatroAI para organizar contexto, decisões e próximos passos em uma jornada guiada, com apoio estratégico, técnico e operacional.”\n\n"
+            "Promessa principal:\n"
+            "Em poucos minutos, o usuário deve entender o que a plataforma faz, concluir o onboarding e receber uma primeira resposta útil baseada no contexto informado.\n\n"
+            "Público ideal para os primeiros testes:\n"
+            "1. usuários próximos e pacientes para encontrar bugs;\n"
+            "2. perfis com dor real de organização, decisão ou planejamento;\n"
+            "3. pessoas capazes de dar feedback honesto sobre clareza, valor e confiança.\n\n"
+            "O que validar no beta:\n"
+            "- o usuário entende a proposta em até 5 segundos;\n"
+            "- o onboarding parece útil, não burocrático;\n"
+            "- o chat responde perguntas simples sem travar;\n"
+            "- os agentes têm identidade clara;\n"
+            "- o usuário percebe que o contexto foi aproveitado.\n\n"
+            "Próximos 3 passos recomendados:\n"
+            "1. estabilizar respostas simples do Orkio, Chris e Orion;\n"
+            "2. liberar para 2 usuários controlados antes de ampliar para 5;\n"
+            "3. coletar feedback com perguntas objetivas: clareza, utilidade, confiança e fricção.\n\n"
+            "Minha recomendação: antes de vender como plataforma completa, vender como beta guiado de inteligência operacional com agentes especializados."
+            + context_block
+        )
+
+
+    def _simple_agent_product_fastpath_in_isolated_session() -> Dict[str, Any]:
+        if _is_chris_proposal_analysis_request(message):
+            final_text = _build_chris_proposal_analysis_answer(message)
+            agent_name = "Chris"
+            routing_source = "stream_chris_proposal_fastpath_ao15"
+        else:
+            final_text = _build_orkio_platform_explanation_answer(message)
+            agent_name = "Orkio"
+            routing_source = "stream_orkio_platform_fastpath_ao15"
+
+        persisted = _persist_assistant_message(
+            text=final_text,
+            thread_id=tid_seed,
+            agent_id=None,
+            agent_name=agent_name,
+        )
+        return {
+            **persisted,
+            "answer": final_text,
+            "message": final_text,
+            "final_text": final_text,
+            "agent_id": None,
+            "agent_name": agent_name,
+            "voice_id": None,
+            "avatar_url": None,
+            "runtime_hints": {
+                "routing": {
+                    "routing_source": routing_source,
+                    "route_applied": True,
+                    "execution_lifecycle": "completed",
+                    "governance_mode": "conversational_fastpath",
+                }
+            },
+        }
+
     def _baseline_text_key(text: str) -> str:
         normalized = _normalize_router_text(text)
         # AO-03_STREAM_GREETING_FASTPATH
@@ -28301,6 +28485,28 @@ async def chat_stream(
                     pass
                 # Se o fast-path falhar, seguimos para o runtime protegido.
 
+
+
+
+        # AO-15_SIMPLE_AGENT_PRODUCT_FASTPATH
+        # Perguntas simples de usuário novo sobre Orkio/Chris não devem cair no runtime pesado.
+        if _is_orkio_platform_explanation_request(message) or _is_chris_proposal_analysis_request(message):
+            try:
+                payload = await asyncio.to_thread(_simple_agent_product_fastpath_in_isolated_session)
+                routing_source = (
+                    "stream_chris_proposal_fastpath_ao15"
+                    if _is_chris_proposal_analysis_request(message)
+                    else "stream_orkio_platform_fastpath_ao15"
+                )
+                async for ev in _emit_result_payload(payload, routing_source=routing_source):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_SIMPLE_AGENT_PRODUCT_FASTPATH_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Se o fast-path falhar, segue para os demais trilhos protegidos.
 
         # INSTITUTIONAL_IDENTITY_FASTPATH_V8
         # Perguntas institucionais sobre o próprio Orkio não devem cair no baseline
