@@ -28303,33 +28303,96 @@ async def chat_stream(
         return any(marker in raw for marker in executive_markers)
 
 
+    def _orion_checkpoint_context() -> Dict[str, Any]:
+        """
+        AO-16C_ORION_CHECKPOINT_AWARENESS:
+        Estado operacional conservador usado apenas para respostas readonly/proposal_only.
+        Não executa código, não escreve em repositório e não altera deploy.
+        """
+        return {
+            "current_checkpoint": "AO-16B",
+            "chat_checkpoint": "AO-15 chat fast-path: verde para fluxo básico",
+            "evolution_checkpoint": "AO-16B dry-run/schema compat: instalado, pendente de validação completa por Admin",
+            "next_technical_patch": "AO-16C — Orion Proposal Builder + Checkpoint Awareness",
+            "next_ux_track": "AO-17 — Premium UX Beta Perception Layer",
+            "real_execution": "NO-GO",
+            "dry_run_required": True,
+            "execution_enabled": False,
+            "can_execute_real": False,
+        }
+
+
     def _build_orion_executive_audit_answer(text: str) -> str:
         onboarding_digest = _build_stream_onboarding_context_digest()
         context_block = ""
         if onboarding_digest:
             context_block = "\n\nContexto considerado:\n" + onboarding_digest
+        checkpoint = _orion_checkpoint_context()
+        raw = _normalize_router_text(text)
+        wants_ux = any(x in raw for x in [
+            "ux",
+            "landing",
+            "landings",
+            "premium",
+            "experiencia",
+            "experiência",
+            "jornada",
+            "onboarding",
+            "interface",
+            "mobile",
+            "pwa",
+        ])
+
+        if wants_ux:
+            return (
+                "Leitura executiva Orion — readonly.\n\n"
+                "1. Prioridade atual\n"
+                "Preparar a auditoria UX premium como trilho separado, sem mexer no checkpoint técnico AO-15/AO-16B. "
+                "A plataforma já voltou a responder no chat básico; agora a alavanca é percepção, clareza e confiança na jornada.\n\n"
+                "2. Checkpoint operacional\n"
+                f"- {checkpoint['chat_checkpoint']}.\n"
+                f"- {checkpoint['evolution_checkpoint']}.\n"
+                f"- Execução real/autopatch: {checkpoint['real_execution']}.\n\n"
+                "3. Próximo passo recomendado\n"
+                "AO-17 — Premium UX Beta Perception Layer, iniciando por READONLY_AUDIT de landing, auth, onboarding, AppConsole, agentes, feedback beta e mobile/PWA.\n\n"
+                "4. Risco\n"
+                "Baixo se for auditoria e patch frontend/UX isolado. Médio se misturar UX com runner de autoevolução ou backend crítico.\n\n"
+                "5. Ordem segura\n"
+                "- Validar AO-16B dry-run no Admin.\n"
+                "- Corrigir o proposal builder stale com AO-16C.\n"
+                "- Rodar auditoria UX readonly.\n"
+                "- Gerar AO-17 como patch UX separado.\n\n"
+                "6. Veredito\n"
+                "GO para auditoria UX premium readonly. NO-GO para misturar UX com execução real/autopatch."
+                + context_block
+            )
 
         return (
             "Leitura executiva Orion — readonly.\n\n"
             "1. Prioridade atual\n"
-            "Colocar a auditoria interna ponta a ponta para responder de forma determinística antes de ampliar beta ou ativar qualquer autoevolução. O fluxo básico do chat já avançou, mas comandos operacionais de @Orion ainda precisam de um trilho leve, governado e confiável.\n\n"
-            "2. Causa provável\n"
-            "O pedido executivo está caindo no runtime pesado/dispatch interno em vez de passar primeiro por um contrato consultivo leve. Quando esse runtime demora ou falha, o terminal guard encerra com fallback seguro, mas não entrega diagnóstico útil para Admin.\n\n"
-            "3. Próximo patch recomendado\n"
-            "AO-10 — Orion Executive Audit Fastpath + Admin Governance Bridge. Escopo inicial: backend-only, readonly/proposal_only, sem execução automática, sem migrations e sem tocar no checkpoint técnico atual.\n\n"
-            "4. Risco\n"
-            "Baixo para o fast-path executivo, desde que ele apenas responda diagnóstico e não aplique mudanças. Médio para autoevolução se houver execução sem aprovação humana, por isso o loop automático deve permanecer desligado até o fluxo Admin estar completo.\n\n"
+            "Validar o AO-16B Controlled Evolution Dry-Run Runner com uma proposta criada no checkpoint atual, sem execução real. "
+            "O chat básico já está em verde após AO-15; a pendência técnica agora é provar o ciclo Admin → aprovação → dry-run → execution_id.\n\n"
+            "2. Checkpoint operacional\n"
+            f"- {checkpoint['chat_checkpoint']}.\n"
+            f"- {checkpoint['evolution_checkpoint']}.\n"
+            "- AO-16C necessário: atualizar o Orion para parar de gerar proposta stale AO-13/AO-10.\n"
+            f"- Próximo trilho UX: {checkpoint['next_ux_track']}.\n\n"
+            "3. Causa provável do desalinhamento\n"
+            "O fast-path executivo/proposal_only do Orion ainda usa templates antigos. Ele responde em formato correto, mas não reconhece o estado atual AO-15/AO-16B.\n\n"
+            "4. Próximo patch recomendado\n"
+            "AO-16C — Orion Proposal Builder + Checkpoint Awareness. Escopo backend-only, proposal_only/readonly, sem migrations, sem escrita em repo, sem commit, sem deploy automático e sem execução real.\n\n"
             "5. Checklist de validação\n"
-            "- @Orion responde leitura executiva sem fallback genérico.\n"
-            "- A resposta inclui prioridade, causa, patch recomendado, risco e veredito.\n"
-            "- Nenhuma exceção Python aparece para o usuário.\n"
-            "- O stream finaliza e a UI sai de “Gerando resposta”.\n"
-            "- Proposta de patch só nasce quando o usuário pedir explicitamente proposal_only.\n"
-            "- Nenhuma escrita, commit, deploy ou execução ocorre sem aprovação Admin.\n\n"
+            "- @Orion não recomenda mais AO-10 como próximo passo atual.\n"
+            "- Nova proposta não nasce mais como AO-13 por padrão.\n"
+            "- Proposta de validação de dry-run menciona AO-16B, execution_id, diff_preview, smoke_plan e rollback_plan.\n"
+            "- Admin aprova proposta nova.\n"
+            "- Dry-run retorna execution_status=dry_run_completed.\n"
+            "- execution_enabled=false e can_execute_real=false permanecem.\n\n"
             "6. Ponte para autoevolução controlada\n"
-            "A arquitetura correta é: auditoria consultiva → proposta em draft/pending_approval → aprovação Admin → execução controlada → smoke test → rollback plan → trilha auditável. A execução nunca deve acontecer diretamente em produção ou na main sem aprovação.\n\n"
+            "O ciclo correto permanece: auditoria consultiva → proposal_only → aprovação Admin → dry-run → smoke/rollback plan → futura branch/PR. "
+            "Nada deve escrever em produção ou main sem aprovação e trilha auditável.\n\n"
             "7. Veredito\n"
-            "GO para implementar o fast-path executivo AO-10. NO-GO para autoevolução executável ampla até existir aprovação Admin, proposal_id, execution_id, smoke test e rollback plan."
+            "GO para AO-16C. NO-GO para autoexecução real. AO-17 UX deve vir depois da validação do dry-run ou como trilha readonly separada."
             + context_block
         )
 
@@ -28353,12 +28416,13 @@ async def chat_stream(
             "avatar_url": None,
             "runtime_hints": {
                 "routing": {
-                    "routing_source": "stream_orion_executive_audit_fastpath_ao10",
+                    "routing_source": "stream_orion_executive_audit_fastpath_ao16c",
                     "route_applied": True,
                     "execution_lifecycle": "readonly_completed",
                     "write_allowed": False,
                     "human_approval_required": True,
                     "proposal_only": False,
+                    "checkpoint": _orion_checkpoint_context(),
                 }
             },
         }
@@ -28366,7 +28430,7 @@ async def chat_stream(
 
     def _is_orion_evolution_proposal_only_request(text: str) -> bool:
         """
-        AO-11_ADMIN_CONTROLLED_EVOLUTION_PROPOSAL_LIFECYCLE:
+        AO-16C_ORION_PROPOSAL_BUILDER:
         Cria proposta governada somente quando o usuário pedir explicitamente
         proposal_only/proposta. Não executa código.
         """
@@ -28406,35 +28470,168 @@ async def chat_stream(
             "patch",
             "execucao controlada",
             "execução controlada",
+            "dry-run",
+            "dry run",
+            "runner",
+            "ao-16",
+            "ao16",
+            "ao-17",
+            "ux",
+            "landing",
+            "premium",
+            "jornada",
         ]
         return any(x in raw for x in proposal_markers) and any(x in raw for x in evolution_markers)
 
 
+    def _orion_proposal_intent(text: str) -> str:
+        raw = _normalize_router_text(text)
+        if any(x in raw for x in [
+            "dry-run",
+            "dry run",
+            "ao-16b",
+            "ao16b",
+            "execution_id",
+            "diff_preview",
+            "smoke_plan",
+            "controlled evolution dry",
+            "validar controlled evolution",
+            "validar o ao-16b",
+            "validar ao-16b",
+        ]):
+            return "ao16b_dry_run_validation"
+        if any(x in raw for x in [
+            "ao-16c",
+            "ao16c",
+            "checkpoint",
+            "proposal builder",
+            "builder",
+            "stale",
+            "desatualizado",
+            "ao-13",
+            "ao13",
+            "ao-10",
+            "ao10",
+        ]):
+            return "ao16c_checkpoint_awareness"
+        if any(x in raw for x in [
+            "ux",
+            "landing",
+            "landings",
+            "premium",
+            "experiencia",
+            "experiência",
+            "jornada",
+            "onboarding",
+            "mobile",
+            "pwa",
+        ]):
+            return "ao17_premium_ux_readonly"
+        return "ao16c_checkpoint_awareness"
+
+
     def _build_orion_evolution_proposal_summary(text: str) -> Dict[str, Any]:
+        """
+        AO-16C: proposal builder consciente do checkpoint.
+        A proposta continua proposal_only e não habilita execução real.
+        """
+        intent = _orion_proposal_intent(text)
+        checkpoint = _orion_checkpoint_context()
+
+        if intent == "ao16b_dry_run_validation":
+            return {
+                "title": "AO-16B — Validar Controlled Evolution Dry-Run Runner",
+                "summary": (
+                    "Validar o fluxo governado pós-AO-16B: Admin aprova uma proposta atual, executa dry-run, "
+                    "recebe execution_id, diff_preview, smoke_plan, rollback_plan e execution_status=dry_run_completed. "
+                    "A execução real permanece bloqueada com execution_enabled=false e can_execute_real=false."
+                ),
+                "risk": "baixo_medio",
+                "target_files": [
+                    "app/main.py",
+                    "POST /api/admin/evolution/proposals/{proposal_id}/dry-run",
+                    "GET /api/admin/evolution/executions",
+                    "src/routes/AdminEvolutionCenter.jsx",
+                ],
+                "rollback_plan": (
+                    "Reverter apenas o bloco AO-16B/AO-16C em app/main.py caso o dry-run não responda como esperado. "
+                    "Não dropar colunas aditivas; não há commit, deploy, migration ou escrita de repo iniciada pelo runner."
+                ),
+                "checklist": [
+                    "Admin lista a proposta criada após AO-16B.",
+                    "Admin aprova a proposta.",
+                    "Dry-run gera execution_id.",
+                    "Dry-run retorna diff_preview.",
+                    "Dry-run retorna smoke_plan e smoke_result.",
+                    "Dry-run retorna rollback_plan.",
+                    "execution_status=dry_run_completed.",
+                    "execution_enabled=false permanece.",
+                    "can_execute_real=false permanece.",
+                    "Nenhum commit, deploy, migration ou escrita de repo ocorre.",
+                    "Chat AO-15 continua respondendo.",
+                ],
+            }
+
+        if intent == "ao17_premium_ux_readonly":
+            return {
+                "title": "AO-17 — Premium UX Beta Perception Layer",
+                "summary": (
+                    "Preparar uma auditoria e patch UX premium para landing, auth, onboarding, AppConsole, agentes, feedback beta e mobile/PWA, "
+                    "sem tocar backend crítico, stream, AO-15 ou AO-16B. O objetivo é aumentar clareza, confiança e percepção premium antes de ampliar beta."
+                ),
+                "risk": "baixo",
+                "target_files": [
+                    "src/routes/PatroaiLanding.jsx",
+                    "src/routes/AuthPage.jsx",
+                    "src/routes/AppConsole.jsx",
+                    "src/components/OnboardingModal.jsx",
+                    "src/components/EmptyStatePremium.jsx",
+                    "src/ui/PublicChatWidget.jsx",
+                ],
+                "rollback_plan": (
+                    "Reverter somente arquivos frontend/UX alterados no AO-17. Não alterar app/main.py, dry-run runner, migrations ou endpoints críticos."
+                ),
+                "checklist": [
+                    "Landing comunica valor em até 5 segundos.",
+                    "CTA principal e CTA secundário ficam claros.",
+                    "Onboarding explica benefício antes de coletar dados.",
+                    "AppConsole mostra contexto recebido e próximos comandos.",
+                    "Cards Orkio/Chris/Orion/Team têm identidade clara.",
+                    "Feedback beta fica visível e simples.",
+                    "Mobile/PWA não apresenta quebra visual.",
+                    "Nenhum fluxo AO-15/AO-16B regride.",
+                ],
+            }
+
         return {
-            "title": "AO-13 — PTE Admin Evolution Persistence",
+            "title": "AO-16C — Orion Proposal Builder + Checkpoint Awareness",
             "summary": (
-                "Criar o primeiro ciclo governado proposal_only: Orion gera proposta em pending_approval, "
-                "Admin lista/aprova/rejeita, e nenhuma execução automática ocorre. A etapa prepara a ponte "
-                "para execução controlada futura com smoke tests e rollback."
+                "Atualizar o Orion para reconhecer o checkpoint atual da plataforma: AO-15 chat básico verde, AO-16B dry-run/schema compat instalado "
+                "e pendente de validação final, e AO-17 UX como próximo trilho premium. A proposta corrige o comportamento stale que ainda gerava AO-13/AO-10."
             ),
             "risk": "baixo_medio",
             "target_files": [
                 "app/main.py",
-                "admin API: /api/admin/evolution/proposals",
-                "futuro frontend admin: Evolution Console",
+                "/api/chat/stream",
+                "Orion executive readonly fast-path",
+                "Orion proposal_only builder",
+                "/api/admin/evolution/proposals",
             ],
             "rollback_plan": (
-                "Reverter o bloco AO-11 em app/main.py: helpers de proposta, endpoints admin/evolution "
-                "e fast-path proposal_only. Como AO-11 não executa código nem migrations, não há rollback de banco."
+                "Reverter apenas o bloco AO-16C em app/main.py, restaurando o proposal builder anterior. "
+                "Nenhuma migration, commit, deploy ou escrita de repo é iniciada por este patch."
             ),
             "checklist": [
-                "@Orion leitura executiva continua respondendo.",
-                "@Orion gere uma proposta de evolução proposal_only cria proposal_id persistente.",
-                "Admin lista a proposta.",
+                "@Orion não recomenda AO-10 como próximo passo atual.",
+                "Nova proposta não nasce mais como AO-13 por padrão.",
+                "Proposta de dry-run menciona AO-16B, execution_id, diff_preview, smoke_plan e rollback_plan.",
+                "Admin lista a proposta nova.",
                 "Admin aprova ou rejeita a proposta.",
+                "execution_enabled=false permanece.",
+                "can_execute_real=false permanece.",
                 "Nenhum commit, deploy, migration ou escrita de repo ocorre.",
-                "Logs registram proposal_id, status e persistence=db quando disponível.",
+                f"Checkpoint reconhecido: {checkpoint['chat_checkpoint']}.",
+                f"Checkpoint reconhecido: {checkpoint['evolution_checkpoint']}.",
             ],
         }
 
@@ -28470,9 +28667,10 @@ async def chat_stream(
             "5. Checklist\n"
             + "\n".join([f"- {x}" for x in list(proposal.get("checklist") or [])])
             + "\n\n6. Governança\n"
-            "Nenhuma escrita, commit, deploy, migration ou execução foi iniciada. "
-            "O Admin pode aprovar ou rejeitar pelos endpoints /api/admin/evolution/proposals.\n\n"
-            "Veredito: GO para aprovação/rejeição Admin. NO-GO para execução automática."
+            "Nenhuma escrita, commit, deploy, migration ou execução real foi iniciada. "
+            "O Admin pode aprovar/rejeitar a proposta e, quando aprovado, validar somente dry-run governado.\n\n"
+            "7. Veredito\n"
+            "GO para aprovação/rejeição Admin e dry-run quando aplicável. NO-GO para execução real/autopatch."
         )
         persisted = _persist_assistant_message(
             text=final_text,
@@ -28493,7 +28691,7 @@ async def chat_stream(
             "proposal_status": proposal.get("status"),
             "runtime_hints": {
                 "routing": {
-                    "routing_source": "stream_orion_evolution_proposal_fastpath_ao13",
+                    "routing_source": "stream_orion_evolution_proposal_fastpath_ao16c",
                     "route_applied": True,
                     "execution_lifecycle": "proposal_created_pending_approval",
                     "write_allowed": False,
@@ -28501,9 +28699,11 @@ async def chat_stream(
                     "human_approval_required": True,
                     "proposal_only": True,
                     "proposal_id": proposal_id,
+                    "checkpoint": _orion_checkpoint_context(),
                 }
             },
         }
+
 
 
 
@@ -28722,7 +28922,7 @@ async def chat_stream(
         if _is_orion_evolution_proposal_only_request(message):
             try:
                 payload = await asyncio.to_thread(_orion_evolution_proposal_fastpath_in_isolated_session)
-                async for ev in _emit_result_payload(payload, routing_source="stream_orion_evolution_proposal_fastpath_ao13"):
+                async for ev in _emit_result_payload(payload, routing_source="stream_orion_evolution_proposal_fastpath_ao16c"):
                     yield ev
                 return
             except Exception:
@@ -28738,7 +28938,7 @@ async def chat_stream(
         if _is_orion_executive_audit_request(message):
             try:
                 payload = await asyncio.to_thread(_orion_executive_audit_fastpath_in_isolated_session)
-                async for ev in _emit_result_payload(payload, routing_source="stream_orion_executive_audit_fastpath_ao10"):
+                async for ev in _emit_result_payload(payload, routing_source="stream_orion_executive_audit_fastpath_ao16c"):
                     yield ev
                 return
             except Exception:
