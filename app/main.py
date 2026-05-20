@@ -23432,20 +23432,94 @@ def admin_evolution_executions(
 # AO-17A — Branch/PR Runner Governado: contrato read-only
 # ================================
 
+def _admin_evolution_is_restore_point_stage(proposal: Dict[str, Any]) -> bool:
+    """
+    AO-17C/AO-18A stage detector.
+
+    This must be more specific than AO-17B detection because AO-17C prompts
+    naturally mention AO-17B-CREATE as already completed context.
+    """
+    p = proposal if isinstance(proposal, dict) else {}
+    haystack_parts: List[str] = [
+        str(p.get("title") or ""),
+        str(p.get("summary") or ""),
+        str(p.get("rollback_plan") or ""),
+        str(p.get("source_message") or ""),
+    ]
+    checklist = p.get("checklist") or []
+    if isinstance(checklist, list):
+        haystack_parts.extend(str(x or "") for x in checklist)
+    target_files = p.get("target_files") or []
+    if isinstance(target_files, list):
+        haystack_parts.extend(str(x or "") for x in target_files)
+
+    haystack = "\n".join(haystack_parts).lower()
+    return any(
+        marker in haystack
+        for marker in (
+            "ao-17c/ao-18a",
+            "ao-17c",
+            "ao-18a",
+            "restore point",
+            "restore_point",
+            "snapshot anterior",
+            "patch governado na branch",
+            "reversão possível a qualquer momento",
+            "reversao possivel a qualquer momento",
+        )
+    )
+
+
+def _admin_evolution_extract_target_branch(proposal: Dict[str, Any], *, fallback_proposal_id: str) -> str:
+    """
+    Resolve target branch from AO-17C/AO-18A proposal context.
+
+    Important: for AO-17C/AO-18A the target branch is the existing branch
+    created in AO-17B-CREATE. It must not be derived from the current
+    proposal_id, otherwise the plan would incorrectly suggest a new branch.
+    """
+    p = proposal if isinstance(proposal, dict) else {}
+    candidates: List[str] = []
+    for key in ("target_branch", "branch", "suggested_branch", "source_message", "summary", "rollback_plan", "title"):
+        raw = p.get(key)
+        if raw:
+            candidates.append(str(raw))
+
+    checklist = p.get("checklist") or []
+    if isinstance(checklist, list):
+        candidates.extend(str(x or "") for x in checklist)
+
+    target_files = p.get("target_files") or []
+    if isinstance(target_files, list):
+        candidates.extend(str(x or "") for x in target_files)
+
+    joined = "\n".join(candidates)
+    matches = re.findall(r"\bao-17/evo_[a-z0-9]+\b", joined, flags=re.IGNORECASE)
+    if matches:
+        # The first explicit branch in the proposal text is the intended target
+        # branch created by AO-17B-CREATE.
+        return matches[0].lower()
+
+    fallback_slug = re.sub(r"[^a-z0-9._-]+", "-", str(fallback_proposal_id or "").lower()).strip("-") or "proposal"
+    return f"ao-17/{fallback_slug}"
+
+
 def _admin_evolution_build_branch_pr_plan(proposal: Dict[str, Any]) -> Dict[str, Any]:
     """
-    AO-17A: plano governado para futura execução em branch/PR.
+    AO-17A/AO-17C plan builder.
 
-    Este helper é deliberadamente read-only:
-    - não cria branch;
-    - não escreve em repositório;
-    - não cria commit;
-    - não abre PR;
-    - não faz merge;
-    - não faz deploy;
-    - não executa migration.
+    Read-only by design:
+    - does not create branch;
+    - does not write files;
+    - does not commit;
+    - does not open PR;
+    - does not merge;
+    - does not deploy;
+    - does not run migration.
 
-    Ele apenas transforma o dry-run aprovado em contrato visível para o Admin.
+    For AO-17C/AO-18A proposals this helper must be stage-aware and reuse the
+    existing AO-17B branch instead of suggesting a new branch from the current
+    proposal_id.
     """
     p = proposal if isinstance(proposal, dict) else {}
     proposal_id = str(p.get("proposal_id") or "").strip()
@@ -23456,6 +23530,132 @@ def _admin_evolution_build_branch_pr_plan(proposal: Dict[str, Any]) -> Dict[str,
     title = str(p.get("title") or "Proposta de evolução controlada").strip()
     risk = str(p.get("risk") or "baixo_medio").strip()
     rollback_plan = str(p.get("rollback_plan") or "").strip()
+
+    is_restore_point_stage = _admin_evolution_is_restore_point_stage(p)
+
+    if is_restore_point_stage:
+        target_branch = _admin_evolution_extract_target_branch(p, fallback_proposal_id=proposal_id)
+        return {
+            "ok": True,
+            "stage": "AO-17C/AO-18A",
+            "mode": "branch_patch_restore_point_plan_readonly",
+            "proposal_id": proposal_id,
+            "proposal_status": status,
+            "execution_id": execution_id,
+            "execution_status": execution_status,
+            "dry_run_completed": dry_run_completed,
+            "can_prepare_branch_pr": False,
+            "can_prepare_branch_patch": dry_run_completed,
+            "can_apply_branch_patch": False,
+            "can_revert_branch_patch": False,
+            "can_restore_previous_version": False,
+            "can_create_branch": False,
+            "branch_already_created": True,
+            "target_branch": target_branch,
+            "suggested_branch": target_branch,
+            "branch_name": target_branch,
+            "can_write_repository": False,
+            "can_write_branch": False,
+            "can_write_main": False,
+            "can_commit": False,
+            "can_open_pr": False,
+            "can_merge": False,
+            "can_deploy": False,
+            "can_run_migration": False,
+            "execution_enabled": False,
+            "can_execute_real": False,
+            "write_allowed": False,
+            "file_write_allowed": False,
+            "commit_allowed": False,
+            "deploy_allowed": False,
+            "migration_allowed": False,
+            "main_branch_write_allowed": False,
+            "suggested_pr_title": f"AO-17C/AO-18A: {title}",
+            "risk": risk,
+            "restore_point_required": True,
+            "snapshot_required": True,
+            "diff_preview_required": True,
+            "file_receipts_required": True,
+            "rollback_available_after_apply": True,
+            "required_before_branch_patch": [
+                "Admin confirma que AO-17B-CREATE criou a branch temporária alvo.",
+                "Branch alvo existente foi confirmada antes de qualquer escrita.",
+                "Snapshot anterior dos arquivos afetados será capturado antes da escrita.",
+                "restore_point_id será registrado antes da escrita.",
+                "Diff preview será exibido antes da aplicação.",
+                "Receipt por arquivo alterado será registrado.",
+                "A escrita, se futura, ocorrerá somente na branch temporária.",
+                "Main permanece bloqueada.",
+                "PR, merge, deploy e migration permanecem bloqueados.",
+                "Reversão da branch deve permanecer disponível após o patch.",
+            ],
+            "branch_contract": {
+                "write_scope": "existing_branch_only",
+                "target_branch": target_branch,
+                "main_branch_write_allowed": False,
+                "force_push_allowed": False,
+                "direct_deploy_allowed": False,
+                "migration_allowed": False,
+                "branch_creation_allowed": False,
+                "requires_admin_approval_before_write": True,
+                "requires_restore_point_before_write": True,
+                "requires_admin_approval_before_merge": True,
+                "requires_admin_approval_before_deploy": True,
+            },
+            "restore_point_contract": {
+                "restore_point_required": True,
+                "restore_point_id_required": True,
+                "snapshot_previous_files_required": True,
+                "diff_preview_required": True,
+                "file_receipts_required": True,
+                "restore_point_persistent_after_promotion": True,
+                "can_revert_branch_patch_after_apply": True,
+                "can_restore_previous_version_after_future_promotion": True,
+            },
+            "rollback_contract": {
+                "rollback_plan_required": True,
+                "rollback_dry_run_required": True,
+                "restore_previous_version_button": "planned_AO-18A",
+                "revert_branch_patch_button": "planned_AO-18A",
+                "rollback_without_admin_approval": False,
+                "rollback_plan": rollback_plan,
+                "target_branch": target_branch,
+            },
+            "smoke_contract": {
+                "build_required": True,
+                "smoke_required": True,
+                "admin_review_required": True,
+                "minimum_checks": [
+                    "Admin Evolution abre.",
+                    "Proposal/dry-run/executions permanecem funcionais.",
+                    "Plano usa branch temporária existente.",
+                    "Plano não sugere nova branch.",
+                    "Main permanece intacta.",
+                    "Nenhum PR, merge, deploy ou migration ocorre.",
+                    "Rollback/restore point permanecem obrigatórios.",
+                ],
+            },
+            "blocked_actions": [
+                "create_new_branch",
+                "write_repository_now",
+                "write_main_branch",
+                "commit_now",
+                "open_pr",
+                "merge",
+                "deploy",
+                "migration",
+            ],
+            "next_required_stage": (
+                "AO-17C/AO-18A apply patch to existing branch only after explicit Admin approval and restore point validation"
+                if dry_run_completed
+                else "AO-17C/AO-18A dry-run must be completed before branch patch planning"
+            ),
+            "message": (
+                "AO-17C/AO-18A pronto para revisão: próxima etapa poderá preparar aplicação de patch na branch existente com restore point permanente. Ainda não escreve arquivos."
+                if dry_run_completed
+                else "AO-17C/AO-18A aguardando dry-run concluído antes de preparar patch na branch existente."
+            ),
+        }
 
     branch_slug = re.sub(r"[^a-z0-9._-]+", "-", proposal_id.lower()).strip("-") or "proposal"
     suggested_branch = f"ao-17/{branch_slug}"
@@ -23551,9 +23751,10 @@ def admin_evolution_proposal_execution_plan(
     _admin=Depends(require_admin_access),
 ):
     """
-    AO-16/AO-17A: provides a controlled dry-run plan bridge for Admin visibility.
-    It confirms that approval does not automatically execute anything and,
-    after dry-run completion, exposes the read-only Branch/PR plan contract.
+    AO-16/AO-17: provides a controlled dry-run plan bridge for Admin visibility.
+
+    For AO-17C/AO-18A, this route is stage-aware: it must reference the existing
+    AO-17B branch and must not suggest creating a new branch.
     """
     row = _admin_evolution_get_proposal(proposal_id)
     if not row:
@@ -23563,8 +23764,11 @@ def admin_evolution_proposal_execution_plan(
     execution_status = str(row.get("execution_status") or "not_started").strip()
     dry_run_completed = execution_status == "dry_run_completed"
     branch_pr_plan = _admin_evolution_build_branch_pr_plan(row)
+    is_restore_point_stage = branch_pr_plan.get("stage") == "AO-17C/AO-18A"
 
-    if dry_run_completed:
+    if dry_run_completed and is_restore_point_stage:
+        next_stage = "AO-17C/AO-18A restore point branch patch plan review (read-only)"
+    elif dry_run_completed:
         next_stage = "AO-17A branch/pr plan review (read-only)"
     elif can_dry_run:
         next_stage = "AO-16 controlled dry-run"
@@ -23584,17 +23788,25 @@ def admin_evolution_proposal_execution_plan(
         "smoke_tests_required": True,
         "rollback_plan_required": True,
         "branch_pr_plan_required": dry_run_completed,
+        "restore_point_required": bool(branch_pr_plan.get("restore_point_required")),
+        "snapshot_required": bool(branch_pr_plan.get("snapshot_required")),
         "can_prepare_branch_pr": bool(branch_pr_plan.get("can_prepare_branch_pr")),
+        "can_prepare_branch_patch": bool(branch_pr_plan.get("can_prepare_branch_patch")),
         "branch_pr_plan_endpoint": f"/api/admin/evolution/proposals/{proposal_id}/branch-pr-plan",
         "branch_pr_plan": branch_pr_plan,
         "message": (
-            "AO-17A disponível em modo read-only: branch/PR somente após aprovação Admin explícita."
-            if dry_run_completed
-            else "AO-16 permite dry-run governado. Não executa escrita, commit, deploy ou migration."
+            "AO-17C/AO-18A disponível em modo read-only: patch na branch existente somente após restore point e aprovação Admin explícita."
+            if dry_run_completed and is_restore_point_stage
+            else (
+                "AO-17A disponível em modo read-only: branch/PR somente após aprovação Admin explícita."
+                if dry_run_completed
+                else "AO-16 permite dry-run governado. Não executa escrita, commit, deploy ou migration."
+            )
         ),
         "rollback_plan": row.get("rollback_plan") or "",
         "checklist": row.get("checklist") or [],
     }
+
 
 
 @app.get("/api/admin/evolution/proposals/{proposal_id}/branch-pr-plan")
