@@ -28693,6 +28693,12 @@ async def chat_stream(
             "ao-16",
             "ao16",
             "ao-17",
+            "ao-17b",
+            "ao17b",
+            "branch temporária",
+            "branch temporaria",
+            "criação governada de branch",
+            "criacao governada de branch",
             "ux",
             "landing",
             "premium",
@@ -28703,6 +28709,29 @@ async def chat_stream(
 
     def _orion_proposal_intent(text: str) -> str:
         raw = _normalize_router_text(text)
+
+        # AO-17B-GEN: detectar branch temporária ANTES de dry-run.
+        # Os prompts AO-17B costumam citar AO-16/AO-17A como contexto histórico;
+        # se o dry-run for avaliado primeiro, o Orion volta indevidamente ao template AO-16B.
+        if any(x in raw for x in [
+            "ao-17b",
+            "ao17b",
+            "criação governada de branch temporária",
+            "criacao governada de branch temporaria",
+            "criação governada de branch",
+            "criacao governada de branch",
+            "branch temporária",
+            "branch temporaria",
+            "criar branch temporária",
+            "criar branch temporaria",
+            "branch creation",
+            "can_create_branch",
+            "suggested branch",
+            "suggested_branch",
+            "ao-17/evo_",
+        ]):
+            return "ao17b_branch_creation_governed"
+
         if any(x in raw for x in [
             "dry-run",
             "dry run",
@@ -28754,6 +28783,51 @@ async def chat_stream(
         """
         intent = _orion_proposal_intent(text)
         checkpoint = _orion_checkpoint_context()
+
+        if intent == "ao17b_branch_creation_governed":
+            return {
+                "title": "AO-17B — Criação Governada de Branch Temporária",
+                "summary": (
+                    "Permitir somente a criação governada de uma branch temporária para continuidade do ciclo AO-17, "
+                    "partindo de uma proposta base com dry-run concluído e plano AO-17A revisado. "
+                    "Esta proposta não escreve arquivos, não cria commit, não abre PR, não faz merge, não faz deploy "
+                    "e não executa migration."
+                ),
+                "risk": "baixo_medio",
+                "target_files": [
+                    "app/main.py",
+                    "GitHub branch creation control plane",
+                    "futuro endpoint AO-17B de criação de branch",
+                    "src/routes/AdminEvolutionCenter.jsx",
+                ],
+                "rollback_plan": (
+                    "Se a etapa AO-17B for rejeitada antes de qualquer escrita, nenhuma ação de rollback técnico é necessária. "
+                    "Se uma branch temporária vier a ser criada em etapa futura, o cleanup seguro é deletar somente a branch temporária "
+                    "associada ao proposal_id, sem tocar main, commits, PRs, deploys ou migrations."
+                ),
+                "checklist": [
+                    "Admin confirma que AO-16D/R9 retornou dry_run_completed na proposta base.",
+                    "Admin confirma que AO-17A branch_pr_runner_plan_readonly foi revisado.",
+                    "Branch sugerida segue padrão rastreável ao proposal_id.",
+                    "can_create_branch=true somente após aprovação Admin específica.",
+                    "can_write_repository=false permanece.",
+                    "can_commit=false permanece.",
+                    "can_open_pr=false permanece.",
+                    "can_merge=false permanece.",
+                    "can_deploy=false permanece.",
+                    "can_run_migration=false permanece.",
+                    "Nenhuma escrita em main ocorre.",
+                    "Receipt auditável deve ser exigido quando a criação de branch for implementada.",
+                ],
+                "governance": (
+                    "Nenhuma escrita, commit, PR, merge, deploy, migration ou alteração real foi iniciada. "
+                    "Esta proposta apenas autoriza revisão Admin para uma futura criação governada de branch temporária."
+                ),
+                "verdict": (
+                    "GO para aprovação/rejeição Admin da proposta AO-17B. "
+                    "NO-GO para escrita de arquivos, commit, PR, merge, deploy ou migration."
+                ),
+            }
 
         if intent == "ao16b_dry_run_validation":
             return {
@@ -28884,10 +28958,9 @@ async def chat_stream(
             "5. Checklist\n"
             + "\n".join([f"- {x}" for x in list(proposal.get("checklist") or [])])
             + "\n\n6. Governança\n"
-            "Nenhuma escrita, commit, deploy, migration ou execução real foi iniciada. "
-            "O Admin pode aprovar/rejeitar a proposta e, quando aprovado, validar somente dry-run governado.\n\n"
+            f"{spec.get('governance') or 'Nenhuma escrita, commit, deploy, migration ou execução real foi iniciada. O Admin pode aprovar/rejeitar a proposta e, quando aprovado, validar somente dry-run governado.'}\n\n"
             "7. Veredito\n"
-            "GO para aprovação/rejeição Admin e dry-run quando aplicável. NO-GO para execução real/autopatch."
+            f"{spec.get('verdict') or 'GO para aprovação/rejeição Admin e dry-run quando aplicável. NO-GO para execução real/autopatch.'}"
         )
         persisted = _persist_assistant_message(
             text=final_text,
