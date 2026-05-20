@@ -32,7 +32,7 @@ from fastapi import FastAPI, Depends, HTTPException, Header, UploadFile, File as
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, EmailStr, Field
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import OperationalError
+from sqlalchemy.exc import OperationalError, TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy import select, func, text, delete, update
 
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
@@ -4267,6 +4267,16 @@ def _admin_evolution_get_proposal(proposal_id: str) -> Optional[Dict[str, Any]]:
             """), {"proposal_id": pid}).mappings().first()
             if res:
                 return _admin_evolution_mapping_to_public(res)
+        except SQLAlchemyTimeoutError as e:
+            try:
+                logger.exception(
+                    "ADMIN_EVOLUTION_PROPOSAL_DB_TIMEOUT proposal_id=%s error=%s",
+                    pid,
+                    str(e)[:200],
+                )
+            except Exception:
+                pass
+            raise HTTPException(status_code=503, detail="evolution_db_unavailable")
         except Exception as e:
             try:
                 logger.exception("ADMIN_EVOLUTION_PROPOSAL_DB_GET_FAILED proposal_id=%s error=%s", pid, str(e)[:200])
@@ -4280,6 +4290,7 @@ def _admin_evolution_get_proposal(proposal_id: str) -> Optional[Dict[str, Any]]:
     with _ADMIN_EVOLUTION_PROPOSAL_LOCK:
         row = _ADMIN_EVOLUTION_PROPOSALS.get(pid)
         return _admin_evolution_public_row(row) if isinstance(row, dict) else None
+
 
 
 def _admin_evolution_list_proposals(*, status: Optional[str] = None, org_slug: Optional[str] = None) -> List[Dict[str, Any]]:
@@ -4302,6 +4313,12 @@ def _admin_evolution_list_proposals(*, status: Optional[str] = None, org_slug: O
             sql += " ORDER BY updated_at DESC LIMIT 200"
             rows = db.execute(text(sql), params).mappings().all()
             return [_admin_evolution_mapping_to_public(x) for x in rows]
+        except SQLAlchemyTimeoutError as e:
+            try:
+                logger.exception("ADMIN_EVOLUTION_PROPOSAL_DB_LIST_TIMEOUT error=%s", str(e)[:200])
+            except Exception:
+                pass
+            raise HTTPException(status_code=503, detail="evolution_db_unavailable")
         except Exception as e:
             try:
                 logger.exception("ADMIN_EVOLUTION_PROPOSAL_DB_LIST_FAILED error=%s", str(e)[:200])
@@ -4324,6 +4341,7 @@ def _admin_evolution_list_proposals(*, status: Optional[str] = None, org_slug: O
         out.append(_admin_evolution_public_row(row))
     out.sort(key=lambda x: int(x.get("updated_at") or 0), reverse=True)
     return out
+
 
 
 def _admin_evolution_update_status(proposal_id: str, *, status: str, actor: str) -> Dict[str, Any]:
@@ -4461,6 +4479,12 @@ def _admin_evolution_list_executions(*, proposal_id: Optional[str] = None, statu
             d["result"] = _admin_evolution_json_load(d.pop("result_json", None), {})
             out.append(_admin_evolution_public_row(d))
         return out
+    except SQLAlchemyTimeoutError as e:
+        try:
+            logger.exception("ADMIN_EVOLUTION_EXECUTION_DB_LIST_TIMEOUT error=%s", str(e)[:200])
+        except Exception:
+            pass
+        raise HTTPException(status_code=503, detail="evolution_db_unavailable")
     except Exception as e:
         try:
             logger.exception("ADMIN_EVOLUTION_EXECUTION_DB_LIST_FAILED error=%s", str(e)[:200])
@@ -4478,6 +4502,7 @@ def _admin_evolution_list_executions(*, proposal_id: Optional[str] = None, statu
 # ================================
 # AO-16 — Controlled Evolution Dry-Run Runner
 # ================================
+
 
 def _admin_evolution_default_smoke_checklist(proposal: Dict[str, Any]) -> List[str]:
     base = [
@@ -4653,6 +4678,16 @@ def _admin_evolution_create_dry_run_execution(
             pass
     except HTTPException:
         raise
+    except SQLAlchemyTimeoutError as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        try:
+            logger.exception("ADMIN_EVOLUTION_DRY_RUN_DB_TIMEOUT proposal_id=%s error=%s", pid, str(e)[:240])
+        except Exception:
+            pass
+        raise HTTPException(status_code=503, detail="evolution_db_unavailable")
     except Exception as e:
         try:
             db.rollback()
@@ -4669,7 +4704,17 @@ def _admin_evolution_create_dry_run_execution(
         except Exception:
             pass
 
-    fresh = _admin_evolution_get_proposal(pid) or proposal
+    try:
+        fresh = _admin_evolution_get_proposal(pid) or proposal
+    except HTTPException as e:
+        if getattr(e, "status_code", None) == 503:
+            try:
+                logger.exception("ADMIN_EVOLUTION_DRY_RUN_FRESH_LOOKUP_UNAVAILABLE proposal_id=%s", pid)
+            except Exception:
+                pass
+            fresh = proposal
+        else:
+            raise
     return {
         "ok": True,
         "mode": "controlled_dry_run",
@@ -23430,6 +23475,15 @@ def admin_evolution_proposal_dry_run(
     if isinstance(_admin, dict):
         actor = str(_admin.get("email") or _admin.get("sub") or "")
     org = get_org(x_org_slug)
+    try:
+        logger.info(
+            "ADMIN_EVOLUTION_DRY_RUN_REQUEST proposal_id=%s org=%s actor=%s",
+            proposal_id,
+            org,
+            actor,
+        )
+    except Exception:
+        pass
     return _admin_evolution_create_dry_run_execution(proposal_id, actor=actor, org_slug=org)
 
 
