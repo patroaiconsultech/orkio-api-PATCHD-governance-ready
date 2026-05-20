@@ -23428,19 +23428,149 @@ def admin_evolution_executions(
     }
 
 
+# ================================
+# AO-17A — Branch/PR Runner Governado: contrato read-only
+# ================================
+
+def _admin_evolution_build_branch_pr_plan(proposal: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    AO-17A: plano governado para futura execução em branch/PR.
+
+    Este helper é deliberadamente read-only:
+    - não cria branch;
+    - não escreve em repositório;
+    - não cria commit;
+    - não abre PR;
+    - não faz merge;
+    - não faz deploy;
+    - não executa migration.
+
+    Ele apenas transforma o dry-run aprovado em contrato visível para o Admin.
+    """
+    p = proposal if isinstance(proposal, dict) else {}
+    proposal_id = str(p.get("proposal_id") or "").strip()
+    execution_id = str(p.get("execution_id") or "").strip()
+    execution_status = str(p.get("execution_status") or "not_started").strip()
+    status = str(p.get("status") or p.get("proposal_status") or "").strip()
+    dry_run_completed = execution_status == "dry_run_completed"
+    title = str(p.get("title") or "Proposta de evolução controlada").strip()
+    risk = str(p.get("risk") or "baixo_medio").strip()
+    rollback_plan = str(p.get("rollback_plan") or "").strip()
+
+    branch_slug = re.sub(r"[^a-z0-9._-]+", "-", proposal_id.lower()).strip("-") or "proposal"
+    suggested_branch = f"ao-17/{branch_slug}"
+
+    return {
+        "ok": True,
+        "stage": "AO-17A",
+        "mode": "branch_pr_runner_plan_readonly",
+        "proposal_id": proposal_id,
+        "proposal_status": status,
+        "execution_id": execution_id,
+        "execution_status": execution_status,
+        "dry_run_completed": dry_run_completed,
+        "can_prepare_branch_pr": dry_run_completed,
+        "can_create_branch": False,
+        "can_write_repository": False,
+        "can_commit": False,
+        "can_open_pr": False,
+        "can_merge": False,
+        "can_deploy": False,
+        "can_run_migration": False,
+        "execution_enabled": False,
+        "can_execute_real": False,
+        "write_allowed": False,
+        "suggested_branch": suggested_branch,
+        "suggested_pr_title": f"AO-17: {title}",
+        "risk": risk,
+        "required_before_branch_write": [
+            "Admin confirma que o dry-run AO-16 foi concluído e revisado.",
+            "Diff preview, smoke_plan e rollback_plan foram aceitos.",
+            "Runner escreve somente em branch temporária.",
+            "Runner nunca escreve direto em main.",
+            "Nenhum deploy automático é permitido.",
+            "Nenhuma migration automática é permitida.",
+            "Build e smoke devem rodar antes de qualquer merge.",
+            "Rollback plan deve existir antes de qualquer deploy.",
+        ],
+        "branch_contract": {
+            "write_scope": "branch_only",
+            "main_branch_write_allowed": False,
+            "force_push_allowed": False,
+            "direct_deploy_allowed": False,
+            "migration_allowed": False,
+            "requires_admin_approval_before_write": True,
+            "requires_admin_approval_before_merge": True,
+            "requires_admin_approval_before_deploy": True,
+        },
+        "rollback_contract": {
+            "rollback_plan_required": True,
+            "rollback_dry_run_required": True,
+            "restore_previous_version_button": "planned_AO-18",
+            "rollback_without_admin_approval": False,
+            "rollback_plan": rollback_plan,
+        },
+        "smoke_contract": {
+            "build_required": True,
+            "smoke_required": True,
+            "admin_review_required": True,
+            "minimum_checks": [
+                "Build WEB/API compila.",
+                "Admin Evolution abre.",
+                "Fluxo de auth permanece funcional.",
+                "Proposal/dry-run/executions permanecem funcionais.",
+                "Nenhuma escrita direta em main ocorreu.",
+                "Nenhum deploy automático ocorreu.",
+            ],
+        },
+        "blocked_actions": [
+            "write_repository",
+            "write_main_branch",
+            "commit",
+            "open_pr",
+            "merge",
+            "deploy",
+            "migration",
+        ],
+        "next_required_stage": (
+            "AO-17B branch creation only after explicit Admin approval"
+            if dry_run_completed
+            else "AO-16 dry-run must be completed before AO-17 branch/PR plan"
+        ),
+        "message": (
+            "AO-17A pronto para revisão: dry-run concluído; próxima etapa pode preparar branch/PR, ainda sem escrita real."
+            if dry_run_completed
+            else "AO-17A aguardando dry-run concluído antes de preparar branch/PR."
+        ),
+    }
+
+
 @app.get("/api/admin/evolution/proposals/{proposal_id}/execution-plan")
 def admin_evolution_proposal_execution_plan(
     proposal_id: str,
     _admin=Depends(require_admin_access),
 ):
     """
-    AO-16: provides a controlled dry-run plan bridge for Admin visibility.
-    It confirms that approval does not automatically execute anything.
+    AO-16/AO-17A: provides a controlled dry-run plan bridge for Admin visibility.
+    It confirms that approval does not automatically execute anything and,
+    after dry-run completion, exposes the read-only Branch/PR plan contract.
     """
     row = _admin_evolution_get_proposal(proposal_id)
     if not row:
         raise HTTPException(status_code=404, detail="proposal_not_found")
+
     can_dry_run = bool(row.get("can_dry_run"))
+    execution_status = str(row.get("execution_status") or "not_started").strip()
+    dry_run_completed = execution_status == "dry_run_completed"
+    branch_pr_plan = _admin_evolution_build_branch_pr_plan(row)
+
+    if dry_run_completed:
+        next_stage = "AO-17A branch/pr plan review (read-only)"
+    elif can_dry_run:
+        next_stage = "AO-16 controlled dry-run"
+    else:
+        next_stage = row.get("next_state") or "readonly"
+
     return {
         "ok": True,
         "proposal_id": proposal_id,
@@ -23449,13 +23579,46 @@ def admin_evolution_proposal_execution_plan(
         "can_execute_real": False,
         "can_dry_run": can_dry_run,
         "dry_run_endpoint": f"/api/admin/evolution/proposals/{proposal_id}/dry-run",
-        "execution_status": row.get("execution_status") or "not_started",
-        "next_required_stage": "AO-16 controlled dry-run" if can_dry_run else row.get("next_state") or "readonly",
+        "execution_status": execution_status,
+        "next_required_stage": next_stage,
         "smoke_tests_required": True,
         "rollback_plan_required": True,
-        "message": "AO-16 permite dry-run governado. Não executa escrita, commit, deploy ou migration.",
+        "branch_pr_plan_required": dry_run_completed,
+        "can_prepare_branch_pr": bool(branch_pr_plan.get("can_prepare_branch_pr")),
+        "branch_pr_plan_endpoint": f"/api/admin/evolution/proposals/{proposal_id}/branch-pr-plan",
+        "branch_pr_plan": branch_pr_plan,
+        "message": (
+            "AO-17A disponível em modo read-only: branch/PR somente após aprovação Admin explícita."
+            if dry_run_completed
+            else "AO-16 permite dry-run governado. Não executa escrita, commit, deploy ou migration."
+        ),
         "rollback_plan": row.get("rollback_plan") or "",
         "checklist": row.get("checklist") or [],
+    }
+
+
+@app.get("/api/admin/evolution/proposals/{proposal_id}/branch-pr-plan")
+def admin_evolution_proposal_branch_pr_plan(
+    proposal_id: str,
+    _admin=Depends(require_admin_access),
+):
+    """
+    AO-17A: read-only Branch/PR Runner plan.
+
+    This endpoint does not create branches, write files, commit, open PRs,
+    merge, deploy or run migrations. It only exposes the next-stage contract.
+    """
+    row = _admin_evolution_get_proposal(proposal_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="proposal_not_found")
+    plan = _admin_evolution_build_branch_pr_plan(row)
+    return {
+        "ok": True,
+        "execution_enabled": False,
+        "can_execute_real": False,
+        "write_allowed": False,
+        "mode": "branch_pr_runner_plan_readonly",
+        "plan": plan,
     }
 
 
