@@ -23622,6 +23622,419 @@ def admin_evolution_proposal_branch_pr_plan(
     }
 
 
+# ================================
+# AO-17B-CREATE — Criação governada de branch temporária
+# ================================
+
+class AdminEvolutionBranchCreateRequest(BaseModel):
+    branch: Optional[str] = None
+    repo_target: Optional[str] = "both"
+
+
+def _admin_evolution_is_ao17b_branch_creation_proposal(proposal: Dict[str, Any]) -> bool:
+    p = proposal if isinstance(proposal, dict) else {}
+    title = str(p.get("title") or "").strip().lower()
+    summary = str(p.get("summary") or "").strip().lower()
+    source = str(p.get("source_message") or "").strip().lower()
+    text_value = "\n".join([title, summary, source])
+    return (
+        "ao-17b" in text_value
+        and (
+            "branch tempor" in text_value
+            or "criação governada de branch" in text_value
+            or "criacao governada de branch" in text_value
+            or "branch creation" in text_value
+        )
+    )
+
+
+def _admin_evolution_safe_branch_name(value: Any, proposal_id: str) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        branch_slug = re.sub(r"[^a-z0-9._-]+", "-", str(proposal_id or "").lower()).strip("-") or "proposal"
+        raw = f"ao-17/{branch_slug}"
+
+    raw = raw.replace("refs/heads/", "").strip().strip("/")
+    raw = re.sub(r"\s+", "-", raw)
+
+    if not raw.startswith("ao-17/"):
+        raw = f"ao-17/{raw}"
+
+    if (
+        not raw
+        or raw.startswith("/")
+        or raw.endswith("/")
+        or ".." in raw
+        or "\\" in raw
+        or not re.fullmatch(r"[A-Za-z0-9._/\-]+", raw)
+    ):
+        raise HTTPException(status_code=400, detail="unsafe_branch_name")
+
+    return raw
+
+
+def _admin_evolution_branch_repo_targets(repo_target: Optional[str]) -> List[Dict[str, str]]:
+    wanted = str(repo_target or "both").strip().lower()
+    if wanted in {"", "default", "auto"}:
+        wanted = "both"
+
+    targets: List[Dict[str, str]] = []
+    seen: set = set()
+
+    def _add(kind: str, repo: str) -> None:
+        repo_slug = _github_normalize_repo_slug(repo)
+        if not repo_slug or repo_slug.lower() in seen:
+            return
+        seen.add(repo_slug.lower())
+        targets.append({"kind": kind, "repo": repo_slug})
+
+    if wanted in {"both", "all", "backend", "api"}:
+        _add("backend", _github_backend_repo())
+
+    if wanted in {"both", "all", "frontend", "web", "ui"}:
+        _add("frontend", _github_frontend_repo())
+
+    # Fallback seguro: se só houver um repo legado configurado, usa o backend resolver.
+    if not targets and wanted in {"both", "all"}:
+        _add("backend", _github_backend_repo())
+
+    return targets
+
+
+def _admin_evolution_record_branch_create_execution(
+    *,
+    proposal: Dict[str, Any],
+    receipt: Dict[str, Any],
+    actor: str,
+    org_slug: str,
+) -> Dict[str, Any]:
+    """Registra receipt auditável da criação de branch sem alterar status do dry-run."""
+    pid = str(proposal.get("proposal_id") or "").strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="proposal_id_required")
+
+    execution_id = str(receipt.get("execution_id") or "").strip() or ("exec_" + uuid.uuid4().hex[:12])
+    receipt["execution_id"] = execution_id
+
+    if not _admin_evolution_bootstrap_db_schema():
+        receipt["audit_recorded"] = False
+        receipt["audit_record_error"] = "evolution_schema_unavailable"
+        return receipt
+
+    now = _admin_evolution_now()
+    status = "branch_created" if bool(receipt.get("ok")) else "branch_create_failed"
+    smoke_plan = [
+        "Branch temporária criada ou confirmada como existente.",
+        "Nenhum arquivo foi escrito.",
+        "Nenhum commit foi criado.",
+        "Nenhum PR foi aberto.",
+        "Nenhum merge foi executado.",
+        "Nenhum deploy foi executado.",
+        "Nenhuma migration foi executada.",
+        "main permaneceu sem escrita direta.",
+    ]
+
+    db = SessionLocal()
+    try:
+        db.execute(text("""
+            INSERT INTO admin_evolution_executions (
+                execution_id, proposal_id, org_slug, status, mode, created_by, approved_by,
+                risk, rollback_plan, smoke_checklist_json, result_json,
+                created_at, updated_at, started_at, finished_at
+            ) VALUES (
+                :execution_id, :proposal_id, :org_slug, :status, :mode, :created_by, :approved_by,
+                :risk, :rollback_plan, :smoke_checklist_json, :result_json,
+                :created_at, :updated_at, :started_at, :finished_at
+            )
+        """), {
+            "execution_id": execution_id,
+            "proposal_id": pid,
+            "org_slug": org_slug,
+            "status": status,
+            "mode": "ao17b_branch_create_only",
+            "created_by": str(actor or ""),
+            "approved_by": str(proposal.get("approved_by") or ""),
+            "risk": str(proposal.get("risk") or "baixo_medio"),
+            "rollback_plan": str(receipt.get("rollback_plan") or proposal.get("rollback_plan") or ""),
+            "smoke_checklist_json": _admin_evolution_json_dump(smoke_plan),
+            "result_json": _admin_evolution_json_dump(receipt),
+            "created_at": now,
+            "updated_at": now,
+            "started_at": now,
+            "finished_at": now,
+        })
+        db.execute(text("""
+            UPDATE admin_evolution_proposals
+            SET updated_at = :updated_at
+            WHERE proposal_id = :proposal_id
+        """), {
+            "proposal_id": pid,
+            "updated_at": now,
+        })
+        db.commit()
+        receipt["audit_recorded"] = True
+        receipt["audit_execution_status"] = status
+        return receipt
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        try:
+            logger.exception(
+                "ADMIN_EVOLUTION_AO17B_BRANCH_RECEIPT_RECORD_FAILED proposal_id=%s execution_id=%s error=%s",
+                pid,
+                execution_id,
+                str(e)[:240],
+            )
+        except Exception:
+            pass
+        receipt["audit_recorded"] = False
+        receipt["audit_record_error"] = str(e)[:240]
+        return receipt
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+def _admin_evolution_create_governed_branch(
+    proposal_id: str,
+    *,
+    actor: str = "",
+    org_slug: Optional[str] = None,
+    branch_override: Optional[str] = None,
+    repo_target: Optional[str] = "both",
+) -> Dict[str, Any]:
+    pid = str(proposal_id or "").strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="proposal_id_required")
+
+    proposal = _admin_evolution_get_proposal(pid)
+    if not proposal:
+        raise HTTPException(status_code=404, detail="proposal_not_found")
+
+    if str(proposal.get("status") or "").strip().lower() != "approved":
+        raise HTTPException(status_code=409, detail="proposal_must_be_approved_before_branch_creation")
+
+    if str(proposal.get("execution_status") or "").strip().lower() != "dry_run_completed":
+        raise HTTPException(status_code=409, detail="dry_run_must_be_completed_before_branch_creation")
+
+    if not _admin_evolution_is_ao17b_branch_creation_proposal(proposal):
+        raise HTTPException(status_code=409, detail="proposal_not_ao17b_branch_creation")
+
+    plan = _admin_evolution_build_branch_pr_plan(proposal)
+    suggested_branch = str(plan.get("suggested_branch") or "").strip()
+    branch_name = _admin_evolution_safe_branch_name(branch_override or suggested_branch, pid)
+    org = str(org_slug or proposal.get("org_slug") or "public").strip() or "public"
+    trace_id = f"ao17b_{pid}_{uuid.uuid4().hex[:8]}"
+
+    targets = _admin_evolution_branch_repo_targets(repo_target)
+    if not targets:
+        diagnostics = _github_repo_config_diagnostics(repo_target=repo_target)
+        receipt = {
+            "ok": False,
+            "stage": "AO-17B-CREATE",
+            "mode": "branch_creation_only",
+            "proposal_id": pid,
+            "proposal_status": proposal.get("status"),
+            "execution_status": proposal.get("execution_status"),
+            "branch": branch_name,
+            "branch_name": branch_name,
+            "branch_created": False,
+            "branch_already_exists": False,
+            "repo_receipts": [],
+            "repo_config": diagnostics,
+            "execution_enabled": False,
+            "can_execute_real": False,
+            "can_write_repository": False,
+            "can_commit": False,
+            "can_open_pr": False,
+            "can_merge": False,
+            "can_deploy": False,
+            "can_run_migration": False,
+            "write_allowed": False,
+            "file_write_allowed": False,
+            "commit_allowed": False,
+            "deploy_allowed": False,
+            "migration_allowed": False,
+            "main_branch_write_allowed": False,
+            "blocked_actions": ["write_files", "commit", "open_pr", "merge", "deploy", "migration", "main_branch_write"],
+            "message": "Nenhum repositório GitHub válido configurado para criação de branch.",
+            "trace_id": trace_id,
+        }
+        return _admin_evolution_record_branch_create_execution(
+            proposal=proposal,
+            receipt=receipt,
+            actor=actor,
+            org_slug=org,
+        )
+
+    governance = {
+        # Autorização interna restrita ao action=create_branch.
+        # O receipt externo mantém escrita de arquivo/commit/PR/deploy bloqueados.
+        "patch_mode": "approved_apply",
+        "write_allowed": True,
+        "human_approval_required": True,
+        "human_approved": True,
+        "approval_id": f"ao17b:{pid}",
+        "audit_receipt_id": f"ao17b:{pid}",
+        "risk_level": str(proposal.get("risk") or "baixo_medio"),
+        "allowed_action": "create_branch_only",
+        "proposal_id": pid,
+    }
+
+    repo_receipts: List[Dict[str, Any]] = []
+    for target in targets:
+        kind = str(target.get("kind") or "repo")
+        repo = str(target.get("repo") or "")
+        try:
+            result = _github_create_branch_capability(
+                branch=branch_name,
+                repo_target=kind,
+                user_text=f"AO-17B create governed temporary branch only for proposal {pid} in {kind}. No files, commit, PR, merge, deploy or migration.",
+                trace_id=trace_id,
+                governance=governance,
+            )
+        except Exception as e:
+            result = {
+                "handled": True,
+                "success": False,
+                "provider": "github",
+                "repo": repo,
+                "branch": branch_name,
+                "message": f"Falha inesperada ao criar branch governada: {str(e)[:220]}",
+            }
+
+        msg = str(result.get("message") or "")
+        msg_low = msg.lower()
+        already_exists = ("já existe" in msg_low) or ("ja existe" in msg_low) or ("already exists" in msg_low)
+        branch_created = bool(result.get("success"))
+        ok = branch_created or already_exists
+
+        repo_receipts.append({
+            "ok": ok,
+            "repo_kind": kind,
+            "repo": str(result.get("repo") or repo),
+            "branch": str(result.get("branch") or branch_name),
+            "base_branch": str(result.get("base_branch") or ""),
+            "verified_ref": str(result.get("verified_ref") or ""),
+            "commit_sha": str(result.get("commit_sha") or ""),
+            "branch_created": branch_created,
+            "branch_already_exists": already_exists,
+            "github_repo_status": result.get("github_repo_status"),
+            "github_ref_status": result.get("github_ref_status"),
+            "github_branch_status": result.get("github_branch_status"),
+            "token_present": result.get("token_present"),
+            "token_source": result.get("token_source"),
+            "token_fingerprint": result.get("token_fingerprint"),
+            "message": msg,
+            "raw_success": bool(result.get("success")),
+        })
+
+    ok = bool(repo_receipts) and all(bool(x.get("ok")) for x in repo_receipts)
+    branch_created = any(bool(x.get("branch_created")) for x in repo_receipts)
+    branch_already_exists = bool(repo_receipts) and all(bool(x.get("branch_already_exists")) or bool(x.get("branch_created")) for x in repo_receipts)
+
+    receipt = {
+        "ok": ok,
+        "stage": "AO-17B-CREATE",
+        "mode": "branch_creation_only",
+        "proposal_id": pid,
+        "proposal_status": proposal.get("status"),
+        "execution_status": proposal.get("execution_status"),
+        "dry_run_completed": True,
+        "branch": branch_name,
+        "branch_name": branch_name,
+        "suggested_branch": branch_name,
+        "branch_created": branch_created,
+        "branch_already_exists": branch_already_exists and not branch_created,
+        "repo_receipts": repo_receipts,
+        "trace_id": trace_id,
+        "execution_enabled": False,
+        "can_execute_real": False,
+        "branch_create_allowed": True,
+        "can_create_branch_again": False,
+        "can_write_repository": False,
+        "can_commit": False,
+        "can_open_pr": False,
+        "can_merge": False,
+        "can_deploy": False,
+        "can_run_migration": False,
+        "write_allowed": False,
+        "file_write_allowed": False,
+        "commit_allowed": False,
+        "deploy_allowed": False,
+        "migration_allowed": False,
+        "main_branch_write_allowed": False,
+        "blocked_actions": ["write_files", "commit", "open_pr", "merge", "deploy", "migration", "main_branch_write"],
+        "rollback_plan": (
+            "Cleanup seguro: deletar somente a branch temporária criada neste receipt "
+            f"({branch_name}), sem tocar main, commits, PRs, deploys ou migrations."
+        ),
+        "next_required_stage": "AO-17C file write only after explicit Admin approval and patch artifact validation",
+        "message": (
+            "Branch temporária criada/confirmada. Nenhum arquivo, commit, PR, merge, deploy ou migration foi executado."
+            if ok
+            else "Falha ao criar/confirmar branch temporária. Nenhum arquivo, commit, PR, merge, deploy ou migration foi executado."
+        ),
+    }
+
+    try:
+        logger.info(
+            "ADMIN_EVOLUTION_AO17B_BRANCH_CREATE proposal_id=%s branch=%s ok=%s repos=%s actor=%s trace_id=%s",
+            pid,
+            branch_name,
+            ok,
+            ",".join([str(x.get("repo") or "") for x in repo_receipts]),
+            actor,
+            trace_id,
+        )
+    except Exception:
+        pass
+
+    return _admin_evolution_record_branch_create_execution(
+        proposal=proposal,
+        receipt=receipt,
+        actor=actor,
+        org_slug=org,
+    )
+
+
+@app.post("/api/admin/evolution/proposals/{proposal_id}/create-branch")
+def admin_evolution_proposal_create_branch(
+    proposal_id: str,
+    body: Optional[AdminEvolutionBranchCreateRequest] = None,
+    x_org_slug: Optional[str] = Header(default=None),
+    _admin=Depends(require_admin_access),
+):
+    """
+    AO-17B-CREATE: cria somente branch temporária governada.
+
+    Contrato:
+    - exige proposta AO-17B approved;
+    - exige dry_run_completed;
+    - cria/confirmar apenas branch temporária;
+    - não escreve arquivos;
+    - não cria commit;
+    - não abre PR;
+    - não faz merge/deploy/migration.
+    """
+    actor = ""
+    if isinstance(_admin, dict):
+        actor = str(_admin.get("email") or _admin.get("sub") or "")
+    org = get_org(x_org_slug)
+    body_obj = body if isinstance(body, AdminEvolutionBranchCreateRequest) else AdminEvolutionBranchCreateRequest()
+    return _admin_evolution_create_governed_branch(
+        proposal_id,
+        actor=actor,
+        org_slug=org,
+        branch_override=body_obj.branch,
+        repo_target=body_obj.repo_target or "both",
+    )
+
+
 @app.post("/api/admin/evolution/proposals/{proposal_id}/dry-run")
 def admin_evolution_proposal_dry_run(
     proposal_id: str,
