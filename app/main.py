@@ -23546,7 +23546,7 @@ def _admin_evolution_build_branch_pr_plan(proposal: Dict[str, Any]) -> Dict[str,
             "dry_run_completed": dry_run_completed,
             "can_prepare_branch_pr": False,
             "can_prepare_branch_patch": dry_run_completed,
-            "can_apply_branch_patch": False,
+            "can_apply_branch_patch": dry_run_completed,
             "can_revert_branch_patch": False,
             "can_restore_previous_version": False,
             "can_create_branch": False,
@@ -24245,6 +24245,734 @@ def admin_evolution_proposal_create_branch(
         branch_override=body_obj.branch,
         repo_target=body_obj.repo_target or "both",
     )
+
+
+# ================================
+# AO-17C/AO-18A — Patch governado na branch com restore point permanente
+# ================================
+
+class AdminEvolutionBranchPatchFile(BaseModel):
+    repo_kind: Optional[str] = "backend"
+    path: str
+    content: str
+
+
+class AdminEvolutionBranchPatchApplyRequest(BaseModel):
+    branch: Optional[str] = None
+    repo_target: Optional[str] = "both"
+    files: Optional[List[AdminEvolutionBranchPatchFile]] = None
+    confirm_restore_point: Optional[bool] = True
+
+
+class AdminEvolutionBranchPatchRevertRequest(BaseModel):
+    restore_point_id: Optional[str] = None
+    execution_id: Optional[str] = None
+    repo_target: Optional[str] = "both"
+
+
+def _admin_evolution_safe_patch_file_path(path: Any) -> str:
+    p = str(path or "").strip()
+    if not _github_safe_path(p):
+        raise HTTPException(status_code=400, detail="unsafe_patch_file_path")
+    low = p.lower()
+    blocked_exact = {".env", ".env.local", ".env.production", ".npmrc", ".pypirc"}
+    blocked_fragments = ("/.env", "secret", "secrets", "private_key", "id_rsa", "id_dsa", "id_ed25519")
+    blocked_prefixes = (".git/", ".github/workflows/", "alembic/versions/")
+    blocked_suffixes = (
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".ico", ".pdf", ".zip", ".tar", ".gz",
+        ".mp3", ".mp4", ".mov", ".avi", ".wav", ".ogg", ".ttf", ".woff", ".woff2",
+        ".bin", ".exe", ".dll", ".so", ".dylib"
+    )
+    if low in blocked_exact or any(low.startswith(x) for x in blocked_prefixes):
+        raise HTTPException(status_code=400, detail="blocked_patch_file_path")
+    if any(x in low for x in blocked_fragments):
+        raise HTTPException(status_code=400, detail="blocked_sensitive_patch_file_path")
+    if any(low.endswith(x) for x in blocked_suffixes):
+        raise HTTPException(status_code=400, detail="blocked_binary_patch_file_path")
+    return p
+
+
+def _admin_evolution_patch_repo_kind(value: Any) -> str:
+    kind = str(value or "backend").strip().lower()
+    if kind in {"api", "backend"}:
+        return "backend"
+    if kind in {"web", "frontend", "ui"}:
+        return "frontend"
+    raise HTTPException(status_code=400, detail="invalid_repo_kind")
+
+
+def _admin_evolution_decode_github_content(body: Dict[str, Any]) -> str:
+    try:
+        raw = str((body or {}).get("content") or "")
+        if not raw:
+            return ""
+        return base64.b64decode(raw.encode("utf-8")).decode("utf-8", errors="replace")
+    except Exception:
+        return ""
+
+
+def _admin_evolution_github_read_snapshot(*, repo_kind: str, branch: str, path: str) -> Dict[str, Any]:
+    kind = _admin_evolution_patch_repo_kind(repo_kind)
+    safe_path = _admin_evolution_safe_patch_file_path(path)
+    repo, resolved_branch, token, resolved_kind = _github_resolve_repo_branch(
+        branch=branch,
+        repo_target=kind,
+        user_text=f"AO-17C read snapshot in {kind}",
+    )
+    resolved_branch = re.sub(r"^refs/heads/", "", str(resolved_branch or "").strip())
+    if not token or not repo:
+        return {
+            "ok": False,
+            "repo_kind": kind,
+            "repo": repo,
+            "branch": resolved_branch,
+            "path": safe_path,
+            "message": "GitHub capability não está habilitada no ambiente.",
+        }
+    if not resolved_branch.startswith("ao-17/"):
+        return {
+            "ok": False,
+            "repo_kind": kind,
+            "repo": repo,
+            "branch": resolved_branch,
+            "path": safe_path,
+            "message": "Branch alvo não é uma branch temporária AO-17.",
+        }
+    status, body = _github_api_json(
+        "GET",
+        f"https://api.github.com/repos/{repo}/contents/{safe_path}?ref={resolved_branch}",
+        None,
+    )
+    if status == 404:
+        return {
+            "ok": True,
+            "repo_kind": kind,
+            "repo": repo,
+            "branch": resolved_branch,
+            "path": safe_path,
+            "exists": False,
+            "sha": "",
+            "content": "",
+            "size_bytes": 0,
+            "message": "Arquivo ainda não existe na branch alvo.",
+        }
+    if status != 200 or not isinstance(body, dict):
+        return {
+            "ok": False,
+            "repo_kind": kind,
+            "repo": repo,
+            "branch": resolved_branch,
+            "path": safe_path,
+            "status": status,
+            "message": (body.get("message") if isinstance(body, dict) else None) or "Falha ao ler snapshot no GitHub.",
+        }
+    if str(body.get("type") or "file") != "file":
+        return {
+            "ok": False,
+            "repo_kind": kind,
+            "repo": repo,
+            "branch": resolved_branch,
+            "path": safe_path,
+            "status": status,
+            "message": "O caminho alvo não é um arquivo textual.",
+        }
+    content = _admin_evolution_decode_github_content(body)
+    return {
+        "ok": True,
+        "repo_kind": kind,
+        "repo": repo,
+        "branch": resolved_branch,
+        "path": safe_path,
+        "exists": True,
+        "sha": str(body.get("sha") or "").strip(),
+        "content": content,
+        "size_bytes": int(body.get("size") or len(content.encode("utf-8", errors="replace"))),
+        "message": "Snapshot anterior capturado.",
+    }
+
+
+def _admin_evolution_github_put_file_from_snapshot(
+    *,
+    snapshot: Dict[str, Any],
+    content: str,
+    message: str,
+    trace_id: str,
+) -> Dict[str, Any]:
+    if not _github_write_runtime_enabled():
+        return {
+            "ok": False,
+            "repo_kind": snapshot.get("repo_kind"),
+            "repo": snapshot.get("repo"),
+            "branch": snapshot.get("branch"),
+            "path": snapshot.get("path"),
+            "message": "GitHub write runtime desabilitado por ambiente.",
+        }
+
+    repo = str(snapshot.get("repo") or "").strip()
+    branch = str(snapshot.get("branch") or "").strip()
+    path = _admin_evolution_safe_patch_file_path(snapshot.get("path"))
+    if not repo or not branch.startswith("ao-17/"):
+        return {"ok": False, "repo": repo, "branch": branch, "path": path, "message": "Destino GitHub inválido para patch governado."}
+
+    payload: Dict[str, Any] = {
+        "message": message + (f" [{trace_id}]" if trace_id else ""),
+        "content": base64.b64encode(str(content or "").encode("utf-8")).decode("ascii"),
+        "branch": branch,
+    }
+    if snapshot.get("exists") and snapshot.get("sha"):
+        payload["sha"] = str(snapshot.get("sha") or "")
+
+    status, body = _github_api_json("PUT", f"https://api.github.com/repos/{repo}/contents/{path}", payload)
+    if status not in (200, 201):
+        return {
+            "ok": False,
+            "repo_kind": snapshot.get("repo_kind"),
+            "repo": repo,
+            "branch": branch,
+            "path": path,
+            "status": status,
+            "message": (body.get("message") if isinstance(body, dict) else None) or "Falha ao escrever arquivo na branch.",
+        }
+
+    commit_sha = str((((body or {}).get("commit") or {}).get("sha") or "")).strip()
+    verified, _, verify_body = _github_verify_file_exists(repo, branch, path)
+    return {
+        "ok": bool(verified),
+        "repo_kind": snapshot.get("repo_kind"),
+        "repo": repo,
+        "branch": branch,
+        "path": path,
+        "status": status,
+        "commit_sha": commit_sha,
+        "file_sha": str((verify_body or {}).get("sha") or "").strip(),
+        "message": "Arquivo escrito na branch com confirmação verificável." if verified else "Escrita enviada, mas verificação final não confirmou o arquivo.",
+    }
+
+
+def _admin_evolution_github_delete_file_from_snapshot(
+    *,
+    snapshot: Dict[str, Any],
+    message: str,
+    trace_id: str,
+) -> Dict[str, Any]:
+    if not _github_write_runtime_enabled():
+        return {
+            "ok": False,
+            "repo_kind": snapshot.get("repo_kind"),
+            "repo": snapshot.get("repo"),
+            "branch": snapshot.get("branch"),
+            "path": snapshot.get("path"),
+            "message": "GitHub write runtime desabilitado por ambiente.",
+        }
+
+    repo = str(snapshot.get("repo") or "").strip()
+    branch = str(snapshot.get("branch") or "").strip()
+    path = _admin_evolution_safe_patch_file_path(snapshot.get("path"))
+    current = _admin_evolution_github_read_snapshot(repo_kind=str(snapshot.get("repo_kind") or ""), branch=branch, path=path)
+    if not current.get("ok"):
+        return current
+    if not current.get("exists"):
+        return {
+            "ok": True,
+            "repo_kind": snapshot.get("repo_kind"),
+            "repo": repo,
+            "branch": branch,
+            "path": path,
+            "deleted": False,
+            "message": "Arquivo já ausente; reversão não precisou deletar.",
+        }
+
+    payload = {
+        "message": message + (f" [{trace_id}]" if trace_id else ""),
+        "sha": str(current.get("sha") or ""),
+        "branch": branch,
+    }
+    status, body = _github_api_json("DELETE", f"https://api.github.com/repos/{repo}/contents/{path}", payload)
+    if status not in (200, 202):
+        return {
+            "ok": False,
+            "repo_kind": snapshot.get("repo_kind"),
+            "repo": repo,
+            "branch": branch,
+            "path": path,
+            "status": status,
+            "message": (body.get("message") if isinstance(body, dict) else None) or "Falha ao deletar arquivo criado pelo patch.",
+        }
+
+    return {
+        "ok": True,
+        "repo_kind": snapshot.get("repo_kind"),
+        "repo": repo,
+        "branch": branch,
+        "path": path,
+        "deleted": True,
+        "commit_sha": str((((body or {}).get("commit") or {}).get("sha") or "")).strip(),
+        "message": "Arquivo criado pelo patch foi removido da branch.",
+    }
+
+
+def _admin_evolution_default_restore_point_patch_files(proposal: Dict[str, Any], *, branch: str, repo_target: Optional[str]) -> List[Dict[str, str]]:
+    pid = str(proposal.get("proposal_id") or "proposal").strip()
+    payload = {
+        "proposal_id": pid,
+        "stage": "AO-17C/AO-18A",
+        "mode": "restore_point_marker_patch",
+        "branch": branch,
+        "created_at": _admin_evolution_now(),
+        "governance": {
+            "main_branch_write_allowed": False,
+            "pr_allowed": False,
+            "merge_allowed": False,
+            "deploy_allowed": False,
+            "migration_allowed": False,
+            "restore_point_required": True,
+            "revert_available": True,
+        },
+        "message": "Marcador auditável de patch governado na branch. Não altera produto em main.",
+    }
+    content = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
+    wanted = str(repo_target or "both").strip().lower()
+    kinds: List[str] = []
+    if wanted in {"both", "all", "", "default", "auto"}:
+        kinds = ["backend", "frontend"]
+    elif wanted in {"backend", "api"}:
+        kinds = ["backend"]
+    elif wanted in {"frontend", "web", "ui"}:
+        kinds = ["frontend"]
+    else:
+        kinds = ["backend", "frontend"]
+    return [
+        {
+            "repo_kind": kind,
+            "path": f".orkio/evolution/{pid}/restore-point-marker.json",
+            "content": content,
+        }
+        for kind in kinds
+    ]
+
+
+def _admin_evolution_normalize_patch_files(
+    body: Optional[AdminEvolutionBranchPatchApplyRequest],
+    proposal: Dict[str, Any],
+    *,
+    branch: str,
+) -> List[Dict[str, str]]:
+    raw_files = list(getattr(body, "files", None) or [])
+    if not raw_files:
+        return _admin_evolution_default_restore_point_patch_files(
+            proposal,
+            branch=branch,
+            repo_target=getattr(body, "repo_target", "both") if body is not None else "both",
+        )
+
+    if len(raw_files) > 6:
+        raise HTTPException(status_code=400, detail="too_many_patch_files")
+
+    out: List[Dict[str, str]] = []
+    for item in raw_files:
+        if hasattr(item, "dict"):
+            data = item.dict()
+        elif isinstance(item, dict):
+            data = dict(item)
+        else:
+            raise HTTPException(status_code=400, detail="invalid_patch_file")
+        content = str(data.get("content") or "")
+        if len(content.encode("utf-8", errors="replace")) > 200_000:
+            raise HTTPException(status_code=400, detail="patch_file_too_large")
+        out.append({
+            "repo_kind": _admin_evolution_patch_repo_kind(data.get("repo_kind")),
+            "path": _admin_evolution_safe_patch_file_path(data.get("path")),
+            "content": content,
+        })
+    return out
+
+
+def _admin_evolution_record_branch_patch_execution(
+    *,
+    proposal: Dict[str, Any],
+    receipt: Dict[str, Any],
+    actor: str,
+    org_slug: str,
+    status: str,
+    mode: str,
+) -> Dict[str, Any]:
+    pid = str(proposal.get("proposal_id") or "").strip()
+    execution_id = str(receipt.get("execution_id") or "").strip() or ("exec_" + uuid.uuid4().hex[:12])
+    receipt["execution_id"] = execution_id
+
+    if not _admin_evolution_bootstrap_db_schema():
+        receipt["audit_recorded"] = False
+        receipt["audit_record_error"] = "evolution_schema_unavailable"
+        return receipt
+
+    now = _admin_evolution_now()
+    smoke_plan = [
+        "Patch/reversão executado somente na branch temporária AO-17.",
+        "main permaneceu bloqueada.",
+        "PR, merge, deploy e migration permaneceram bloqueados.",
+        "Restore point e receipts foram registrados.",
+    ]
+
+    db = SessionLocal()
+    try:
+        db.execute(text("""
+            INSERT INTO admin_evolution_executions (
+                execution_id, proposal_id, org_slug, status, mode, created_by, approved_by,
+                risk, rollback_plan, smoke_checklist_json, result_json,
+                created_at, updated_at, started_at, finished_at
+            ) VALUES (
+                :execution_id, :proposal_id, :org_slug, :status, :mode, :created_by, :approved_by,
+                :risk, :rollback_plan, :smoke_checklist_json, :result_json,
+                :created_at, :updated_at, :started_at, :finished_at
+            )
+        """), {
+            "execution_id": execution_id,
+            "proposal_id": pid,
+            "org_slug": org_slug,
+            "status": status,
+            "mode": mode,
+            "created_by": str(actor or ""),
+            "approved_by": str(proposal.get("approved_by") or ""),
+            "risk": str(proposal.get("risk") or "medio"),
+            "rollback_plan": str(receipt.get("rollback_plan") or proposal.get("rollback_plan") or ""),
+            "smoke_checklist_json": _admin_evolution_json_dump(smoke_plan),
+            "result_json": _admin_evolution_json_dump(receipt),
+            "created_at": now,
+            "updated_at": now,
+            "started_at": now,
+            "finished_at": now,
+        })
+        db.execute(text("""
+            UPDATE admin_evolution_proposals
+            SET updated_at = :updated_at
+            WHERE proposal_id = :proposal_id
+        """), {"proposal_id": pid, "updated_at": now})
+        db.commit()
+        receipt["audit_recorded"] = True
+        receipt["audit_execution_status"] = status
+        return receipt
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        try:
+            logger.exception("ADMIN_EVOLUTION_AO17C_PATCH_RECEIPT_RECORD_FAILED proposal_id=%s error=%s", pid, str(e)[:240])
+        except Exception:
+            pass
+        receipt["audit_recorded"] = False
+        receipt["audit_record_error"] = str(e)[:240]
+        return receipt
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+def _admin_evolution_find_latest_branch_patch_receipt(
+    *,
+    proposal_id: str,
+    org_slug: str,
+    restore_point_id: Optional[str] = None,
+    execution_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    rows = _admin_evolution_list_executions(proposal_id=proposal_id, org_slug=org_slug)
+    wanted_restore = str(restore_point_id or "").strip()
+    wanted_execution = str(execution_id or "").strip()
+    for row in rows:
+        status = str(row.get("status") or "").strip()
+        result = row.get("result") if isinstance(row.get("result"), dict) else {}
+        if status != "branch_patch_applied":
+            continue
+        if wanted_execution and str(row.get("execution_id") or "") != wanted_execution:
+            continue
+        if wanted_restore and str(result.get("restore_point_id") or "") != wanted_restore:
+            continue
+        payload = dict(result or {})
+        payload.setdefault("execution_id", str(row.get("execution_id") or ""))
+        return payload
+    return None
+
+
+def _admin_evolution_apply_branch_patch(
+    proposal_id: str,
+    *,
+    actor: str,
+    org_slug: str,
+    body: Optional[AdminEvolutionBranchPatchApplyRequest],
+) -> Dict[str, Any]:
+    pid = str(proposal_id or "").strip()
+    proposal = _admin_evolution_get_proposal(pid)
+    if not proposal:
+        raise HTTPException(status_code=404, detail="proposal_not_found")
+    if str(proposal.get("status") or "").strip().lower() != "approved":
+        raise HTTPException(status_code=409, detail="proposal_must_be_approved_before_branch_patch")
+    if str(proposal.get("execution_status") or "").strip().lower() != "dry_run_completed":
+        raise HTTPException(status_code=409, detail="dry_run_must_be_completed_before_branch_patch")
+    if not _admin_evolution_is_restore_point_stage(proposal):
+        raise HTTPException(status_code=409, detail="proposal_not_ao17c_restore_point_stage")
+
+    plan = _admin_evolution_build_branch_pr_plan(proposal)
+    target_branch = _admin_evolution_safe_branch_name(
+        getattr(body, "branch", None) or plan.get("target_branch") or plan.get("suggested_branch"),
+        pid,
+    )
+    if target_branch != str(plan.get("target_branch") or plan.get("suggested_branch") or "").strip():
+        raise HTTPException(status_code=409, detail="branch_must_match_ao17b_created_branch")
+
+    if body is not None and getattr(body, "confirm_restore_point", True) is False:
+        raise HTTPException(status_code=409, detail="restore_point_confirmation_required")
+
+    trace_id = f"ao17c_{pid}_{uuid.uuid4().hex[:8]}"
+    restore_point_id = f"rp_{pid}_{uuid.uuid4().hex[:10]}"
+    files = _admin_evolution_normalize_patch_files(body, proposal, branch=target_branch)
+
+    snapshots: List[Dict[str, Any]] = []
+    for item in files:
+        snap = _admin_evolution_github_read_snapshot(
+            repo_kind=item["repo_kind"],
+            branch=target_branch,
+            path=item["path"],
+        )
+        if not snap.get("ok"):
+            raise HTTPException(status_code=502, detail={"reason": "snapshot_failed", "file": item, "snapshot": snap})
+        snap["previous_exists"] = bool(snap.get("exists"))
+        snap["previous_sha"] = str(snap.get("sha") or "")
+        snap["previous_content"] = str(snap.get("content") or "")
+        snapshots.append({**snap, "new_content": item["content"]})
+
+    file_receipts: List[Dict[str, Any]] = []
+    for snap in snapshots:
+        result = _admin_evolution_github_put_file_from_snapshot(
+            snapshot=snap,
+            content=str(snap.get("new_content") or ""),
+            message=f"AO-17C: apply governed branch patch {pid}",
+            trace_id=trace_id,
+        )
+        file_receipts.append({
+            "ok": bool(result.get("ok")),
+            "repo_kind": snap.get("repo_kind"),
+            "repo": snap.get("repo"),
+            "branch": target_branch,
+            "path": snap.get("path"),
+            "restore_point_id": restore_point_id,
+            "previous_exists": bool(snap.get("previous_exists")),
+            "previous_sha": snap.get("previous_sha"),
+            "previous_content": snap.get("previous_content"),
+            "new_size_bytes": len(str(snap.get("new_content") or "").encode("utf-8", errors="replace")),
+            "commit_sha": result.get("commit_sha"),
+            "file_sha": result.get("file_sha"),
+            "message": result.get("message"),
+            "raw_result": result,
+        })
+
+    ok = bool(file_receipts) and all(bool(x.get("ok")) for x in file_receipts)
+    receipt = {
+        "ok": ok,
+        "stage": "AO-17C/AO-18A-APPLY",
+        "mode": "branch_patch_apply_with_restore_point",
+        "proposal_id": pid,
+        "proposal_status": proposal.get("status"),
+        "execution_status": proposal.get("execution_status"),
+        "target_branch": target_branch,
+        "branch": target_branch,
+        "restore_point_id": restore_point_id,
+        "trace_id": trace_id,
+        "file_receipts": file_receipts,
+        "restore_point": {
+            "restore_point_id": restore_point_id,
+            "target_branch": target_branch,
+            "snapshots_count": len(snapshots),
+            "persistent_after_promotion": True,
+            "revert_available": ok,
+        },
+        "branch_patch_allowed": True,
+        "technical_branch_commit_created": ok,
+        "main_branch_write_allowed": False,
+        "can_write_main": False,
+        "can_open_pr": False,
+        "can_merge": False,
+        "can_deploy": False,
+        "can_run_migration": False,
+        "can_revert_branch_patch": ok,
+        "can_restore_previous_version": False,
+        "blocked_actions": ["write_main_branch", "open_pr", "merge", "deploy", "migration"],
+        "rollback_plan": (
+            f"Reverter restore_point_id={restore_point_id} restaurando snapshots anteriores somente na branch {target_branch}. "
+            "Não tocar main, não abrir PR, não fazer merge, deploy ou migration."
+        ),
+        "next_required_stage": "AO-18A revert branch patch validation before PR/merge/deploy",
+        "message": (
+            "Patch aplicado somente na branch temporária com restore point permanente. Reversão está disponível."
+            if ok else "Falha ao aplicar patch na branch. Verifique receipts; main permaneceu bloqueada."
+        ),
+    }
+    return _admin_evolution_record_branch_patch_execution(
+        proposal=proposal,
+        receipt=receipt,
+        actor=actor,
+        org_slug=org_slug,
+        status="branch_patch_applied" if ok else "branch_patch_failed",
+        mode="ao17c_branch_patch_apply_restore_point",
+    )
+
+
+def _admin_evolution_revert_branch_patch(
+    proposal_id: str,
+    *,
+    actor: str,
+    org_slug: str,
+    body: Optional[AdminEvolutionBranchPatchRevertRequest],
+) -> Dict[str, Any]:
+    pid = str(proposal_id or "").strip()
+    proposal = _admin_evolution_get_proposal(pid)
+    if not proposal:
+        raise HTTPException(status_code=404, detail="proposal_not_found")
+    if not _admin_evolution_is_restore_point_stage(proposal):
+        raise HTTPException(status_code=409, detail="proposal_not_ao17c_restore_point_stage")
+
+    apply_receipt = _admin_evolution_find_latest_branch_patch_receipt(
+        proposal_id=pid,
+        org_slug=org_slug,
+        restore_point_id=getattr(body, "restore_point_id", None) if body else None,
+        execution_id=getattr(body, "execution_id", None) if body else None,
+    )
+    if not apply_receipt:
+        raise HTTPException(status_code=404, detail="branch_patch_restore_point_not_found")
+
+    restore_point_id = str(apply_receipt.get("restore_point_id") or "").strip()
+    target_branch = str(apply_receipt.get("target_branch") or apply_receipt.get("branch") or "").strip()
+    trace_id = f"ao18a_{pid}_{uuid.uuid4().hex[:8]}"
+
+    revert_receipts: List[Dict[str, Any]] = []
+    for item in list(apply_receipt.get("file_receipts") or []):
+        if not isinstance(item, dict):
+            continue
+        previous_exists = bool(item.get("previous_exists"))
+        snapshot = {
+            "repo_kind": item.get("repo_kind"),
+            "repo": item.get("repo"),
+            "branch": target_branch,
+            "path": item.get("path"),
+            "exists": True,
+        }
+        if previous_exists:
+            current = _admin_evolution_github_read_snapshot(
+                repo_kind=str(item.get("repo_kind") or ""),
+                branch=target_branch,
+                path=str(item.get("path") or ""),
+            )
+            if not current.get("ok"):
+                revert_receipts.append({**item, "ok": False, "message": "Falha ao ler arquivo atual antes da reversão.", "raw_result": current})
+                continue
+            snapshot.update({"sha": current.get("sha"), "exists": current.get("exists")})
+            result = _admin_evolution_github_put_file_from_snapshot(
+                snapshot=snapshot,
+                content=str(item.get("previous_content") or ""),
+                message=f"AO-18A: revert governed branch patch {pid} {restore_point_id}",
+                trace_id=trace_id,
+            )
+        else:
+            result = _admin_evolution_github_delete_file_from_snapshot(
+                snapshot=snapshot,
+                message=f"AO-18A: delete file created by governed patch {pid} {restore_point_id}",
+                trace_id=trace_id,
+            )
+        revert_receipts.append({
+            "ok": bool(result.get("ok")),
+            "repo_kind": item.get("repo_kind"),
+            "repo": item.get("repo"),
+            "branch": target_branch,
+            "path": item.get("path"),
+            "restore_point_id": restore_point_id,
+            "previous_exists": previous_exists,
+            "commit_sha": result.get("commit_sha"),
+            "message": result.get("message"),
+            "raw_result": result,
+        })
+
+    ok = bool(revert_receipts) and all(bool(x.get("ok")) for x in revert_receipts)
+    receipt = {
+        "ok": ok,
+        "stage": "AO-18A-REVERT",
+        "mode": "branch_patch_revert_restore_point",
+        "proposal_id": pid,
+        "proposal_status": proposal.get("status"),
+        "target_branch": target_branch,
+        "branch": target_branch,
+        "restore_point_id": restore_point_id,
+        "source_apply_execution_id": str(apply_receipt.get("execution_id") or ""),
+        "trace_id": trace_id,
+        "revert_receipts": revert_receipts,
+        "main_branch_write_allowed": False,
+        "can_write_main": False,
+        "can_open_pr": False,
+        "can_merge": False,
+        "can_deploy": False,
+        "can_run_migration": False,
+        "blocked_actions": ["write_main_branch", "open_pr", "merge", "deploy", "migration"],
+        "message": (
+            "Patch revertido na branch temporária a partir do restore point. Main permaneceu intacta."
+            if ok else "Falha parcial/total ao reverter patch da branch. Verifique receipts."
+        ),
+    }
+    return _admin_evolution_record_branch_patch_execution(
+        proposal=proposal,
+        receipt=receipt,
+        actor=actor,
+        org_slug=org_slug,
+        status="branch_patch_reverted" if ok else "branch_patch_revert_failed",
+        mode="ao18a_branch_patch_revert_restore_point",
+    )
+
+
+@app.post("/api/admin/evolution/proposals/{proposal_id}/apply-branch-patch")
+def admin_evolution_proposal_apply_branch_patch(
+    proposal_id: str,
+    body: Optional[AdminEvolutionBranchPatchApplyRequest] = None,
+    x_org_slug: Optional[str] = Header(default=None),
+    _admin=Depends(require_admin_access),
+):
+    """
+    AO-17C/AO-18A-APPLY: aplica patch somente na branch temporária existente.
+
+    Contrato:
+    - exige proposta AO-17C/AO-18A approved;
+    - exige dry_run_completed;
+    - captura snapshot anterior e restore_point_id antes da escrita;
+    - escreve somente na branch AO-17;
+    - não toca main;
+    - não abre PR;
+    - não faz merge, deploy ou migration.
+    """
+    actor = ""
+    if isinstance(_admin, dict):
+        actor = str(_admin.get("email") or _admin.get("sub") or "")
+    org = get_org(x_org_slug)
+    body_obj = body if isinstance(body, AdminEvolutionBranchPatchApplyRequest) else AdminEvolutionBranchPatchApplyRequest()
+    return _admin_evolution_apply_branch_patch(proposal_id, actor=actor, org_slug=org, body=body_obj)
+
+
+@app.post("/api/admin/evolution/proposals/{proposal_id}/revert-branch-patch")
+def admin_evolution_proposal_revert_branch_patch(
+    proposal_id: str,
+    body: Optional[AdminEvolutionBranchPatchRevertRequest] = None,
+    x_org_slug: Optional[str] = Header(default=None),
+    _admin=Depends(require_admin_access),
+):
+    """
+    AO-18A-REVERT: reverte patch aplicado na branch usando restore point.
+
+    Não toca main, não abre PR, não faz merge, deploy ou migration.
+    """
+    actor = ""
+    if isinstance(_admin, dict):
+        actor = str(_admin.get("email") or _admin.get("sub") or "")
+    org = get_org(x_org_slug)
+    body_obj = body if isinstance(body, AdminEvolutionBranchPatchRevertRequest) else AdminEvolutionBranchPatchRevertRequest()
+    return _admin_evolution_revert_branch_patch(proposal_id, actor=actor, org_slug=org, body=body_obj)
+
 
 
 @app.post("/api/admin/evolution/proposals/{proposal_id}/dry-run")
