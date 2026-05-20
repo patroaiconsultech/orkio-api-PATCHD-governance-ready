@@ -29123,6 +29123,34 @@ async def chat_stream(
     def _orion_proposal_intent(text: str) -> str:
         raw = _normalize_router_text(text)
 
+        # AO-17C/AO-18A-GEN: detectar restore point/reversão ANTES de AO-17B.
+        # Os prompts AO-17C/AO-18A citam AO-17B-CREATE como contexto histórico;
+        # se AO-17B for avaliado primeiro, o Orion recria indevidamente o template de branch.
+        if any(x in raw for x in [
+            "ao-17c/ao-18a",
+            "ao17c/ao18a",
+            "ao-17c",
+            "ao17c",
+            "ao-18a",
+            "ao18a",
+            "patch governado na branch com restore point permanente",
+            "restore point permanente",
+            "restore_point",
+            "restore point",
+            "snapshot anterior",
+            "rollback permanente",
+            "reversão a qualquer momento",
+            "reversao a qualquer momento",
+            "reverter patch da branch",
+            "can_revert_branch_patch",
+            "can_restore_previous_version",
+            "patch na branch temporária",
+            "patch na branch temporaria",
+            "aplicação governada de patch",
+            "aplicacao governada de patch",
+        ]):
+            return "ao17c_ao18a_branch_patch_restore_point"
+
         # AO-17B-GEN: detectar branch temporária ANTES de dry-run.
         # Os prompts AO-17B costumam citar AO-16/AO-17A como contexto histórico;
         # se o dry-run for avaliado primeiro, o Orion volta indevidamente ao template AO-16B.
@@ -29196,6 +29224,55 @@ async def chat_stream(
         """
         intent = _orion_proposal_intent(text)
         checkpoint = _orion_checkpoint_context()
+
+        if intent == "ao17c_ao18a_branch_patch_restore_point":
+            return {
+                "title": "AO-17C/AO-18A — Patch Governado na Branch com Restore Point Permanente",
+                "summary": (
+                    "Permitir somente a aplicação governada de patch na branch temporária já criada, "
+                    "com restore point permanente, snapshot anterior obrigatório, diff preview, receipts por arquivo "
+                    "e reversão possível a qualquer momento. Aprovação futura pode tornar uma versão ativa, "
+                    "mas nunca remove a capacidade de rollback."
+                ),
+                "risk": "medio",
+                "target_files": [
+                    "app/main.py",
+                    "src/routes/AdminEvolutionCenter.jsx",
+                    "GitHub branch file write control plane",
+                    "restore point and rollback receipt registry",
+                ],
+                "rollback_plan": (
+                    "Antes de qualquer escrita, salvar snapshot anterior dos arquivos afetados e registrar restore_point_id. "
+                    "A reversão deve restaurar o snapshot anterior na branch temporária ao-17/evo_0c29e7b01d21, "
+                    "sem tocar main, sem abrir PR, sem merge, sem deploy e sem migration. "
+                    "O restore point deve permanecer disponível mesmo após promoção futura."
+                ),
+                "checklist": [
+                    "Branch alvo confirmada: ao-17/evo_0c29e7b01d21.",
+                    "Restore point obrigatório antes de qualquer escrita.",
+                    "Snapshot anterior obrigatório para cada arquivo afetado.",
+                    "Diff preview obrigatório antes da aplicação.",
+                    "Receipt por arquivo alterado obrigatório.",
+                    "can_write_branch=true somente após aprovação Admin específica.",
+                    "can_revert_branch_patch=true após patch aplicado.",
+                    "can_restore_previous_version=true após promoção futura.",
+                    "can_write_main=false permanece.",
+                    "can_open_pr=false permanece.",
+                    "can_merge=false permanece.",
+                    "can_deploy=false permanece.",
+                    "can_run_migration=false permanece.",
+                    "Reversão deve poder ser aplicada a qualquer momento, respeitando governança.",
+                ],
+                "governance": (
+                    "Nenhuma escrita, commit, PR, merge, deploy, migration ou alteração em main foi iniciada. "
+                    "Esta proposta apenas autoriza revisão Admin para futura aplicação governada de patch na branch, "
+                    "com restore point permanente e rollback sempre disponível."
+                ),
+                "verdict": (
+                    "GO para aprovação/rejeição Admin da proposta AO-17C/AO-18A. "
+                    "NO-GO para main, PR, merge, deploy ou migration."
+                ),
+            }
 
         if intent == "ao17b_branch_creation_governed":
             return {
