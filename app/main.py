@@ -14924,12 +14924,32 @@ def _github_find_existing_pull_request(repo: str, head: str, base: str) -> Optio
             }
     return None
 
-def _github_verify_file_exists(repo: str, branch: str, path: str) -> tuple[bool, str, Dict[str, Any]]:
-    verify_url = f"https://api.github.com/repos/{repo}/contents/{path}?ref={branch}"
-    status_verify, body_verify = _github_api_json("GET", verify_url, None)
-    returned_path = ((body_verify or {}).get("path") or "").strip()
-    verified = status_verify == 200 and returned_path == path
-    return verified, returned_path, body_verify or {}
+def _github_verify_file_exists(repo: str, branch: str, path: str, *, attempts: int = 4, sleep_seconds: float = 0.55) -> tuple[bool, str, Dict[str, Any]]:
+    """
+    Verifica existência de arquivo no GitHub com pequeno retry.
+
+    AO-17C-R1: depois de PUT/CREATE 201, o read-back pode atrasar ou retornar
+    payload sem sha por instantes. Não podemos transformar um write aceito pelo
+    GitHub em falha operacional irreversível por inconsistência de leitura.
+    """
+    safe_branch = re.sub(r"^refs/heads/", "", str(branch or "").strip())
+    verify_url = f"https://api.github.com/repos/{repo}/contents/{path}?ref={safe_branch}"
+    last_path = ""
+    last_body: Dict[str, Any] = {}
+    total = max(1, int(attempts or 1))
+    for idx in range(total):
+        status_verify, body_verify = _github_api_json("GET", verify_url, None)
+        last_body = body_verify or {}
+        returned_path = ((last_body or {}).get("path") or "").strip()
+        last_path = returned_path
+        if status_verify == 200 and returned_path == path:
+            return True, returned_path, last_body
+        if idx < total - 1:
+            try:
+                time.sleep(max(0.05, float(sleep_seconds or 0.0)))
+            except Exception:
+                pass
+    return False, last_path, last_body
 
 
 
@@ -24435,17 +24455,30 @@ def _admin_evolution_github_put_file_from_snapshot(
         }
 
     commit_sha = str((((body or {}).get("commit") or {}).get("sha") or "")).strip()
-    verified, _, verify_body = _github_verify_file_exists(repo, branch, path)
+    verified, _, verify_body = _github_verify_file_exists(repo, branch, path, attempts=5, sleep_seconds=0.65)
+    file_sha = str((verify_body or {}).get("sha") or "").strip()
+    write_accepted = bool(commit_sha) and status in (200, 201)
+    verification_pending = bool(write_accepted and not verified)
+
     return {
-        "ok": bool(verified),
+        # ok significa: o GitHub aceitou a escrita e gerou commit na branch alvo.
+        # Se o read-back ainda não confirmar, mantemos verification_pending=true
+        # para permitir reversão em vez de travar o sistema em branch_patch_failed.
+        "ok": bool(verified or write_accepted),
+        "verification_pending": verification_pending,
+        "write_accepted": bool(write_accepted),
         "repo_kind": snapshot.get("repo_kind"),
         "repo": repo,
         "branch": branch,
         "path": path,
         "status": status,
         "commit_sha": commit_sha,
-        "file_sha": str((verify_body or {}).get("sha") or "").strip(),
-        "message": "Arquivo escrito na branch com confirmação verificável." if verified else "Escrita enviada, mas verificação final não confirmou o arquivo.",
+        "file_sha": file_sha,
+        "message": (
+            "Arquivo escrito na branch com confirmação verificável."
+            if verified
+            else "Escrita aceita pelo GitHub; verificação final pendente. Reversão permanece disponível."
+        ),
     }
 
 
@@ -24680,17 +24713,36 @@ def _admin_evolution_find_latest_branch_patch_receipt(
     rows = _admin_evolution_list_executions(proposal_id=proposal_id, org_slug=org_slug)
     wanted_restore = str(restore_point_id or "").strip()
     wanted_execution = str(execution_id or "").strip()
+    allowed_statuses = {"branch_patch_applied", "branch_patch_verification_pending", "branch_patch_failed"}
     for row in rows:
         status = str(row.get("status") or "").strip()
         result = row.get("result") if isinstance(row.get("result"), dict) else {}
-        if status != "branch_patch_applied":
+        if status not in allowed_statuses:
             continue
         if wanted_execution and str(row.get("execution_id") or "") != wanted_execution:
             continue
         if wanted_restore and str(result.get("restore_point_id") or "") != wanted_restore:
             continue
+
+        receipts = result.get("file_receipts") if isinstance(result, dict) else []
+        has_branch_write = any(
+            isinstance(item, dict) and (
+                bool(item.get("commit_sha")) or
+                bool(item.get("write_accepted")) or
+                bool((item.get("raw_result") or {}).get("commit_sha")) or
+                bool((item.get("raw_result") or {}).get("write_accepted"))
+            )
+            for item in (receipts or [])
+        )
+        # AO-17C-R1: um receipt antigo branch_patch_failed pode conter commit_sha.
+        # Nesse caso houve escrita real na branch e a reversão precisa permanecer disponível.
+        if status == "branch_patch_failed" and not has_branch_write:
+            continue
+
         payload = dict(result or {})
         payload.setdefault("execution_id", str(row.get("execution_id") or ""))
+        payload["can_revert_branch_patch"] = True
+        payload.setdefault("restore_point", {}).update({"revert_available": True})
         return payload
     return None
 
@@ -24752,6 +24804,8 @@ def _admin_evolution_apply_branch_patch(
         )
         file_receipts.append({
             "ok": bool(result.get("ok")),
+            "write_accepted": bool(result.get("write_accepted") or result.get("commit_sha")),
+            "verification_pending": bool(result.get("verification_pending")),
             "repo_kind": snap.get("repo_kind"),
             "repo": snap.get("repo"),
             "branch": target_branch,
@@ -24768,10 +24822,28 @@ def _admin_evolution_apply_branch_patch(
         })
 
     ok = bool(file_receipts) and all(bool(x.get("ok")) for x in file_receipts)
+    write_accepted = bool(file_receipts) and all(
+        bool(x.get("ok")) or bool(x.get("write_accepted")) or bool(x.get("commit_sha"))
+        for x in file_receipts
+    )
+    verification_pending = any(bool(x.get("verification_pending")) for x in file_receipts)
+    any_branch_commit = any(bool(x.get("commit_sha")) for x in file_receipts)
+    revert_available = bool(write_accepted or any_branch_commit)
+    audit_status = (
+        "branch_patch_applied"
+        if write_accepted and not verification_pending
+        else "branch_patch_verification_pending"
+        if write_accepted
+        else "branch_patch_failed"
+    )
+
     receipt = {
-        "ok": ok,
+        "ok": bool(write_accepted),
+        "verification_pending": bool(verification_pending),
+        "write_accepted": bool(write_accepted),
         "stage": "AO-17C/AO-18A-APPLY",
         "mode": "branch_patch_apply_with_restore_point",
+        "apply_status": audit_status,
         "proposal_id": pid,
         "proposal_status": proposal.get("status"),
         "execution_status": proposal.get("execution_status"),
@@ -24785,17 +24857,17 @@ def _admin_evolution_apply_branch_patch(
             "target_branch": target_branch,
             "snapshots_count": len(snapshots),
             "persistent_after_promotion": True,
-            "revert_available": ok,
+            "revert_available": revert_available,
         },
         "branch_patch_allowed": True,
-        "technical_branch_commit_created": ok,
+        "technical_branch_commit_created": any_branch_commit,
         "main_branch_write_allowed": False,
         "can_write_main": False,
         "can_open_pr": False,
         "can_merge": False,
         "can_deploy": False,
         "can_run_migration": False,
-        "can_revert_branch_patch": ok,
+        "can_revert_branch_patch": revert_available,
         "can_restore_previous_version": False,
         "blocked_actions": ["write_main_branch", "open_pr", "merge", "deploy", "migration"],
         "rollback_plan": (
@@ -24805,7 +24877,10 @@ def _admin_evolution_apply_branch_patch(
         "next_required_stage": "AO-18A revert branch patch validation before PR/merge/deploy",
         "message": (
             "Patch aplicado somente na branch temporária com restore point permanente. Reversão está disponível."
-            if ok else "Falha ao aplicar patch na branch. Verifique receipts; main permaneceu bloqueada."
+            if write_accepted and not verification_pending
+            else "Patch aceito pelo GitHub com verificação pendente. Reversão está disponível; main permaneceu bloqueada."
+            if write_accepted
+            else "Falha ao aplicar patch na branch. Verifique receipts; main permaneceu bloqueada."
         ),
     }
     return _admin_evolution_record_branch_patch_execution(
@@ -24813,7 +24888,7 @@ def _admin_evolution_apply_branch_patch(
         receipt=receipt,
         actor=actor,
         org_slug=org_slug,
-        status="branch_patch_applied" if ok else "branch_patch_failed",
+        status=audit_status,
         mode="ao17c_branch_patch_apply_restore_point",
     )
 
