@@ -23268,7 +23268,7 @@ def admin_valuation(days: int = 30, _admin=Depends(require_admin_access), x_org_
     total_users = db.execute(select(func.count(User.id)).where(User.org_slug == org)).scalar() or 0
     # AO01_CHRIS_VALUATION_SCHEMA_GUARD_V1
     # Some production databases may lag behind the model imports and miss the
-    # leads table. Valuation must remain available for Cris/Chris and admin UI:
+    # leads table. Valuation must remain available for Chris/Cris and admin UI:
     # return conservative zeros instead of crashing the full capability.
     try:
         leads_total = db.execute(select(func.count(Lead.id)).where(Lead.org_slug == org)).scalar() or 0
@@ -28989,15 +28989,15 @@ async def chat_stream(
         )
 
     # AO01_CHRIS_STRATEGIC_SQUAD_FASTPATH_V1
-    # Fast-path leve para impedir que pedidos estratégicos/valuation da Cris
-    # caiam em runtime pesado, que hoje ainda pode degradar. A Cris atua como
+    # Fast-path leve para impedir que pedidos estratégicos/valuation da Chris
+    # caiam em runtime pesado, que hoje ainda pode degradar. A Chris atua como
     # líder visível e sintetiza especialistas silenciosos.
     def _is_chris_strategic_squad_request(text: str) -> bool:
         normalized = _normalize_router_text(text)
         if not normalized:
             return False
 
-        # Alias explícitos aceitos: Cris e Chris devem ser equivalentes.
+        # Alias explícitos aceitos: Chris e Cris devem ser equivalentes.
         explicit_chris = bool(re.search(r"(^|\s|@)(cris|chris|cristina|cfo)(\b|[\s,:;.!?])", normalized))
         valuation_terms = [
             "valuation",
@@ -29136,9 +29136,9 @@ async def chat_stream(
             focus_line = "Foco detectado: valuation estratégica da plataforma no estágio atual."
 
         return (
-            "Cris — Valuation Estratégica Preliminar\n\n"
+            "Chris — Valuation Estratégica Preliminar\n\n"
             f"{focus_line}\n\n"
-            "1. Síntese executiva da Cris\n"
+            "1. Síntese executiva da Chris\n"
             f"- Estágio lido: {stage}.\n"
             f"- Faixa indicativa preliminar: US$ {low_usd:,.0f} a US$ {high_usd:,.0f}.\n"
             "- Natureza da leitura: estimativa estratégica pré-lançamento, não laudo financeiro formal.\n"
@@ -29166,7 +29166,7 @@ async def chat_stream(
             "- Validar 5 a 10 conversas beta com registro de dor, valor percebido e preço aceitável.\n"
             "- Preparar uma tese de captação em três faixas: conservadora, base e agressiva.\n"
             "- Fazer Cris acionar sempre Finance, Growth, Product, Ops e Legal quando o pedido envolver valuation, business plan ou go-to-market.\n\n"
-            "Veredito da Cris\n"
+            "Veredito da Chris\n"
             "A plataforma tem potencial de valuation relevante para estágio pré-lançamento, mas a perfeição exige transformar potencial em evidência: "
             "tração, retenção, receita, estabilidade operacional e narrativa clara para investidores."
         )
@@ -29186,7 +29186,7 @@ async def chat_stream(
             text=final_text,
             thread_id=tid_seed,
             agent_id="chris",
-            agent_name="Cris",
+            agent_name="Chris",
         )
         return {
             **persisted,
@@ -29194,7 +29194,7 @@ async def chat_stream(
             "message": final_text,
             "final_text": final_text,
             "agent_id": "chris",
-            "agent_name": "Cris",
+            "agent_name": "Chris",
             "voice_id": None,
             "avatar_url": None,
             "runtime_hints": {
@@ -30228,6 +30228,100 @@ async def chat_stream(
             context_block = "\n\nContexto considerado:\n" + onboarding_digest
         checkpoint = _orion_checkpoint_context()
         raw = _normalize_router_text(text)
+
+        # AO01_ORION_WARROOM_READONLY_ROUTER_V1
+        # Pedidos de auditoria war room ponta a ponta devem responder ao escopo
+        # solicitado pelo usuário, acionando a leitura multiárea do time do Orion.
+        # Não devem cair no template stale de checkpoint AO-16/AO-17 nem virar
+        # proposta de autoevolução/patch sem comando explícito.
+        wants_full_warroom = (
+            (
+                "war room" in raw
+                or "warroom" in raw
+                or "ponta a ponta" in raw
+                or "todo o sistema" in raw
+                or "toda a plataforma" in raw
+                or "plataforma inteira" in raw
+            )
+            and (
+                "auditoria" in raw
+                or "audite" in raw
+                or "auditar" in raw
+                or "identificar conflitos" in raw
+                or "bugs" in raw
+                or "melhorias" in raw
+            )
+        )
+        wants_team = (
+            "time de especialistas" in raw
+            or "todo o seu time" in raw
+            or "envolva seu time" in raw
+            or "envolva todo" in raw
+            or "especialistas" in raw
+        )
+
+        if wants_full_warroom or (wants_team and ("auditoria" in raw or "war room" in raw or "ponta a ponta" in raw)):
+            return (
+                "WAR ROOM ORION — READONLY.\n\n"
+                "1. Escopo da auditoria\n"
+                "- Auditoria consultiva ponta a ponta da plataforma Orkio.\n"
+                "- Modo: readonly. Nenhum patch executado, nenhuma escrita em repositório, nenhuma alteração de produção.\n"
+                "- Objetivo: identificar conflitos, bugs, riscos técnicos e melhorias prioritárias em frontend, backend, APIs, stream, realtime, agentes, threads, auth, onboarding, governança e produção.\n\n"
+                "2. Especialistas envolvidos\n"
+                "- Orion — síntese CTO e arquitetura.\n"
+                "- Backend Specialist — FastAPI, rotas, banco, schemas e runtime.\n"
+                "- Frontend Specialist — AppConsole, landing, onboarding, threads e UX.\n"
+                "- Runtime/SSE Specialist — /api/chat/stream, eventos, timeouts, done e reconciliação.\n"
+                "- Realtime/Voice Specialist — WebRTC, STT, TTS, avatar falado e fallback.\n"
+                "- Security/Auth Specialist — sessão, token, tenant, permissões e admin.\n"
+                "- Governance Specialist — proposal_only, approval gate, rollback e autoevolução controlada.\n"
+                "- Product/UX Specialist — percepção premium, jornada, mobile/PWA e confiança.\n\n"
+                "3. Achados por área\n"
+                "- Frontend: precisa consolidar continuidade de threads, feedback visual do stream, onboarding/avatar e estado premium do console.\n"
+                "- Backend: rotas críticas estão operacionais, mas o roteamento de agentes precisa reduzir templates stale e separar auditoria readonly de proposal/autoevolução.\n"
+                "- Chat/SSE: o trilho principal deve garantir status, chunk/agent_done, done, persistência assistant e liberação do input.\n"
+                "- Realtime/voz: precisa telemetria clara para falhas de SDP, DataChannel, VAD, STT e TTS.\n"
+                "- Agentes: líderes como Orion e Chris precisam acionar squads por intenção, não apenas responder com template único.\n"
+                "- Threads/histórico: prioridade é nunca criar conversa nova se existe thread válida para continuidade.\n"
+                "- Auth/login: manter heartbeat e /api/me como saúde de sessão, sem misturar com stream.\n"
+                "- Onboarding/avatar/landing: preservar prechat, contexto e saudação contextual até o console.\n"
+                "- Governança: autoevolução deve permanecer proposal_only, approval gate e sem escrita real.\n\n"
+                "4. Bugs críticos\n"
+                "- Roteamento stale do Orion: pedidos amplos de war room podem cair em checkpoint AO-16/AO-17 em vez de auditoria multiárea.\n"
+                "- Orquestração parcial: squads ainda aparecem mais como síntese textual do que como contribuições especializadas consistentes.\n"
+                "- Realtime sem erro visível suficiente: quando falha, o usuário pode perceber silêncio ou ausência de resposta.\n"
+                "- Continuidade de chats deve ser validada após o patch frontend de restauração de thread ativa.\n\n"
+                "5. Riscos\n"
+                "- Alto: misturar patch/autoevolução real com auditoria readonly.\n"
+                "- Médio: aumentar timeout para mascarar gargalo de runtime.\n"
+                "- Médio: UX premium prometer mais do que o runtime estabilizado entrega.\n"
+                "- Baixo: auditorias readonly e patches isolados com rollback claro.\n\n"
+                "6. Melhorias prioritárias\n"
+                "- Corrigir roteamento Orion war room readonly.\n"
+                "- Consolidar Chris Strategic Squad para valuation, business plan, growth e go-to-market.\n"
+                "- Criar smoke tests por agente líder: Orkio, Orion, Chris e Team.\n"
+                "- Melhorar telemetria de realtime e stream.\n"
+                "- Garantir continuidade de threads e primeira resposta útil em todos os trilhos.\n\n"
+                "7. Patch mínimo recomendado\n"
+                "- Backend: adicionar detector prioritário para orion_warroom_readonly antes dos templates de checkpoint/proposal.\n"
+                "- Backend: manter Chris/Chris Strategic Squad com aliases e resposta por especialistas.\n"
+                "- Frontend: manter patch de continuidade de threads e realtime diagnostics.\n\n"
+                "8. Patch ideal\n"
+                "- Criar camada formal de Master Orchestrator Router com intent, lead_agent, support_agents, expected_output, risk e fallback.\n"
+                "- Cada agente líder deve ter squad dispatcher determinístico e resposta consolidada por contribuições.\n"
+                "- Criar painel de smoke/readiness para agentes, stream, realtime, threads e governança.\n\n"
+                "9. Checklist de validação\n"
+                "- @Orion war room ponta a ponta retorna esta estrutura, sem desviar para AO-16/AO-17.\n"
+                "- @Chris valuation retorna síntese + Finance + Growth + Comercial + Produto + Ops + Legal.\n"
+                "- @Orkio roteia corretamente para Orion em auditoria técnica e Chris em avaliação estratégica.\n"
+                "- /api/chat/stream retorna 200, emite done e persiste assistant.\n"
+                "- Threads existentes são carregadas sem criar nova conversa indevida.\n"
+                "- Realtime exibe erro operacional claro se DataChannel, VAD, STT ou TTS falhar.\n\n"
+                "10. Veredito GO/NO-GO\n"
+                "GO para auditoria readonly e patches isolados de roteamento/orquestração. NO-GO para autoexecução real ou autopatch em produção sem approval gate, diff preview, rollback e validação humana."
+                + context_block
+            )
+
         wants_ux = any(x in raw for x in [
             "ux",
             "landing",
@@ -30966,7 +31060,7 @@ async def chat_stream(
                 pass
 
         # AO01_CHRIS_STRATEGIC_SQUAD_FASTPATH_V1
-        # Pedidos de valuation/estratégia para Cris/Chris devem responder em
+        # Pedidos de valuation/estratégia para Chris/Cris devem responder em
         # trilho leve, com especialistas silenciosos e sem depender do runtime pesado.
         if _is_chris_strategic_squad_request(message):
             try:
