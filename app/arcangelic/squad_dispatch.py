@@ -199,7 +199,7 @@ def build_orion_squad_overlay(db: Session, *, org: str, message: str) -> Dict[st
 
 
 # AO01_CHRIS_STRATEGIC_SQUAD_OVERLAY_V1
-# Overlay utilitário para evoluir Cris/Chris para líder de squad estratégico.
+# Overlay utilitário para evoluir Chris/Chris para líder de squad estratégico.
 # Fail-open: não quebra o chat se registry/specialists não estiverem prontos.
 _CHRIS_STRATEGIC_MARKERS = [
     "cris", "chris", "cristina", "cfo", "valuation", "avaliação", "avaliacao",
@@ -226,7 +226,7 @@ def should_apply_chris_squad(agent: Any, message: str) -> bool:
 
 def build_chris_squad_overlay(db: Session, *, org: str, message: str) -> Dict[str, Any]:
     """
-    Overlay de sistema para Cris operar como líder estratégica visível,
+    Overlay de sistema para Chris operar como líder estratégica visível,
     coordenando especialistas financeiros, growth, vendas, produto, ops e legal.
     Não executa múltiplas LLMs; orienta uma síntese única e auditável.
     """
@@ -257,9 +257,9 @@ def build_chris_squad_overlay(db: Session, *, org: str, message: str) -> Dict[st
                 picked.append({"slug": slug, "name": slug.replace("_", " ").title(), "code": slug.upper()})
 
         lines = [
-            "Internal Cris strategic squad overlay:",
-            "- You are Cris acting as the visible strategic/CFO orchestrator.",
-            "- Only Cris should answer the user directly.",
+            "Internal Chris strategic squad overlay:",
+            "- You are Chris acting as the visible strategic/CFO orchestrator.",
+            "- Only Chris should answer the user directly.",
             "- Use silent specialists to structure the reasoning.",
             "- Do not present internal specialists as separate chat participants unless summarizing their views.",
             "- Always answer even with incomplete data; label estimates as preliminary.",
@@ -273,7 +273,7 @@ def build_chris_squad_overlay(db: Session, *, org: str, message: str) -> Dict[st
         lines.extend([
             "",
             "Answer format:",
-            "1) Cris — Síntese executiva",
+            "1) Chris — Síntese executiva",
             "2) Finance Strategist — valuation/unit economics",
             "3) Growth Strategist — mercado e aquisição",
             "4) Product/Ops — produto, entrega e próximos marcos",
