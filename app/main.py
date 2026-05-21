@@ -13184,62 +13184,6 @@ def _is_patch_governance_request_message(user_text: str) -> bool:
     low = str(user_text or "").strip().lower()
     if not low:
         return False
-
-    # AO18A_ROUTER_PRECEDENCE_GUARD:
-    # Pedido consultivo/readonly de orquestração, avaliação estratégica ou
-    # coordenação entre Orion/Chris NÃO pode virar PATCH GOVERNANCE RESPONSE
-    # apenas porque contém expressões como "sem aplicar patches".
-    readonly_markers = (
-        "readonly",
-        "read-only",
-        "somente leitura",
-        "sem aplicar patch",
-        "sem aplicar patches",
-        "sem executar",
-        "sem escrita",
-        "não aplicar patch",
-        "nao aplicar patch",
-        "não aplicar patches",
-        "nao aplicar patches",
-    )
-    strategic_orchestration_markers = (
-        "chris",
-        "cris",
-        "orion",
-        "orkio",
-        "time",
-        "team",
-        "squad",
-        "avaliem juntos",
-        "avaliarem juntos",
-        "acione orion e chris",
-        "avaliação estratégica",
-        "avaliacao estrategica",
-        "lado estratégico",
-        "lado estrategico",
-        "valuation",
-        "go-to-market",
-        "business plan",
-        "plataforma orkio",
-    )
-    if any(m in low for m in readonly_markers) and any(m in low for m in strategic_orchestration_markers):
-        # Exceção: se o usuário pedir explicitamente para gerar diff/arquivo/PR,
-        # preservamos a governança de patch.
-        explicit_write_markers = (
-            "gerar patch",
-            "gere patch",
-            "criar patch",
-            "diff preview",
-            "arquivo alvo",
-            "arquivos alvo",
-            "pull request",
-            "abrir pr",
-            "commit",
-            "aplicar na main",
-        )
-        if not any(m in low for m in explicit_write_markers):
-            return False
-
     intent_markers = (
         "patch",
         "diff",
@@ -28410,17 +28354,6 @@ async def chat_stream(
         if not normalized:
             return False
 
-        # AO18A_ROUTER_PRECEDENCE_GUARD:
-        # Avaliações/orquestrações readonly não devem ser capturadas pelo trilho
-        # governado só porque o prompt contém "sem aplicar patches".
-        if (
-            re.search(r"\b(orkio|orion|chris|cris|team|time|squad)\b", normalized)
-            and re.search(r"\b(avaliar|avaliem|avaliarem|avaliação|avaliacao|estratégic|estrategic|plataforma|juntos)\b", normalized)
-            and re.search(r"\b(readonly|read-only|sem aplicar patch|sem aplicar patches|não aplicar patch|nao aplicar patch|sem escrita|sem executar)\b", normalized)
-            and not re.search(r"\b(diff preview|arquivo alvo|arquivos alvo|pull request|abrir pr|commit|aplicar na main|gerar patch|gere patch)\b", normalized)
-        ):
-            return False
-
         direct_terms = [
             "proposal_only",
             "proposal only",
@@ -29102,19 +29035,6 @@ async def chat_stream(
         strategic_terms = [
             "estratégia",
             "estrategia",
-            "estratégico",
-            "estrategico",
-            "lado estratégico",
-            "lado estrategico",
-            "avaliação estratégica",
-            "avaliacao estrategica",
-            "avaliem juntos",
-            "avaliarem juntos",
-            "acione orion e chris",
-            "orion pelo lado técnico",
-            "orion pelo lado tecnico",
-            "chris pelo lado estratégico",
-            "chris pelo lado estrategico",
             "comercial",
             "vendas",
             "funil",
@@ -29252,468 +29172,10 @@ async def chat_stream(
         )
 
 
-
-    # AO18B_REAL_SQUAD_EXECUTION_ENGINE_V1
-    # Camada determinística de squad real: cada especialista gera uma contribuição
-    # estruturada, com execution_id, lineage e merge explícito. Não executa escrita,
-    # não cria branch, não abre PR e não altera repositório.
-    def _ao18b_make_execution_id(prefix: str = "exec") -> str:
-        try:
-            return f"{prefix}_{new_id()[:12]}"
-        except Exception:
-            return f"{prefix}_{int(now_ts())}"
-
-
-    def _ao18b_squad_node(
-        *,
-        agent_id: str,
-        agent_name: str,
-        role: str,
-        status: str,
-        started_at: int,
-        ended_at: int,
-        findings: List[str],
-        recommendation: str,
-        risk: str = "medium",
-    ) -> Dict[str, Any]:
-        return {
-            "agent_id": agent_id,
-            "agent_name": agent_name,
-            "role": role,
-            "status": status,
-            "started_at": started_at,
-            "ended_at": ended_at,
-            "duration_ms": max(0, int((ended_at - started_at) * 1000)),
-            "findings": findings,
-            "recommendation": recommendation,
-            "risk": risk,
-        }
-
-
-    def _build_chris_real_squad_execution(
-        text: str,
-        *,
-        db2: Session,
-        org_slug: str,
-    ) -> Dict[str, Any]:
-        normalized = _normalize_router_text(text)
-        execution_id = _ao18b_make_execution_id("chris_squad")
-        started = now_ts()
-        since_30d = started - 30 * 86400
-
-        approved_users = _safe_chris_count(db2, User, org_slug, User.approved_at.is_not(None))
-        total_users = _safe_chris_count(db2, User, org_slug)
-        leads_total = _safe_chris_count(db2, Lead, org_slug)
-        leads_30d = _safe_chris_count(db2, Lead, org_slug, Lead.created_at >= since_30d)
-        threads_30d = _safe_chris_count(db2, Thread, org_slug, Thread.created_at >= since_30d)
-        messages_30d = _safe_chris_count(db2, Message, org_slug, Message.created_at >= since_30d)
-
-        try:
-            cost_30d = float(db2.execute(
-                select(func.sum(CostEvent.total_cost_usd)).where(
-                    CostEvent.org_slug == org_slug,
-                    CostEvent.created_at >= since_30d,
-                )
-            ).scalar() or 0)
-        except Exception:
-            try:
-                db2.rollback()
-            except Exception:
-                pass
-            cost_30d = 0.0
-
-        traction_score = 0
-        if approved_users >= 1:
-            traction_score += 1
-        if leads_total >= 10 or leads_30d >= 3:
-            traction_score += 1
-        if messages_30d >= 50 or threads_30d >= 10:
-            traction_score += 1
-
-        stage = "pré-lançamento / beta controlado"
-        low_usd, high_usd = 250_000, 750_000
-        if traction_score >= 2:
-            stage = "beta com sinais iniciais de tração"
-            low_usd, high_usd = 750_000, 1_800_000
-        if traction_score >= 3:
-            stage = "pré-seed com produto ativo e primeiros sinais operacionais"
-            low_usd, high_usd = 1_500_000, 3_500_000
-
-        if "arr" in normalized or "mrr" in normalized or "receita" in normalized:
-            focus_line = "Foco detectado: modelo financeiro, receita recorrente e leitura de monetização."
-        elif "invest" in normalized or "capta" in normalized:
-            focus_line = "Foco detectado: narrativa para investidor e faixa de captação."
-        elif "go-to-market" in normalized or "gtm" in normalized or "crescimento" in normalized:
-            focus_line = "Foco detectado: go-to-market, aquisição e tese de crescimento."
-        else:
-            focus_line = "Foco detectado: valuation estratégica da plataforma no estágio atual."
-
-        t0 = now_ts()
-        finance = _ao18b_squad_node(
-            agent_id="finance_strategist",
-            agent_name="Finance Strategist",
-            role="valuation, unit economics e leitura financeira",
-            status="completed",
-            started_at=t0,
-            ended_at=now_ts(),
-            findings=[
-                f"Usuários aprovados: {approved_users}.",
-                f"Usuários totais: {total_users}.",
-                f"Leads totais: {leads_total}; leads nos últimos 30 dias: {leads_30d}.",
-                f"Custo IA estimado em 30 dias: US$ {cost_30d:,.2f}.",
-                f"Faixa preliminar lida: US$ {low_usd:,.0f} a US$ {high_usd:,.0f}.",
-            ],
-            recommendation="Tratar a faixa como tese pré-seed/pre-beta, não como laudo formal; validar com MRR, ARR, retenção e contratos.",
-            risk="medium",
-        )
-        product = _ao18b_squad_node(
-            agent_id="product_strategist",
-            agent_name="Product Strategist",
-            role="produto, UX e prontidão de demonstração",
-            status="completed",
-            started_at=now_ts(),
-            ended_at=now_ts(),
-            findings=[
-                "A promessa central é forte: orquestração multiagente, governança, memória, execução e experiência premium.",
-                "O principal risco de produto é percepção: o usuário precisa sentir estabilidade e inteligência viva desde o primeiro contato.",
-                "Realtime/avatar ainda deve ser tratado como trilha amarela até haver telemetria de resposta e fallback claros.",
-            ],
-            recommendation="Consolidar UX premium, stream feedback, continuidade de threads e status visual de squads antes de venda enterprise ampla.",
-            risk="medium",
-        )
-        growth = _ao18b_squad_node(
-            agent_id="growth_strategist",
-            agent_name="Growth Strategist",
-            role="mercado, aquisição e validação de demanda",
-            status="completed",
-            started_at=now_ts(),
-            ended_at=now_ts(),
-            findings=[
-                "A fase atual deve converter usuários selecionados em evidências: depoimentos, casos de uso e disposição de pagamento.",
-                "A narrativa mais forte é 'plataforma governada de agentes para empreendedores e investidores'.",
-                "O produto deve evitar prometer enterprise massivo antes de provar estabilidade operacional em demos controladas.",
-            ],
-            recommendation="Rodar 5 a 10 conversas beta instrumentadas e registrar dor, valor percebido, objeções e preço aceitável.",
-            risk="low",
-        )
-        ops = _ao18b_squad_node(
-            agent_id="ops_manager",
-            agent_name="Ops Manager",
-            role="operação, confiabilidade e readiness",
-            status="completed",
-            started_at=now_ts(),
-            ended_at=now_ts(),
-            findings=[
-                f"Atividade recente: {threads_30d} threads e {messages_30d} mensagens nos últimos 30 dias.",
-                "Auth, threads, messages e SSE devem permanecer como smoke tests obrigatórios em cada deploy.",
-                "O histórico de worker preso no login recomenda health checks operacionais por rota crítica, não apenas boot OK.",
-            ],
-            recommendation="Criar checklist automático de smoke por agente líder: @Orion, @Chris, @Orkio, baseline 'oi', thread restore e stream done.",
-            risk="medium",
-        )
-        legal = _ao18b_squad_node(
-            agent_id="legal_guardian",
-            agent_name="Legal Guardian",
-            role="risco jurídico, compliance e comunicação",
-            status="completed",
-            started_at=now_ts(),
-            ended_at=now_ts(),
-            findings=[
-                "A valuation deve ser rotulada como estimativa estratégica preliminar, sujeita a diligência.",
-                "Autopatch real em produção deve permanecer bloqueado por approval gate, diff preview e rollback.",
-                "Demos controladas reduzem risco de promessa excessiva antes de estabilizar realtime e squads computacionais.",
-            ],
-            recommendation="Usar disclaimers claros em valuation e readiness; manter proposal_only para qualquer evolução governada.",
-            risk="low",
-        )
-
-        nodes = [finance, product, growth, ops, legal]
-        ended = now_ts()
-        execution = {
-            "execution_id": execution_id,
-            "parent_agent": "Chris",
-            "mode": "readonly",
-            "write_executed": False,
-            "dispatch_executed": True,
-            "started_at": started,
-            "ended_at": ended,
-            "duration_ms": max(0, int((ended - started) * 1000)),
-            "child_agents": nodes,
-            "metrics": {
-                "approved_users": approved_users,
-                "total_users": total_users,
-                "leads_total": leads_total,
-                "leads_30d": leads_30d,
-                "threads_30d": threads_30d,
-                "messages_30d": messages_30d,
-                "cost_30d_usd": cost_30d,
-                "valuation_low_usd": low_usd,
-                "valuation_high_usd": high_usd,
-                "traction_score": traction_score,
-                "stage": stage,
-            },
-            "focus_line": focus_line,
-        }
-        try:
-            logger.info(
-                "AO18B_CHRIS_SQUAD_COMPLETED execution_id=%s org=%s agents=%s",
-                execution_id,
-                org_slug,
-                ",".join([str(n.get("agent_id")) for n in nodes]),
-            )
-        except Exception:
-            pass
-        return execution
-
-
-    def _format_ao18b_chris_squad_answer(execution: Dict[str, Any]) -> str:
-        metrics = execution.get("metrics") or {}
-        nodes = execution.get("child_agents") or []
-        low_usd = float(metrics.get("valuation_low_usd") or 0)
-        high_usd = float(metrics.get("valuation_high_usd") or 0)
-        stage = str(metrics.get("stage") or "pré-lançamento / beta controlado")
-        focus_line = str(execution.get("focus_line") or "Foco detectado: valuation estratégica da plataforma no estágio atual.")
-
-        def _node_block(index: int, node: Dict[str, Any]) -> str:
-            findings = node.get("findings") or []
-            lines = "\n".join([f"- {item}" for item in findings])
-            return (
-                f"{index}. {node.get('agent_name')} — {node.get('role')}\n"
-                f"status: {node.get('status')} | risk: {node.get('risk')} | duration_ms: {node.get('duration_ms')}\n"
-                f"{lines}\n"
-                f"Recomendação: {node.get('recommendation')}\n"
-            )
-
-        blocks = "\n".join([_node_block(i + 3, node) for i, node in enumerate(nodes)])
-        return (
-            "Chris — AO18B Real Strategic Squad Execution\n\n"
-            "1. Execution graph\n"
-            f"- execution_id: {execution.get('execution_id')}\n"
-            "- parent_agent: Chris\n"
-            "- mode: readonly\n"
-            "- dispatch_executed: true\n"
-            "- write_executed: false\n"
-            f"- child_agents: {', '.join([str(n.get('agent_id')) for n in nodes])}\n\n"
-            "2. Síntese executiva da Chris\n"
-            f"- {focus_line}\n"
-            f"- Estágio lido: {stage}.\n"
-            f"- Faixa indicativa preliminar: US$ {low_usd:,.0f} a US$ {high_usd:,.0f}.\n"
-            "- Natureza da leitura: estimativa estratégica pré-lançamento, não laudo financeiro formal.\n"
-            "- Interpretação: o valor atual ainda depende mais de IP, diferenciação, narrativa e evidência de uso do que de receita histórica.\n\n"
-            f"{blocks}\n"
-            "8. Merge executivo da Chris\n"
-            "- A plataforma já tem sinais técnicos e estratégicos relevantes para demo controlada.\n"
-            "- A próxima valorização real virá de evidência: retenção, casos de uso, leads qualificados, MRR/ARR e estabilidade perceptível.\n"
-            "- Para investidor, o discurso deve ser: produto governado de agentes, com potencial enterprise, ainda em fase de consolidação operacional.\n\n"
-            "9. Próximos passos recomendados\n"
-            "- Instrumentar painel simples com usuários, leads, mensagens, custos, MRR e ARR.\n"
-            "- Rodar 5 a 10 conversas beta com registro de dor, valor percebido e preço aceitável.\n"
-            "- Manter realtime/avatar como trilha amarela até telemetria de voz estar completa.\n"
-            "- Evoluir de orquestração textual para execution graph persistente com eventos de stream por subagente.\n\n"
-            "VEREDITO CHRIS\n"
-            "GO para avaliação estratégica readonly e demos controladas. NO-GO para valuation formal ou promessa enterprise massiva sem métricas, contrato e estabilidade operacional comprovada."
-        )
-
-
-    def _build_chris_real_squad_answer(text: str, *, db2: Session, org_slug: str) -> str:
-        execution = _build_chris_real_squad_execution(text, db2=db2, org_slug=org_slug)
-        return _format_ao18b_chris_squad_answer(execution)
-
-
-    def _build_orion_real_technical_squad_answer(text: str, *, org_slug: str) -> Tuple[str, Dict[str, Any]]:
-        execution_id = _ao18b_make_execution_id("orion_squad")
-        started = now_ts()
-        nodes = [
-            _ao18b_squad_node(
-                agent_id="backend_specialist",
-                agent_name="Backend Specialist",
-                role="FastAPI, rotas, banco, schemas e runtime",
-                status="completed",
-                started_at=started,
-                ended_at=now_ts(),
-                findings=[
-                    "Auth, threads, messages e /api/chat/stream já demonstraram sinais verdes nos testes recentes.",
-                    "O risco residual é worker/handler preso em rotas críticas após deploy ou carga prolongada.",
-                ],
-                recommendation="Adicionar telemetria por rota crítica e smoke pós-deploy para login, /api/me, /api/threads e /api/chat/stream.",
-                risk="medium",
-            ),
-            _ao18b_squad_node(
-                agent_id="runtime_sse_specialist",
-                agent_name="Runtime/SSE Specialist",
-                role="/api/chat/stream, eventos, timeout e done",
-                status="completed",
-                started_at=now_ts(),
-                ended_at=now_ts(),
-                findings=[
-                    "POST /api/chat/stream 200 confirma endpoint vivo, mas ainda falta prova granular de status/chunk/agent_done/done.",
-                    "A UX deve exibir progresso de subagentes quando houver execution graph.",
-                ],
-                recommendation="Emitir eventos agent_started, agent_done, orchestrator_merge e done em trilhos multiagente.",
-                risk="medium",
-            ),
-            _ao18b_squad_node(
-                agent_id="realtime_voice_specialist",
-                agent_name="Realtime/Voice Specialist",
-                role="WebRTC, DataChannel, VAD, STT, TTS e avatar",
-                status="completed",
-                started_at=now_ts(),
-                ended_at=now_ts(),
-                findings=[
-                    "Realtime permanece amarelo até haver logs de TOKEN_RECEIVED, DATA_CHANNEL_OPEN, RESPONSE_CREATE_SENT e RESPONSE_DONE.",
-                    "Avatar/voz não deve bloquear chat texto ou orquestração readonly.",
-                ],
-                recommendation="Criar patch separado de telemetria realtime antes de tentar refatorar voz/avatar.",
-                risk="medium",
-            ),
-            _ao18b_squad_node(
-                agent_id="security_governance_specialist",
-                agent_name="Security/Governance Specialist",
-                role="approval gate, proposal_only, rollback e segurança",
-                status="completed",
-                started_at=now_ts(),
-                ended_at=now_ts(),
-                findings=[
-                    "A governança deve permanecer depois de identity/intent/squad para não sequestrar pedidos consultivos.",
-                    "Autopatch real deve continuar bloqueado sem aprovação humana.",
-                ],
-                recommendation="Manter AO18A como precedência mínima e isolar qualquer execução real em trilho separado.",
-                risk="low",
-            ),
-        ]
-        ended = now_ts()
-        execution = {
-            "execution_id": execution_id,
-            "parent_agent": "Orion",
-            "mode": "readonly",
-            "write_executed": False,
-            "dispatch_executed": True,
-            "started_at": started,
-            "ended_at": ended,
-            "duration_ms": max(0, int((ended - started) * 1000)),
-            "child_agents": nodes,
-        }
-        blocks = []
-        for i, node in enumerate(nodes, 1):
-            findings = "\n".join([f"- {item}" for item in (node.get("findings") or [])])
-            blocks.append(
-                f"{i}. {node.get('agent_name')} — {node.get('role')}\n"
-                f"status: {node.get('status')} | risk: {node.get('risk')} | duration_ms: {node.get('duration_ms')}\n"
-                f"{findings}\n"
-                f"Recomendação: {node.get('recommendation')}\n"
-            )
-        text_out = (
-            "Orion — AO18B Real Technical Squad Execution\n\n"
-            f"- execution_id: {execution_id}\n"
-            "- parent_agent: Orion\n"
-            "- mode: readonly\n"
-            "- dispatch_executed: true\n"
-            "- write_executed: false\n"
-            f"- child_agents: {', '.join([str(n.get('agent_id')) for n in nodes])}\n\n"
-            + "\n".join(blocks) +
-            "\nSíntese Orion\n"
-            "- O core está operacional, mas a maturidade enterprise exige telemetria granular, execution graph persistente e realtime observável.\n"
-            "- Próximo salto técnico: eventos por subagente no SSE e smoke test automatizado por agente líder.\n"
-        )
-        try:
-            logger.info(
-                "AO18B_ORION_SQUAD_COMPLETED execution_id=%s org=%s agents=%s",
-                execution_id,
-                org_slug,
-                ",".join([str(n.get("agent_id")) for n in nodes]),
-            )
-        except Exception:
-            pass
-        return text_out, execution
-
-    def _is_orion_chris_joint_readonly_request(text: str) -> bool:
-        normalized = _normalize_router_text(text)
-        if not normalized:
-            return False
-        has_orkio_or_team = bool(re.search(r"\b(orkio|team|time)\b", normalized))
-        has_orion = "orion" in normalized
-        has_chris = "chris" in normalized or "cris" in normalized
-        has_eval = bool(re.search(r"\b(avaliar|avaliem|avaliarem|avaliação|avaliacao|auditoria|análise|analise|plataforma)\b", normalized))
-        readonly = bool(re.search(r"\b(readonly|read-only|sem aplicar patch|sem aplicar patches|não aplicar patch|nao aplicar patch|sem escrita|sem executar)\b", normalized))
-        return bool(has_orkio_or_team and has_orion and has_chris and has_eval and readonly)
-
-
-    def _build_orion_chris_joint_readonly_answer(text: str, *, db2: Session, org_slug: str) -> str:
-        orion_block, orion_execution = _build_orion_real_technical_squad_answer(text, org_slug=org_slug)
-        chris_execution = _build_chris_real_squad_execution(text, db2=db2, org_slug=org_slug)
-        chris_block = _format_ao18b_chris_squad_answer(chris_execution)
-        child_graphs = [
-            str(orion_execution.get("execution_id") or "orion_squad"),
-            str(chris_execution.get("execution_id") or "chris_squad"),
-        ]
-        return (
-            "ORKIO — AO18B ORQUESTRAÇÃO READONLY REAL ORION + CHRIS\n\n"
-            "1. Escopo\n"
-            "- Pedido reconhecido como coordenação readonly entre Orion e Chris.\n"
-            "- Nenhum patch aplicado, nenhuma escrita real, nenhum commit, nenhum PR.\n"
-            "- Objetivo: avaliar a plataforma por dois eixos complementares: técnico e estratégico.\n"
-            f"- child_execution_graphs: {', '.join(child_graphs)}\n\n"
-            "2. Orion — execution graph técnico\n"
-            f"{orion_block}\n\n"
-            "3. Chris — execution graph estratégico\n"
-            f"{chris_block}\n\n"
-            "4. Merge Orkio\n"
-            "- Orion confirma a necessidade de robustez operacional, telemetria realtime e lifecycle SSE completo.\n"
-            "- Chris confirma que o potencial de mercado existe, mas precisa virar evidência: uso, retenção, preço, leads, MRR/ARR e confiança visual.\n"
-            "- O produto está apto para demonstrações controladas e avaliação readonly; ainda não deve ser vendido como enterprise massivo sem realtime e execution graph persistente.\n\n"
-            "5. Próxima ação segura\n"
-            "- Manter AO18A Router Semantic Precedence ativo.\n"
-            "- Validar @Orion, @Chris e @Orkio em smoke tests separados.\n"
-            "- Avançar para eventos SSE por subagente: agent_started, agent_done, orchestrator_merge e done.\n"
-            "- Depois evoluir Team Master Orchestrator e painel visual de execution graph.\n\n"
-            "VEREDITO ORKIO\n"
-            "GO para orquestração readonly real em demo controlada. NO-GO para autopatch real e escala enterprise sem approval gate, rollback, telemetria realtime e validação humana."
-        )
-
-
-    def _orion_chris_joint_readonly_fastpath_in_isolated_session() -> Dict[str, Any]:
-        db2 = SessionLocal()
-        try:
-            final_text = _build_orion_chris_joint_readonly_answer(message, db2=db2, org_slug=org)
-        finally:
-            try:
-                db2.close()
-            except Exception:
-                pass
-
-        persisted = _persist_assistant_message(
-            text=final_text,
-            thread_id=tid_seed,
-            agent_id="orkio",
-            agent_name="Orkio",
-        )
-        return {
-            **persisted,
-            "answer": final_text,
-            "message": final_text,
-            "final_text": final_text,
-            "agent_id": "orkio",
-            "agent_name": "Orkio",
-            "voice_id": None,
-            "avatar_url": None,
-            "runtime_hints": {
-                "routing": {
-                    "routing_source": "stream_orion_chris_joint_readonly_fastpath_ao18b",
-                    "route_applied": True,
-                    "execution_lifecycle": "completed",
-                    "visible_agent": "Orkio",
-                    "support_agents": ["Orion", "Chris"],
-                    "write_executed": False,
-                    "dispatch_executed": True,
-                }
-            },
-        }
-
-
     def _chris_strategic_squad_fastpath_in_isolated_session() -> Dict[str, Any]:
         db2 = SessionLocal()
         try:
-            final_text = _build_chris_real_squad_answer(message, db2=db2, org_slug=org)
+            final_text = _build_chris_strategic_squad_answer(message, db2=db2, org_slug=org)
         finally:
             try:
                 db2.close()
@@ -29737,12 +29199,11 @@ async def chat_stream(
             "avatar_url": None,
             "runtime_hints": {
                 "routing": {
-                    "routing_source": "stream_chris_real_squad_fastpath_ao18b",
+                    "routing_source": "stream_chris_strategic_squad_fastpath_v1",
                     "route_applied": True,
                     "execution_lifecycle": "completed",
-                    "visible_agent": "Chris",
-                    "dispatch_executed": True,
-                    "support_agents": [
+                    "visible_agent": "Cris",
+                    "silent_specialists": [
                         "finance_strategist",
                         "growth_strategist",
                         "sales_lead",
@@ -31598,29 +31059,13 @@ async def chat_stream(
             except Exception:
                 pass
 
-        # AO18A_ORION_CHRIS_JOINT_READONLY_FASTPATH
-        # Pedidos para Orkio coordenar Orion + Chris em readonly devem vencer
-        # governance/proposal_only e retornar síntese combinada útil.
-        if _is_orion_chris_joint_readonly_request(message):
-            try:
-                payload = await asyncio.to_thread(_orion_chris_joint_readonly_fastpath_in_isolated_session)
-                async for ev in _emit_result_payload(payload, routing_source="stream_orion_chris_joint_readonly_fastpath_ao18b"):
-                    yield ev
-                return
-            except Exception:
-                try:
-                    logger.exception("CHAT_STREAM_ORION_CHRIS_JOINT_READONLY_FASTPATH_FAILED trace_id=%s", trace_id)
-                except Exception:
-                    pass
-                # Se falhar, os guards existentes ainda protegem a UI.
-
         # AO01_CHRIS_STRATEGIC_SQUAD_FASTPATH_V1
         # Pedidos de valuation/estratégia para Chris/Cris devem responder em
         # trilho leve, com especialistas silenciosos e sem depender do runtime pesado.
         if _is_chris_strategic_squad_request(message):
             try:
                 payload = await asyncio.to_thread(_chris_strategic_squad_fastpath_in_isolated_session)
-                async for ev in _emit_result_payload(payload, routing_source="stream_chris_real_squad_fastpath_ao18b"):
+                async for ev in _emit_result_payload(payload, routing_source="stream_chris_strategic_squad_fastpath_v1"):
                     yield ev
                 return
             except Exception:
@@ -34024,6 +33469,44 @@ def realtime_event(
 
 
 
+
+
+# AO19D_REALTIME_TELEMETRY_LAYER
+# Server-side classification for frontend WebRTC telemetry persisted through /api/realtime/events:batch.
+AO19D_REALTIME_TELEMETRY_CRITICAL_EVENTS = {
+    "telemetry.TOKEN_RECEIVED",
+    "telemetry.EPHEMERAL_TOKEN_READY",
+    "telemetry.PEER_CREATED",
+    "telemetry.SDP_HANDSHAKE_OK",
+    "telemetry.SDP_HANDSHAKE_ERROR",
+    "telemetry.PEER_CONNECTED",
+    "telemetry.DATA_CHANNEL_OPEN",
+    "telemetry.DATA_CHANNEL_CLOSE",
+    "telemetry.SESSION_UPDATED",
+    "telemetry.SESSION_UPDATE_ERROR",
+    "telemetry.RESPONSE_CREATE_SENT",
+    "telemetry.RESPONSE_CREATED",
+    "telemetry.RESPONSE_DONE",
+    "telemetry.RESPONSE_DONE_WITHOUT_TEXT",
+    "telemetry.REALTIME_ERROR",
+    "telemetry.REALTIME_BOOT_ERROR",
+    "telemetry.AUDIO_PLAY_START",
+    "telemetry.AUDIO_PLAY_BLOCKED",
+    "telemetry.MIC_READY",
+    "telemetry.TRANSCRIPT_FINAL",
+}
+
+def _ao19d_realtime_event_name(event_type: str) -> str:
+    raw = str(event_type or "").strip()
+    if raw.startswith("telemetry."):
+        return raw.split(".", 1)[1].upper()
+    return raw.upper()
+
+def _ao19d_safe_meta(meta: Any) -> Dict[str, Any]:
+    if isinstance(meta, dict):
+        return meta
+    return {}
+
 class RealtimeEventsBatchReq(BaseModel):
     session_id: str
     events: List[RealtimeEventIn]
@@ -34056,9 +33539,27 @@ def realtime_events_batch(
     message_rows: List[Message] = []
     punct_ids: List[str] = []
     multi_agent_inputs: List[str] = []
+    ao19d_telemetry_counts: Dict[str, int] = {}
+    ao19d_critical_seen: List[str] = []
 
     for item in body.events:
         ts = int(item.created_at or now)
+        event_type_raw = str(item.event_type or "").strip()
+        if event_type_raw.startswith("telemetry."):
+            telemetry_name = _ao19d_realtime_event_name(event_type_raw)
+            ao19d_telemetry_counts[telemetry_name] = ao19d_telemetry_counts.get(telemetry_name, 0) + 1
+            if event_type_raw in AO19D_REALTIME_TELEMETRY_CRITICAL_EVENTS:
+                ao19d_critical_seen.append(telemetry_name)
+                telemetry_meta = _ao19d_safe_meta(getattr(item, "meta", None))
+                logger.info(
+                    "AO19D_REALTIME_TELEMETRY session_id=%s thread_id=%s event=%s dc_state=%s pc_state=%s phase=%s",
+                    body.session_id,
+                    getattr(rs, "thread_id", None),
+                    telemetry_name,
+                    telemetry_meta.get("dc_state"),
+                    telemetry_meta.get("pc_state"),
+                    telemetry_meta.get("phase"),
+                )
         speaker_type = (item.role or "user").strip() or "user"
         speaker_id = rs.user_id if speaker_type == "user" else rs.agent_id
         agent_id = rs.agent_id if speaker_type != "user" else None
@@ -34190,7 +33691,29 @@ def realtime_events_batch(
                 rs.thread_id,
             )
 
-    return {"inserted_events": len(ev_rows), "inserted_messages": len(message_rows)}
+    if ao19d_telemetry_counts:
+        try:
+            logger.info(
+                "AO19D_REALTIME_TELEMETRY_BATCH session_id=%s thread_id=%s total=%s critical=%s counts=%s",
+                rs.id,
+                rs.thread_id,
+                sum(ao19d_telemetry_counts.values()),
+                ",".join(ao19d_critical_seen[-12:]),
+                json.dumps(ao19d_telemetry_counts, ensure_ascii=False, sort_keys=True),
+            )
+        except Exception:
+            pass
+
+    return {
+        "inserted_events": len(ev_rows),
+        "inserted_messages": len(message_rows),
+        "ao19d_telemetry": {
+            "enabled": True,
+            "total": sum(ao19d_telemetry_counts.values()),
+            "critical_seen": ao19d_critical_seen[-20:],
+            "counts": ao19d_telemetry_counts,
+        },
+    }
 
 
 @app.post("/api/realtime/end")
