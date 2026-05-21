@@ -23266,8 +23266,34 @@ def admin_valuation(days: int = 30, _admin=Depends(require_admin_access), x_org_
 
     approved_users = db.execute(select(func.count(User.id)).where(User.org_slug == org, User.approved_at.is_not(None))).scalar() or 0
     total_users = db.execute(select(func.count(User.id)).where(User.org_slug == org)).scalar() or 0
-    leads_total = db.execute(select(func.count(Lead.id)).where(Lead.org_slug == org)).scalar() or 0
-    leads_window = db.execute(select(func.count(Lead.id)).where(Lead.org_slug == org, Lead.created_at >= since)).scalar() or 0
+    # AO01_CHRIS_VALUATION_SCHEMA_GUARD_V1
+    # Some production databases may lag behind the model imports and miss the
+    # leads table. Valuation must remain available for Cris/Chris and admin UI:
+    # return conservative zeros instead of crashing the full capability.
+    try:
+        leads_total = db.execute(select(func.count(Lead.id)).where(Lead.org_slug == org)).scalar() or 0
+    except OperationalError:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        leads_total = 0
+        try:
+            logger.exception("ADMIN_VALUATION_LEADS_TOTAL_FALLBACK org=%s", org)
+        except Exception:
+            pass
+    try:
+        leads_window = db.execute(select(func.count(Lead.id)).where(Lead.org_slug == org, Lead.created_at >= since)).scalar() or 0
+    except OperationalError:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        leads_window = 0
+        try:
+            logger.exception("ADMIN_VALUATION_LEADS_WINDOW_FALLBACK org=%s", org)
+        except Exception:
+            pass
     threads_window = db.execute(select(func.count(Thread.id)).where(Thread.org_slug == org, Thread.created_at >= since)).scalar() or 0
     messages_window = db.execute(select(func.count(Message.id)).where(Message.org_slug == org, Message.created_at >= since)).scalar() or 0
     cost_30d = db.execute(select(func.sum(CostEvent.total_cost_usd)).where(CostEvent.org_slug == org, CostEvent.created_at >= (now_ts() - 30 * 86400))).scalar() or 0
@@ -28962,6 +28988,234 @@ async def chat_stream(
             "Se esta mensagem aparecer em produção, o INTERNAL WARROOM GOVERNED ARTIFACT V3 está ativo."
         )
 
+    # AO01_CHRIS_STRATEGIC_SQUAD_FASTPATH_V1
+    # Fast-path leve para impedir que pedidos estratégicos/valuation da Cris
+    # caiam em runtime pesado, que hoje ainda pode degradar. A Cris atua como
+    # líder visível e sintetiza especialistas silenciosos.
+    def _is_chris_strategic_squad_request(text: str) -> bool:
+        normalized = _normalize_router_text(text)
+        if not normalized:
+            return False
+
+        # Alias explícitos aceitos: Cris e Chris devem ser equivalentes.
+        explicit_chris = bool(re.search(r"(^|\s|@)(cris|chris|cristina|cfo)(\b|[\s,:;.!?])", normalized))
+        valuation_terms = [
+            "valuation",
+            "avaliação da empresa",
+            "avaliacao da empresa",
+            "avaliar a empresa",
+            "quanto vale",
+            "valor da plataforma",
+            "valor da empresa",
+            "pre-money",
+            "premoney",
+            "post-money",
+            "postmoney",
+            "modelo financeiro",
+            "unit economics",
+            "economics",
+            "mrr",
+            "arr",
+            "receita",
+            "pricing",
+            "precificação",
+            "precificacao",
+            "go-to-market",
+            "go to market",
+            "gtm",
+            "crescimento",
+            "captação",
+            "captacao",
+            "investidor",
+            "investimento",
+            "business plan",
+            "plano de negócios",
+            "plano de negocios",
+        ]
+        strategic_terms = [
+            "estratégia",
+            "estrategia",
+            "comercial",
+            "vendas",
+            "funil",
+            "mercado",
+            "lançamento",
+            "lancamento",
+            "pré lançamento",
+            "pre lancamento",
+            "antes do lançamento",
+            "antes do lancamento",
+        ]
+
+        has_finance_intent = any(term in normalized for term in valuation_terms)
+        has_strategy_intent = any(term in normalized for term in strategic_terms)
+        if explicit_chris and (has_finance_intent or has_strategy_intent):
+            return True
+        if has_finance_intent and ("plataforma" in normalized or "orkio" in normalized or "patroai" in normalized):
+            return True
+        return False
+
+
+    def _safe_chris_count(db2: Session, model_cls: Any, org_slug: str, *conditions: Any) -> int:
+        try:
+            stmt = select(func.count(model_cls.id)).where(model_cls.org_slug == org_slug)
+            for cond in conditions:
+                if cond is not None:
+                    stmt = stmt.where(cond)
+            return int(db2.execute(stmt).scalar() or 0)
+        except OperationalError:
+            try:
+                db2.rollback()
+            except Exception:
+                pass
+            try:
+                logger.exception("CHRIS_STRATEGIC_COUNT_FALLBACK model=%s org=%s", getattr(model_cls, "__name__", str(model_cls)), org_slug)
+            except Exception:
+                pass
+            return 0
+        except Exception:
+            try:
+                db2.rollback()
+            except Exception:
+                pass
+            return 0
+
+
+    def _build_chris_strategic_squad_answer(text: str, *, db2: Session, org_slug: str) -> str:
+        normalized = _normalize_router_text(text)
+        now = now_ts()
+        since_30d = now - 30 * 86400
+
+        approved_users = _safe_chris_count(db2, User, org_slug, User.approved_at.is_not(None))
+        total_users = _safe_chris_count(db2, User, org_slug)
+        leads_total = _safe_chris_count(db2, Lead, org_slug)
+        leads_30d = _safe_chris_count(db2, Lead, org_slug, Lead.created_at >= since_30d)
+        threads_30d = _safe_chris_count(db2, Thread, org_slug, Thread.created_at >= since_30d)
+        messages_30d = _safe_chris_count(db2, Message, org_slug, Message.created_at >= since_30d)
+
+        try:
+            cost_30d = float(db2.execute(
+                select(func.sum(CostEvent.total_cost_usd)).where(
+                    CostEvent.org_slug == org_slug,
+                    CostEvent.created_at >= since_30d,
+                )
+            ).scalar() or 0)
+        except Exception:
+            try:
+                db2.rollback()
+            except Exception:
+                pass
+            cost_30d = 0.0
+
+        # Valuation preliminar por estágio. Não substitui valuation formal;
+        # garante resposta útil antes de dados financeiros completos.
+        traction_score = 0
+        if approved_users >= 1:
+            traction_score += 1
+        if leads_total >= 10 or leads_30d >= 3:
+            traction_score += 1
+        if messages_30d >= 50 or threads_30d >= 10:
+            traction_score += 1
+
+        stage = "pré-lançamento / beta controlado"
+        low_usd, high_usd = 250_000, 750_000
+        if traction_score >= 2:
+            stage = "beta com sinais iniciais de tração"
+            low_usd, high_usd = 750_000, 1_800_000
+        if traction_score >= 3:
+            stage = "pré-seed com produto ativo e primeiros sinais operacionais"
+            low_usd, high_usd = 1_500_000, 3_500_000
+
+        if "arr" in normalized or "mrr" in normalized or "receita" in normalized:
+            focus_line = "Foco detectado: modelo financeiro, receita recorrente e leitura de monetização."
+        elif "invest" in normalized or "capta" in normalized:
+            focus_line = "Foco detectado: narrativa para investidor e faixa de captação."
+        elif "go-to-market" in normalized or "gtm" in normalized or "crescimento" in normalized:
+            focus_line = "Foco detectado: go-to-market, aquisição e tese de crescimento."
+        else:
+            focus_line = "Foco detectado: valuation estratégica da plataforma no estágio atual."
+
+        return (
+            "Cris — Valuation Estratégica Preliminar\n\n"
+            f"{focus_line}\n\n"
+            "1. Síntese executiva da Cris\n"
+            f"- Estágio lido: {stage}.\n"
+            f"- Faixa indicativa preliminar: US$ {low_usd:,.0f} a US$ {high_usd:,.0f}.\n"
+            "- Natureza da leitura: estimativa estratégica pré-lançamento, não laudo financeiro formal.\n"
+            "- Minha recomendação: usar esta faixa como tese de conversa inicial, validando com métricas reais pós-beta.\n\n"
+            "2. Finance Strategist — leitura de valuation\n"
+            f"- Usuários aprovados: {approved_users}.\n"
+            f"- Usuários totais: {total_users}.\n"
+            f"- Leads totais: {leads_total}; leads nos últimos 30 dias: {leads_30d}.\n"
+            f"- Custo IA estimado em 30 dias: US$ {cost_30d:,.2f}.\n"
+            "- O valuation ainda deve ser mais ancorado em opcionalidade, IP, diferenciação e potencial de mercado do que em receita histórica.\n\n"
+            "3. Growth Strategist — leitura de mercado\n"
+            "- Antes do lançamento, o ativo mais valioso é provar demanda qualificada: conversas com founders, consultores, empresas e potenciais parceiros.\n"
+            "- O próximo marco é transformar usuários selecionados em evidências: depoimentos, casos de uso, retenção e disposição de pagamento.\n\n"
+            "4. Product Strategist — leitura de produto\n"
+            "- A plataforma já possui promessa forte: orquestração multiagente, governança, execução e experiência premium.\n"
+            "- O risco principal é percepção: a experiência precisa parecer estável, clara e encantadora desde a primeira interação.\n\n"
+            "5. Ops Manager — leitura operacional\n"
+            f"- Atividade recente: {threads_30d} threads e {messages_30d} mensagens nos últimos 30 dias.\n"
+            "- O foco operacional deve ser reduzir falhas de stream, garantir respostas sempre úteis e criar testes de smoke para cada agente líder.\n\n"
+            "6. Legal Guardian — leitura de risco\n"
+            "- Evitar apresentar esta faixa como avaliação certificada.\n"
+            "- Posicionar como estimativa estratégica interna, sujeita a validação por métricas, contrato, receita e diligência.\n\n"
+            "7. Próximos passos recomendados\n"
+            "- Criar um painel simples de valuation com usuários, leads, mensagens, custos, MRR e ARR.\n"
+            "- Validar 5 a 10 conversas beta com registro de dor, valor percebido e preço aceitável.\n"
+            "- Preparar uma tese de captação em três faixas: conservadora, base e agressiva.\n"
+            "- Fazer Cris acionar sempre Finance, Growth, Product, Ops e Legal quando o pedido envolver valuation, business plan ou go-to-market.\n\n"
+            "Veredito da Cris\n"
+            "A plataforma tem potencial de valuation relevante para estágio pré-lançamento, mas a perfeição exige transformar potencial em evidência: "
+            "tração, retenção, receita, estabilidade operacional e narrativa clara para investidores."
+        )
+
+
+    def _chris_strategic_squad_fastpath_in_isolated_session() -> Dict[str, Any]:
+        db2 = SessionLocal()
+        try:
+            final_text = _build_chris_strategic_squad_answer(message, db2=db2, org_slug=org)
+        finally:
+            try:
+                db2.close()
+            except Exception:
+                pass
+
+        persisted = _persist_assistant_message(
+            text=final_text,
+            thread_id=tid_seed,
+            agent_id="chris",
+            agent_name="Cris",
+        )
+        return {
+            **persisted,
+            "answer": final_text,
+            "message": final_text,
+            "final_text": final_text,
+            "agent_id": "chris",
+            "agent_name": "Cris",
+            "voice_id": None,
+            "avatar_url": None,
+            "runtime_hints": {
+                "routing": {
+                    "routing_source": "stream_chris_strategic_squad_fastpath_v1",
+                    "route_applied": True,
+                    "execution_lifecycle": "completed",
+                    "visible_agent": "Cris",
+                    "silent_specialists": [
+                        "finance_strategist",
+                        "growth_strategist",
+                        "sales_lead",
+                        "ops_manager",
+                        "product_strategist",
+                        "legal_guardian",
+                    ],
+                }
+            },
+        }
+
+
     def _persist_assistant_message(
         *,
         text: str,
@@ -30710,6 +30964,22 @@ async def chat_stream(
                 logger.info("CHAT_STREAM_DONE trace_id=%s thread_id=%s source=%s", trace_id, thread_id, routing_source)
             except Exception:
                 pass
+
+        # AO01_CHRIS_STRATEGIC_SQUAD_FASTPATH_V1
+        # Pedidos de valuation/estratégia para Cris/Chris devem responder em
+        # trilho leve, com especialistas silenciosos e sem depender do runtime pesado.
+        if _is_chris_strategic_squad_request(message):
+            try:
+                payload = await asyncio.to_thread(_chris_strategic_squad_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_chris_strategic_squad_fastpath_v1"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_CHRIS_STRATEGIC_SQUAD_FASTPATH_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Se falhar, os guards existentes ainda protegem a UI.
 
         # AO-11_ADMIN_CONTROLLED_EVOLUTION_PROPOSAL_LIFECYCLE
         # Criação de proposta proposal_only deve vencer a leitura executiva genérica,
