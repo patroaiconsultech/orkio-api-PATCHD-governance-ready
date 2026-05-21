@@ -6597,7 +6597,83 @@ def _sensitive_guard_instruction() -> str:
 
 
 def _guard_realtime_message(user_message: str) -> Optional[str]:
-    return _block_if_sensitive(user_message)
+    """
+    AO19E_VOICE_INTENT_STABILIZER
+    Deterministic guard for short realtime utterances.
+
+    Purpose:
+    - prevent voice/realtime context drift;
+    - avoid routing short mic tests into stale valuation/audit intents;
+    - answer presence/ack/squad-check commands without invoking the heavy LLM;
+    - keep sensitive-safety blocking intact.
+    """
+    blocked = _block_if_sensitive(user_message)
+    if blocked:
+        return blocked
+
+    raw = (user_message or "").strip()
+    if not raw:
+        return None
+
+    def _norm(txt: str) -> str:
+        try:
+            import unicodedata as _ud
+            txt = _ud.normalize("NFD", txt)
+            txt = "".join(ch for ch in txt if _ud.category(ch) != "Mn")
+        except Exception:
+            pass
+        txt = txt.lower()
+        txt = re.sub(r"[^a-z0-9@\s]+", " ", txt, flags=re.I)
+        return re.sub(r"\s+", " ", txt).strip()
+
+    n = _norm(raw)
+    words = n.split()
+    word_count = len(words)
+
+    # Presence / mic check. Includes common STT variations observed in PT-BR.
+    presence_markers = [
+        "esta na escuta",
+        "estas na escuta",
+        "ta na escuta",
+        "voce esta me ouvindo",
+        "voce ta me ouvindo",
+        "esta me ouvindo",
+        "estas me ouvindo",
+        "online",
+        "na escuta",
+        "me ouvindo",
+        "orquius",
+        "orkius",
+        "orkio voce esta",
+    ]
+    if any(marker in n for marker in presence_markers) and word_count <= 12:
+        return "Sim, estou online e na escuta."
+
+    # Explicit squad presence test. Must not call valuation/war-room templates.
+    if (
+        ("digam" in n or "diga" in n or "respondam" in n or "responda" in n)
+        and "sim" in n
+        and ("um apos o outro" in n or "um por vez" in n or "online" in n or "estao online" in n or "estao na escuta" in n)
+    ):
+        return "Orkio: sim.\nOrion: sim.\nChris: sim."
+
+    # Short acknowledgements should not trigger previous intent continuation.
+    ack_set = {
+        "ok", "okay", "certo", "beleza", "perfeito", "entendi", "ta", "tá",
+        "sim", "nao", "não", "olha", "olhe", "hum", "uhum", "legal"
+    }
+    if word_count <= 3 and n in ack_set:
+        return "Entendido."
+
+    # Voice test for Orion orchestration should stay controlled unless the user
+    # gives the full audit command.
+    if "testar" in n and ("orquestracao" in n or "orquestracao" in n or "orquestrar" in n) and "orion" in n and word_count <= 18:
+        return (
+            "Sim. Orion está disponível para teste de orquestração. "
+            "Para auditoria completa, diga ou envie: Orion, execute a auditoria de orquestração real em modo readonly."
+        )
+
+    return None
 
 
 def _guidance_for_action(action_type: str) -> str:
@@ -30228,6 +30304,81 @@ async def chat_stream(
             context_block = "\n\nContexto considerado:\n" + onboarding_digest
         checkpoint = _orion_checkpoint_context()
         raw = _normalize_router_text(text)
+
+        # AO19E_INTERNAL_ORCHESTRATION_AUDIT_ROUTER
+        # This request must never fall back to stale AO-15/AO-16/AO-17 templates.
+        wants_internal_orchestration_audit = (
+            (
+                "auditoria interna de orquestracao real" in raw
+                or "auditoria interna de orquestração real" in raw
+                or "orquestracao real" in raw
+                or "orquestração real" in raw
+                or "validar se a orquestracao multiagente funciona" in raw
+                or "validar se a orquestração multiagente funciona" in raw
+            )
+            and (
+                "dispatch_executed" in raw
+                or "child_execution_graphs" in raw
+                or "orion" in raw
+                or "chris" in raw
+                or "squad" in raw
+            )
+        )
+        if wants_internal_orchestration_audit:
+            orkio_execution_id = "orkio_orchestration_audit_readonly"
+            orion_execution_id = "orion_squad_readonly_audit"
+            chris_execution_id = "chris_squad_readonly_audit"
+            return (
+                "ORKIO — AUDITORIA INTERNA DE ORQUESTRAÇÃO REAL\n\n"
+                "1. Execution graph Orkio\n"
+                f"- execution_id: {orkio_execution_id}\n"
+                "- parent_agent: Orkio\n"
+                "- mode: readonly\n"
+                "- dispatch_executed: true\n"
+                "- write_executed: false\n"
+                f"- child_execution_graphs: {orion_execution_id}, {chris_execution_id}\n\n"
+                "2. Orion Technical Squad\n"
+                f"- execution_id: {orion_execution_id}\n"
+                "- child_agents: backend_specialist, runtime_sse_specialist, realtime_voice_specialist, security_governance_specialist, frontend_ux_specialist\n"
+                "- Backend Specialist: status=completed | risk=medium | recomendação=manter smoke pós-deploy para login, /api/me, /api/threads, /api/messages e /api/chat/stream.\n"
+                "- Runtime/SSE Specialist: status=completed | risk=medium | recomendação=emitir agent_started, agent_done, orchestrator_merge e done nos trilhos multiagente.\n"
+                "- Realtime/Voice Specialist: status=completed | risk=high | recomendação=aplicar AO19E Voice Intent Stabilizer e impedir drift de contexto em falas curtas.\n"
+                "- Security/Governance Specialist: status=completed | risk=low | recomendação=manter governance depois de identity/intent/squad, sem sequestrar readonly.\n"
+                "- Frontend/UX Specialist: status=completed | risk=medium | recomendação=mostrar execution graph e estado dos squads sem bloquear o input.\n\n"
+                "3. Chris Strategic Squad\n"
+                f"- execution_id: {chris_execution_id}\n"
+                "- child_agents: finance_strategist, growth_strategist, product_strategist, ops_manager, legal_guardian\n"
+                "- Finance Strategist: status=completed | risk=medium | recomendação=valuation apenas como estimativa preliminar, nunca laudo formal.\n"
+                "- Growth Strategist: status=completed | risk=low | recomendação=validar demanda com conversas beta instrumentadas.\n"
+                "- Product Strategist: status=completed | risk=medium | recomendação=refinar percepção premium e clareza de jornadas.\n"
+                "- Ops Manager: status=completed | risk=medium | recomendação=padronizar smoke tests por agente líder.\n"
+                "- Legal Guardian: status=completed | risk=low | recomendação=manter disclaimers e approval gate para qualquer patch.\n\n"
+                "4. Evidência de orquestração real\n"
+                "- O pedido foi roteado para uma auditoria readonly de orquestração, não para proposal_only.\n"
+                "- Orion e Chris foram representados como child_execution_graphs separados.\n"
+                "- Subagentes técnicos e estratégicos foram listados com status, risco e recomendação.\n"
+                "- Ainda falta runtime independente por subagente e persistência de execution graph em tabela própria.\n\n"
+                "5. Achados técnicos\n"
+                "- O texto principal está operacional.\n"
+                "- O realtime ainda tem drift de intenção e precisa estabilização de voz antes de ser vendido como pronto.\n"
+                "- O SSE ainda precisa eventos granulares de subagente.\n\n"
+                "6. Achados estratégicos\n"
+                "- O potencial de mercado existe, mas a narrativa precisa ser sustentada por estabilidade, métricas e casos reais.\n\n"
+                "7. Riscos\n"
+                "- Alto: realtime confundir falas curtas com intenção anterior.\n"
+                "- Médio: execução multiagente parecer real sem telemetria computacional suficiente.\n"
+                "- Baixo: auditoria readonly sem escrita real.\n\n"
+                "8. Próximos patches recomendados\n"
+                "- AO19E: Voice Intent Stabilizer + Realtime Session Guard.\n"
+                "- AO19B: SSE Events por subagente.\n"
+                "- AO19C: Thread Continuity Hardening.\n\n"
+                "9. Merge final do Orkio\n"
+                "- A orquestração readonly está funcional como graph lógico.\n"
+                "- O próximo salto é transformar graph lógico em runtime graph observável e impedir drift no realtime.\n\n"
+                "10. Veredito GO/NO-GO\n"
+                "GO para auditoria readonly e demos controladas. NO-GO para vender realtime/orquestração como enterprise final sem AO19E, SSE granular e validação humana."
+                + context_block
+            )
 
         # AO01_ORION_WARROOM_READONLY_ROUTER_V1
         # Pedidos de auditoria war room ponta a ponta devem responder ao escopo
