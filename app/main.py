@@ -13184,6 +13184,62 @@ def _is_patch_governance_request_message(user_text: str) -> bool:
     low = str(user_text or "").strip().lower()
     if not low:
         return False
+
+    # AO18A_ROUTER_PRECEDENCE_GUARD:
+    # Pedido consultivo/readonly de orquestração, avaliação estratégica ou
+    # coordenação entre Orion/Chris NÃO pode virar PATCH GOVERNANCE RESPONSE
+    # apenas porque contém expressões como "sem aplicar patches".
+    readonly_markers = (
+        "readonly",
+        "read-only",
+        "somente leitura",
+        "sem aplicar patch",
+        "sem aplicar patches",
+        "sem executar",
+        "sem escrita",
+        "não aplicar patch",
+        "nao aplicar patch",
+        "não aplicar patches",
+        "nao aplicar patches",
+    )
+    strategic_orchestration_markers = (
+        "chris",
+        "cris",
+        "orion",
+        "orkio",
+        "time",
+        "team",
+        "squad",
+        "avaliem juntos",
+        "avaliarem juntos",
+        "acione orion e chris",
+        "avaliação estratégica",
+        "avaliacao estrategica",
+        "lado estratégico",
+        "lado estrategico",
+        "valuation",
+        "go-to-market",
+        "business plan",
+        "plataforma orkio",
+    )
+    if any(m in low for m in readonly_markers) and any(m in low for m in strategic_orchestration_markers):
+        # Exceção: se o usuário pedir explicitamente para gerar diff/arquivo/PR,
+        # preservamos a governança de patch.
+        explicit_write_markers = (
+            "gerar patch",
+            "gere patch",
+            "criar patch",
+            "diff preview",
+            "arquivo alvo",
+            "arquivos alvo",
+            "pull request",
+            "abrir pr",
+            "commit",
+            "aplicar na main",
+        )
+        if not any(m in low for m in explicit_write_markers):
+            return False
+
     intent_markers = (
         "patch",
         "diff",
@@ -28354,6 +28410,17 @@ async def chat_stream(
         if not normalized:
             return False
 
+        # AO18A_ROUTER_PRECEDENCE_GUARD:
+        # Avaliações/orquestrações readonly não devem ser capturadas pelo trilho
+        # governado só porque o prompt contém "sem aplicar patches".
+        if (
+            re.search(r"\b(orkio|orion|chris|cris|team|time|squad)\b", normalized)
+            and re.search(r"\b(avaliar|avaliem|avaliarem|avaliação|avaliacao|estratégic|estrategic|plataforma|juntos)\b", normalized)
+            and re.search(r"\b(readonly|read-only|sem aplicar patch|sem aplicar patches|não aplicar patch|nao aplicar patch|sem escrita|sem executar)\b", normalized)
+            and not re.search(r"\b(diff preview|arquivo alvo|arquivos alvo|pull request|abrir pr|commit|aplicar na main|gerar patch|gere patch)\b", normalized)
+        ):
+            return False
+
         direct_terms = [
             "proposal_only",
             "proposal only",
@@ -29035,6 +29102,19 @@ async def chat_stream(
         strategic_terms = [
             "estratégia",
             "estrategia",
+            "estratégico",
+            "estrategico",
+            "lado estratégico",
+            "lado estrategico",
+            "avaliação estratégica",
+            "avaliacao estrategica",
+            "avaliem juntos",
+            "avaliarem juntos",
+            "acione orion e chris",
+            "orion pelo lado técnico",
+            "orion pelo lado tecnico",
+            "chris pelo lado estratégico",
+            "chris pelo lado estrategico",
             "comercial",
             "vendas",
             "funil",
@@ -29170,6 +29250,85 @@ async def chat_stream(
             "A plataforma tem potencial de valuation relevante para estágio pré-lançamento, mas a perfeição exige transformar potencial em evidência: "
             "tração, retenção, receita, estabilidade operacional e narrativa clara para investidores."
         )
+
+
+    def _is_orion_chris_joint_readonly_request(text: str) -> bool:
+        normalized = _normalize_router_text(text)
+        if not normalized:
+            return False
+        has_orkio_or_team = bool(re.search(r"\b(orkio|team|time)\b", normalized))
+        has_orion = "orion" in normalized
+        has_chris = "chris" in normalized or "cris" in normalized
+        has_eval = bool(re.search(r"\b(avaliar|avaliem|avaliarem|avaliação|avaliacao|auditoria|análise|analise|plataforma)\b", normalized))
+        readonly = bool(re.search(r"\b(readonly|read-only|sem aplicar patch|sem aplicar patches|não aplicar patch|nao aplicar patch|sem escrita|sem executar)\b", normalized))
+        return bool(has_orkio_or_team and has_orion and has_chris and has_eval and readonly)
+
+
+    def _build_orion_chris_joint_readonly_answer(text: str, *, db2: Session, org_slug: str) -> str:
+        chris_block = _build_chris_strategic_squad_answer(text, db2=db2, org_slug=org_slug)
+        return (
+            "ORKIO — ORQUESTRAÇÃO READONLY ORION + CHRIS\n\n"
+            "1. Escopo\n"
+            "- Pedido reconhecido como coordenação readonly entre Orion e Chris.\n"
+            "- Nenhum patch aplicado, nenhuma escrita real, nenhum commit, nenhum PR.\n"
+            "- Objetivo: avaliar a plataforma por dois eixos complementares: técnico e estratégico.\n\n"
+            "2. Orion — leitura técnica consolidada\n"
+            "- O núcleo operacional já demonstra sinais verdes: auth, threads, mensagens, SSE e rotas principais respondendo.\n"
+            "- O risco técnico principal não é mais indisponibilidade total; é consistência de roteamento, telemetria realtime/voz e previsibilidade de squads.\n"
+            "- A prioridade técnica é consolidar Master Orchestrator Router com precedência clara: identidade → intent → squad → governance → artifact.\n"
+            "- O próximo patch técnico deve impedir que pedidos consultivos sejam capturados por governance/proposal_only.\n\n"
+            "3. Chris — leitura estratégica consolidada\n"
+            f"{chris_block}\n\n"
+            "4. Síntese Orkio\n"
+            "- Orion confirma a necessidade de robustez operacional e arquitetura de orquestração determinística.\n"
+            "- Chris confirma que o potencial de mercado existe, mas precisa ser convertido em evidência: uso, retenção, disposição de pagamento, estabilidade e narrativa.\n"
+            "- O produto está apto para demonstrações controladas, mas ainda não deve ser vendido como enterprise massivo antes de realtime, squads e UX premium estarem estabilizados.\n\n"
+            "5. Próxima ação segura\n"
+            "- Aplicar AO18A Router Semantic Precedence.\n"
+            "- Validar @Orion, @Chris e @Orkio em smoke tests separados.\n"
+            "- Depois avançar para AO18B Chris Strategic Squad Engine e AO18C Team Master Orchestrator.\n\n"
+            "VEREDITO ORKIO\n"
+            "GO para avaliação readonly, demos controladas e evolução governada. NO-GO para autopatch real e escala enterprise sem approval gate, rollback e validação humana."
+        )
+
+
+    def _orion_chris_joint_readonly_fastpath_in_isolated_session() -> Dict[str, Any]:
+        db2 = SessionLocal()
+        try:
+            final_text = _build_orion_chris_joint_readonly_answer(message, db2=db2, org_slug=org)
+        finally:
+            try:
+                db2.close()
+            except Exception:
+                pass
+
+        persisted = _persist_assistant_message(
+            text=final_text,
+            thread_id=tid_seed,
+            agent_id="orkio",
+            agent_name="Orkio",
+        )
+        return {
+            **persisted,
+            "answer": final_text,
+            "message": final_text,
+            "final_text": final_text,
+            "agent_id": "orkio",
+            "agent_name": "Orkio",
+            "voice_id": None,
+            "avatar_url": None,
+            "runtime_hints": {
+                "routing": {
+                    "routing_source": "stream_orion_chris_joint_readonly_fastpath_ao18a",
+                    "route_applied": True,
+                    "execution_lifecycle": "completed",
+                    "visible_agent": "Orkio",
+                    "support_agents": ["Orion", "Chris"],
+                    "write_executed": False,
+                    "dispatch_executed": False,
+                }
+            },
+        }
 
 
     def _chris_strategic_squad_fastpath_in_isolated_session() -> Dict[str, Any]:
@@ -31058,6 +31217,22 @@ async def chat_stream(
                 logger.info("CHAT_STREAM_DONE trace_id=%s thread_id=%s source=%s", trace_id, thread_id, routing_source)
             except Exception:
                 pass
+
+        # AO18A_ORION_CHRIS_JOINT_READONLY_FASTPATH
+        # Pedidos para Orkio coordenar Orion + Chris em readonly devem vencer
+        # governance/proposal_only e retornar síntese combinada útil.
+        if _is_orion_chris_joint_readonly_request(message):
+            try:
+                payload = await asyncio.to_thread(_orion_chris_joint_readonly_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_orion_chris_joint_readonly_fastpath_ao18a"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_ORION_CHRIS_JOINT_READONLY_FASTPATH_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Se falhar, os guards existentes ainda protegem a UI.
 
         # AO01_CHRIS_STRATEGIC_SQUAD_FASTPATH_V1
         # Pedidos de valuation/estratégia para Chris/Cris devem responder em
