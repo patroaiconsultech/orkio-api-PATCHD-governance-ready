@@ -66,6 +66,31 @@ _KEYWORD_MAP = {
         "memory", "memória", "memoria", "rag", "context", "contexto",
         "knowledge", "base de conhecimento", "thread context", "org context",
     ],
+    "finance_strategist": [
+        "valuation", "avaliação", "avaliacao", "quanto vale", "pre-money",
+        "post-money", "mrr", "arr", "unit economics", "financeiro",
+        "finanças", "financas", "pricing", "precificação", "precificacao",
+    ],
+    "growth_strategist": [
+        "go-to-market", "go to market", "gtm", "growth", "crescimento",
+        "aquisição", "aquisicao", "funil", "mercado", "posicionamento",
+    ],
+    "sales_lead": [
+        "vendas", "sales", "pipeline", "receita", "comercial", "conversão",
+        "conversao", "ticket", "proposta comercial",
+    ],
+    "ops_manager": [
+        "operação", "operacao", "processo", "execução", "execucao", "runbook",
+        "go-live", "lançamento", "lancamento", "entrega",
+    ],
+    "product_strategist": [
+        "produto", "roadmap", "ux", "experiência", "experiencia", "feature",
+        "premium", "onboarding", "avatar", "prechat",
+    ],
+    "legal_guardian": [
+        "legal", "jurídico", "juridico", "compliance", "risco", "contrato",
+        "termos", "lgpd", "investidor",
+    ],
 }
 
 
@@ -167,6 +192,99 @@ def build_orion_squad_overlay(db: Session, *, org: str, message: str) -> Dict[st
             "enabled": True,
             "primary_specialist": primary.get("slug") if primary else None,
             "secondary_specialist": secondary.get("slug") if secondary else None,
+            "overlay_text": "\n".join(lines),
+        }
+    except Exception:
+        return {}
+
+
+# AO01_CHRIS_STRATEGIC_SQUAD_OVERLAY_V1
+# Overlay utilitário para evoluir Cris/Chris para líder de squad estratégico.
+# Fail-open: não quebra o chat se registry/specialists não estiverem prontos.
+_CHRIS_STRATEGIC_MARKERS = [
+    "cris", "chris", "cristina", "cfo", "valuation", "avaliação", "avaliacao",
+    "quanto vale", "valor da plataforma", "modelo financeiro", "mrr", "arr",
+    "unit economics", "go-to-market", "gtm", "business plan", "plano de negócios",
+    "plano de negocios", "captação", "captacao", "investidor", "pricing",
+    "precificação", "precificacao", "crescimento", "receita",
+]
+
+
+def _is_chris_strategic_request(message: str) -> bool:
+    raw = _normalize(message)
+    if not raw:
+        return False
+    return any(marker in raw for marker in _CHRIS_STRATEGIC_MARKERS)
+
+
+def should_apply_chris_squad(agent: Any, message: str) -> bool:
+    agent_name = ((getattr(agent, "name", None) or "")).strip().lower()
+    if agent_name in {"cris", "chris", "cristina"} or agent_name.startswith("chris ") or agent_name.startswith("cris "):
+        return True
+    return _is_chris_strategic_request(message)
+
+
+def build_chris_squad_overlay(db: Session, *, org: str, message: str) -> Dict[str, Any]:
+    """
+    Overlay de sistema para Cris operar como líder estratégica visível,
+    coordenando especialistas financeiros, growth, vendas, produto, ops e legal.
+    Não executa múltiplas LLMs; orienta uma síntese única e auditável.
+    """
+    try:
+        if not _is_chris_strategic_request(message):
+            return {}
+
+        agents = load_squad_agents(db)
+        scored = _score_specialists(message, agents)
+
+        preferred = [
+            "finance_strategist",
+            "growth_strategist",
+            "sales_lead",
+            "ops_manager",
+            "product_strategist",
+            "legal_guardian",
+        ]
+        picked: List[Dict[str, Any]] = []
+        seen = set()
+        for slug in preferred:
+            row = next((a for a in scored if (a.get("slug") or "") == slug), None)
+            if row and slug not in seen:
+                picked.append(row)
+                seen.add(slug)
+        if not picked:
+            for slug in preferred[:4]:
+                picked.append({"slug": slug, "name": slug.replace("_", " ").title(), "code": slug.upper()})
+
+        lines = [
+            "Internal Cris strategic squad overlay:",
+            "- You are Cris acting as the visible strategic/CFO orchestrator.",
+            "- Only Cris should answer the user directly.",
+            "- Use silent specialists to structure the reasoning.",
+            "- Do not present internal specialists as separate chat participants unless summarizing their views.",
+            "- Always answer even with incomplete data; label estimates as preliminary.",
+            "- For valuation, separate assumptions, evidence, range, risks and next metrics.",
+            "",
+            "Silent specialists to consider:",
+        ]
+        for a in picked[:6]:
+            lines.append(f"- {a.get('name')} ({a.get('slug')})")
+
+        lines.extend([
+            "",
+            "Answer format:",
+            "1) Cris — Síntese executiva",
+            "2) Finance Strategist — valuation/unit economics",
+            "3) Growth Strategist — mercado e aquisição",
+            "4) Product/Ops — produto, entrega e próximos marcos",
+            "5) Legal/Risk — ressalvas e riscos",
+            "6) Veredito da Cris",
+        ])
+
+        return {
+            "enabled": True,
+            "primary_specialist": picked[0].get("slug") if picked else None,
+            "secondary_specialists": [a.get("slug") for a in picked[1:6]],
             "overlay_text": "\n".join(lines),
         }
     except Exception:
