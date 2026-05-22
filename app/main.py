@@ -31173,6 +31173,12 @@ async def chat_stream(
             except Exception:
                 pass
 
+            yield _metatron_sse("agent_started", {
+                **final_base,
+                "step": "agent_started",
+                "message": f"{agent_name} iniciou a resposta.",
+                "execution_id": trace_id,
+            })
             yield _metatron_sse("status", {
                 **final_base,
                 "status": "Resposta preparada.",
@@ -31182,6 +31188,13 @@ async def chat_stream(
                 **final_base,
                 "delta": final_text,
                 "content": final_text,
+            })
+            yield _metatron_sse("orchestrator_merge", {
+                **final_base,
+                "step": "orchestrator_merge",
+                "message": "Resposta consolidada pelo Orkio.",
+                "execution_id": trace_id,
+                "merged": True,
             })
             yield _metatron_sse("agent_done", {
                 **final_base,
@@ -33123,6 +33136,100 @@ def _run_realtime_multi_agent_turn(
 
     if not host_agent:
         return []
+
+    # AO20A_REALTIME_ORCHESTRATION_STABILIZER
+    # Defesa server-side contra drift de intenção no realtime:
+    # o frontend também consulta /api/realtime/guard, mas transcript.final pode
+    # chegar em /api/realtime/events:batch antes do guard assíncrono terminar.
+    # Portanto, o backend precisa bloquear falas curtas/ack antes de acionar
+    # Chris, Orion, squads ou qualquer trilho multiagente.
+    guarded_reply = _guard_realtime_message(text_in)
+    if guarded_reply:
+        guard_agent_id = getattr(host_agent, "id", None)
+        guard_agent_name = (getattr(host_agent, "name", None) or "Orkio").strip() or "Orkio"
+        created_at = now_ts()
+        try:
+            existing_guard_message = None
+            try:
+                existing_guard_message = db.execute(
+                    select(Message.id)
+                    .where(
+                        Message.org_slug == org,
+                        Message.thread_id == rs.thread_id,
+                        Message.role == "assistant",
+                        Message.content == guarded_reply,
+                    )
+                    .order_by(Message.created_at.desc())
+                    .limit(1)
+                ).scalar_one_or_none()
+            except Exception:
+                existing_guard_message = None
+
+            if not existing_guard_message:
+                db.add(
+                    Message(
+                        id=new_id(),
+                        org_slug=org,
+                        thread_id=rs.thread_id,
+                        user_id=None,
+                        user_name=None,
+                        role="assistant",
+                        content=guarded_reply,
+                        agent_id=guard_agent_id,
+                        agent_name=guard_agent_name,
+                        created_at=created_at,
+                    )
+                )
+
+            db.add(
+                RealtimeEvent(
+                    id=new_id(),
+                    org_slug=org,
+                    session_id=rs.id,
+                    thread_id=rs.thread_id,
+                    speaker_type="agent",
+                    speaker_id=guard_agent_id,
+                    agent_id=guard_agent_id,
+                    agent_name=guard_agent_name,
+                    event_type="response.final",
+                    transcript_raw=guarded_reply,
+                    transcript_punct=guarded_reply,
+                    created_at=created_at,
+                    client_event_id=None,
+                    meta=json.dumps(
+                        {
+                            "source": "realtime_voice_intent_guard",
+                            "guarded": True,
+                            "blocked_multi_agent": True,
+                            "ao_patch": "AO20A_REALTIME_ORCHESTRATION_STABILIZER",
+                        },
+                        ensure_ascii=False,
+                    ),
+                )
+            )
+            db.commit()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                pass
+            logger.exception("REALTIME_GUARD_PERSIST_FAILED session_id=%s", getattr(rs, "id", None))
+
+        logger.info(
+            "REALTIME_GUARD_BLOCKED_MULTI_AGENT session_id=%s thread_id=%s chars=%s",
+            getattr(rs, "id", None),
+            getattr(rs, "thread_id", None),
+            len(text_in),
+        )
+        return [
+            {
+                "agent_id": guard_agent_id,
+                "agent_name": guard_agent_name,
+                "text": guarded_reply,
+                "source": "realtime_voice_intent_guard",
+                "guarded": True,
+            }
+        ]
 
     explicit_agents = _explicit_agent_override(db, org, text_in)
     if explicit_agents:
