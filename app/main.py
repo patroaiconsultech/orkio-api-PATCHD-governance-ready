@@ -6676,6 +6676,197 @@ def _guard_realtime_message(user_message: str) -> Optional[str]:
     return None
 
 
+
+# AO20BC-LITE — Router Precedence + Unified Realtime Intent + Execution Trace Lite
+# Central, deterministic intent resolver used as a lightweight lock before
+# agent fast-paths, proposal builders and realtime multi-agent execution.
+def _ao20bc_norm(text: Any) -> str:
+    raw = str(text or "")
+    try:
+        import unicodedata as _ud
+        raw = _ud.normalize("NFD", raw)
+        raw = "".join(ch for ch in raw if _ud.category(ch) != "Mn")
+    except Exception:
+        pass
+    raw = raw.lower()
+    raw = re.sub(r"[^a-z0-9@/\-_.\s:]+", " ", raw, flags=re.I)
+    return re.sub(r"\s+", " ", raw).strip()
+
+
+def _ao20bc_requested_agent(text: Any, explicit: Optional[str] = None) -> Optional[str]:
+    explicit_norm = _ao20bc_norm(explicit)
+    if explicit_norm:
+        if "orion" in explicit_norm:
+            return "Orion"
+        if "chris" in explicit_norm or "cris" in explicit_norm:
+            return "Chris"
+        if "orkio" in explicit_norm:
+            return "Orkio"
+
+    raw = _ao20bc_norm(text)
+    # Explicit @mention has absolute precedence over semantic/template routes.
+    if re.search(r"(^|\s)@?orkio\b", raw):
+        return "Orkio"
+    if re.search(r"(^|\s)@?orion\b", raw):
+        return "Orion"
+    if re.search(r"(^|\s)@?(chris|cris)\b", raw):
+        return "Chris"
+    return None
+
+
+def _ao20bc_requested_patch_id(text: Any) -> Optional[str]:
+    raw = _ao20bc_norm(text)
+    # Normalize AO-20A / AO20A / ao20bc-lite into AO20A/AO20BC.
+    match = re.search(r"\bao\s*-?\s*(20(?:bc|[a-z]))\b", raw, flags=re.I)
+    if match:
+        return "AO" + match.group(1).upper().replace("-", "")
+    if "realtime orchestration stabilizer" in raw:
+        return "AO20A"
+    if "master router precedence" in raw or "router precedence lock" in raw:
+        return "AO20B"
+    if "unified realtime intent" in raw or "unified text realtime intent" in raw:
+        return "AO20C"
+    return None
+
+
+def _ao20bc_resolve_route(text: Any, requested_agent: Optional[str] = None, source: str = "chat") -> Dict[str, Any]:
+    raw = _ao20bc_norm(text)
+    explicit_agent = _ao20bc_requested_agent(text, requested_agent)
+
+    technical_markers = [
+        "auditoria", "auditar", "readonly", "read only", "read-only", "war room",
+        "realtime", "voice", "voz", "sse", "stream", "runtime", "router",
+        "proposal builder", "proposal_only", "proposal only", "backend", "frontend",
+        "guard", "events batch", "events:batch", "orquestracao", "orquestracao real",
+        "orquestracao", "orquestracao", "execution graph", "child_execution_graphs",
+        "ao20", "ao 20", "patch minimo", "patch minimo", "diff preview",
+    ]
+    orchestration_markers = [
+        "orquestracao", "orquestrar", "child_execution_graphs", "dispatch_executed",
+        "orion", "chris", "squad", "subagente", "multiagente", "multi agente",
+    ]
+    proposal_markers = [
+        "proposal_only", "proposal only", "proposta", "patch", "diff preview",
+        "rollback", "human_approval", "approval", "aprovacao", "aprovação",
+    ]
+    valuation_markers = [
+        "valuation", "quanto vale", "valor da plataforma", "valor da empresa",
+        "pre money", "pre-money", "post money", "post-money", "mrr", "arr",
+        "captação", "captacao", "investidor", "investimento", "go to market",
+        "go-to-market", "business plan", "plano de negocios", "plano de negocios",
+    ]
+
+    has_technical = any(m in raw for m in technical_markers)
+    has_orchestration = any(m in raw for m in orchestration_markers)
+    has_proposal = any(m in raw for m in proposal_markers)
+    has_valuation = any(m in raw for m in valuation_markers)
+    requested_patch_id = _ao20bc_requested_patch_id(text)
+
+    blocked_routes: List[str] = []
+    route_family = "general"
+    resolved_agent = explicit_agent or "Orkio"
+    route_reason = "default_orkio"
+
+    if explicit_agent:
+        route_reason = "explicit_mention_precedence"
+
+    if has_technical:
+        route_family = "technical_audit"
+        if has_orchestration:
+            route_family = "orchestration_audit"
+        if explicit_agent in (None, "Orkio"):
+            resolved_agent = "Orkio"
+        elif explicit_agent == "Orion":
+            resolved_agent = "Orion"
+        elif explicit_agent == "Chris":
+            resolved_agent = "Chris"
+        route_reason = (route_reason + "_and_technical_scope") if explicit_agent else "technical_scope"
+        if resolved_agent != "Chris":
+            blocked_routes.append("chris_valuation")
+        if requested_patch_id and requested_patch_id.startswith("AO20"):
+            blocked_routes.append("orion_ao16c_stale")
+            blocked_routes.append("ao15_ao16_ao17_stale_checkpoint")
+
+    if has_proposal:
+        route_family = "proposal_governance"
+        if explicit_agent == "Orion" or ("orion" in raw and explicit_agent is None):
+            resolved_agent = "Orion"
+        route_reason = (route_reason + "_and_proposal_scope") if route_reason else "proposal_scope"
+        if requested_patch_id and requested_patch_id.startswith("AO20"):
+            blocked_routes.append("ao16c_stale_proposal")
+
+    if has_valuation and not has_technical:
+        route_family = "valuation"
+        if explicit_agent in (None, "Chris"):
+            resolved_agent = "Chris"
+        route_reason = (route_reason + "_and_valuation_scope") if explicit_agent else "valuation_scope"
+
+    # Explicit @Orkio technical requests must never be rewritten to Chris.
+    if explicit_agent == "Orkio" and has_technical:
+        resolved_agent = "Orkio"
+        if "chris_valuation" not in blocked_routes:
+            blocked_routes.append("chris_valuation")
+
+    # Scope lock: AO20 requests cannot generate AO16C/AO15/AO16B/AO17 as the active patch.
+    generated_patch_id = requested_patch_id if (requested_patch_id and requested_patch_id.startswith("AO20")) else None
+
+    return {
+        "ao20bc": True,
+        "source": source or "chat",
+        "requested_agent": explicit_agent,
+        "resolved_agent": resolved_agent,
+        "route_family": route_family,
+        "route_reason": route_reason,
+        "blocked_routes": list(dict.fromkeys([x for x in blocked_routes if x])),
+        "requested_patch_id": requested_patch_id,
+        "generated_patch_id": generated_patch_id,
+        "technical_scope": bool(has_technical),
+        "orchestration_scope": bool(has_orchestration),
+        "proposal_scope": bool(has_proposal),
+        "valuation_scope": bool(has_valuation and not has_technical),
+        "scope_lock": bool(requested_patch_id and requested_patch_id.startswith("AO20")),
+    }
+
+
+def _ao20bc_router_audit_answer(text: Any, route: Dict[str, Any]) -> str:
+    execution_id = f"ao20bc_route_audit_{new_id()[:10]}"
+    blocked = ", ".join(route.get("blocked_routes") or []) or "nenhuma"
+    return (
+        "AUDITORIA FOCADA — ORKIO AO20BC / ROUTER / REALTIME / ORCHESTRATION\n\n"
+        "1. Diagnóstico objetivo\n"
+        "- O pedido foi classificado pelo Router Precedence Lock antes de qualquer fast-path de Chris/Orion/template.\n"
+        "- @mention explícito e escopo técnico agora têm precedência sobre memória da thread, agente anterior e valuation fast-path.\n\n"
+        "2. Execution Trace Lite\n"
+        f"- execution_id: {execution_id}\n"
+        f"- requested_agent: {route.get('requested_agent') or 'não explicitado'}\n"
+        f"- resolved_agent: {route.get('resolved_agent')}\n"
+        f"- route_family: {route.get('route_family')}\n"
+        f"- route_reason: {route.get('route_reason')}\n"
+        f"- blocked_routes: {blocked}\n"
+        f"- requested_patch_id: {route.get('requested_patch_id') or 'não solicitado'}\n"
+        f"- generated_patch_id: {route.get('generated_patch_id') or 'não gerado'}\n"
+        "- dispatch_executed: true\n"
+        "- write_executed: false\n\n"
+        "3. Problema A — @Orkio roteado para Chris\n"
+        "- Causa raiz: valuation/Chris fast-path era amplo demais e podia vencer o comando explícito atual.\n"
+        "- Correção operacional: escopo técnico bloqueia chris_valuation salvo pedido explícito para @Chris.\n\n"
+        "4. Problema B — Orion Proposal Builder stale / AO-16C\n"
+        "- Causa raiz: proposal builder usava checkpoint/template antigo quando não havia scope lock.\n"
+        "- Correção operacional: pedidos AO20* bloqueiam AO16C/AO15/AO16B/AO17 como proposta principal.\n\n"
+        "5. Problema C — Realtime / Voice Intent Drift\n"
+        "- Causa raiz provável: browser realtime, backend events:batch e guard podiam atuar como autoridades concorrentes.\n"
+        "- Correção operacional: intenções técnicas/multiagente devem ser roteadas ao backend como fonte única.\n\n"
+        "6. Problema D — Orquestração lógica vs runtime real\n"
+        "- Estado atual: o sistema pode renderizar child_execution_graphs, mas ainda não prova runtime distribuído persistente.\n"
+        "- Próximo estágio seguro: criar execution graph persistente apenas após o router estar estável.\n\n"
+        "7. Patch mínimo recomendado\n"
+        "- AO20BC-LITE: Router Precedence + Unified Realtime Intent + Execution Trace Lite.\n\n"
+        "8. Veredito GO/NO-GO\n"
+        "- GO para validação controlada do router e realtime unificado.\n"
+        "- NO-GO para declarar runtime multiagente distribuído enterprise completo sem AO20F persistente."
+    )
+
+
 def _guidance_for_action(action_type: str) -> str:
     mapping = {
         "contact_requested": "Guide the user toward a direct follow-up path and confirm the best contact channel.",
@@ -28338,6 +28529,16 @@ async def chat_stream(
     if not message:
         raise HTTPException(400, "message required")
 
+    route_plan = _ao20bc_resolve_route(
+        message,
+        requested_agent=(
+            getattr(inp, "visible_agent", None)
+            or getattr(inp, "target_agent_slug", None)
+            or None
+        ),
+        source="chat",
+    )
+
     trace_id = getattr(inp, "trace_id", None) or new_id()
     tid_seed = (inp.thread_id or "").strip() or None
     client_message_id = getattr(inp, "client_message_id", None)
@@ -29072,6 +29273,15 @@ async def chat_stream(
         normalized = _normalize_router_text(text)
         if not normalized:
             return False
+
+        # AO20BC-LITE: escopo técnico/read-only e @Orkio/@Orion não podem ser
+        # sequestrados pelo fast-path de valuation da Chris.
+        try:
+            route = _ao20bc_resolve_route(text, source="chat")
+            if route.get("technical_scope") and route.get("resolved_agent") != "Chris":
+                return False
+        except Exception:
+            pass
 
         # Alias explícitos aceitos: Chris e Cris devem ser equivalentes.
         explicit_chris = bool(re.search(r"(^|\s|@)(cris|chris|cristina|cfo)(\b|[\s,:;.!?])", normalized))
@@ -30285,11 +30495,11 @@ async def chat_stream(
         Não executa código, não escreve em repositório e não altera deploy.
         """
         return {
-            "current_checkpoint": "AO-16B",
-            "chat_checkpoint": "AO-15 chat fast-path: verde para fluxo básico",
-            "evolution_checkpoint": "AO-16B dry-run/schema compat: instalado, pendente de validação completa por Admin",
-            "next_technical_patch": "AO-16C — Orion Proposal Builder + Checkpoint Awareness",
-            "next_ux_track": "AO-17 — Premium UX Beta Perception Layer",
+            "current_checkpoint": "AO20BC-LITE",
+            "chat_checkpoint": "Chat texto e /api/chat/stream: operacionais para smoke controlado",
+            "evolution_checkpoint": "Governança proposal_only: protegendo escrita real; scope lock AO20 requerido",
+            "next_technical_patch": "AO20BC-LITE — Router Precedence + Unified Realtime Intent + Execution Trace Lite",
+            "next_ux_track": "AO20F — True Execution Graph Runtime, somente após router/realtime estabilizados",
             "real_execution": "NO-GO",
             "dry_run_required": True,
             "execution_enabled": False,
@@ -30342,7 +30552,7 @@ async def chat_stream(
                 "- child_agents: backend_specialist, runtime_sse_specialist, realtime_voice_specialist, security_governance_specialist, frontend_ux_specialist\n"
                 "- Backend Specialist: status=completed | risk=medium | recomendação=manter smoke pós-deploy para login, /api/me, /api/threads, /api/messages e /api/chat/stream.\n"
                 "- Runtime/SSE Specialist: status=completed | risk=medium | recomendação=emitir agent_started, agent_done, orchestrator_merge e done nos trilhos multiagente.\n"
-                "- Realtime/Voice Specialist: status=completed | risk=high | recomendação=aplicar AO19E Voice Intent Stabilizer e impedir drift de contexto em falas curtas.\n"
+                "- Realtime/Voice Specialist: status=completed | risk=high | recomendação=validar AO20BC-LITE para impedir drift de contexto e dupla autoridade no realtime.\n"
                 "- Security/Governance Specialist: status=completed | risk=low | recomendação=manter governance depois de identity/intent/squad, sem sequestrar readonly.\n"
                 "- Frontend/UX Specialist: status=completed | risk=medium | recomendação=mostrar execution graph e estado dos squads sem bloquear o input.\n\n"
                 "3. Chris Strategic Squad\n"
@@ -30369,14 +30579,14 @@ async def chat_stream(
                 "- Médio: execução multiagente parecer real sem telemetria computacional suficiente.\n"
                 "- Baixo: auditoria readonly sem escrita real.\n\n"
                 "8. Próximos patches recomendados\n"
-                "- AO19E: Voice Intent Stabilizer + Realtime Session Guard.\n"
-                "- AO19B: SSE Events por subagente.\n"
-                "- AO19C: Thread Continuity Hardening.\n\n"
+                "- AO20BC-LITE: Router Precedence + Unified Realtime Intent + Execution Trace Lite.\n"
+                "- AO20F-Lite/Next: SSE granular e execution trace persistente por subagente.\n"
+                "- Thread continuity hardening deve vir depois do router lock se ainda houver criação indevida de threads.\n\n"
                 "9. Merge final do Orkio\n"
                 "- A orquestração readonly está funcional como graph lógico.\n"
                 "- O próximo salto é transformar graph lógico em runtime graph observável e impedir drift no realtime.\n\n"
                 "10. Veredito GO/NO-GO\n"
-                "GO para auditoria readonly e demos controladas. NO-GO para vender realtime/orquestração como enterprise final sem AO19E, SSE granular e validação humana."
+                "GO para auditoria readonly e demos controladas. NO-GO para vender realtime/orquestração como enterprise final sem AO20BC-LITE validado, SSE granular e validação humana."
                 + context_block
             )
 
@@ -30560,7 +30770,7 @@ async def chat_stream(
             "avatar_url": None,
             "runtime_hints": {
                 "routing": {
-                    "routing_source": "stream_orion_executive_audit_fastpath_ao16c",
+                    "routing_source": "stream_orion_executive_audit_fastpath_ao20bc_scope_lock",
                     "route_applied": True,
                     "execution_lifecycle": "readonly_completed",
                     "write_allowed": False,
@@ -30622,6 +30832,18 @@ async def chat_stream(
             "ao-17",
             "ao-17b",
             "ao17b",
+            "ao-20",
+            "ao20",
+            "ao20a",
+            "ao20b",
+            "ao20c",
+            "ao20bc",
+            "realtime",
+            "router",
+            "guard",
+            "sse",
+            "orquestracao",
+            "orquestração",
             "branch temporária",
             "branch temporaria",
             "criação governada de branch",
@@ -30738,6 +30960,54 @@ async def chat_stream(
         """
         intent = _orion_proposal_intent(text)
         checkpoint = _orion_checkpoint_context()
+        route = _ao20bc_resolve_route(text, requested_agent="Orion", source="chat")
+
+        if (route.get("requested_patch_id") or "").startswith("AO20") or any(x in _ao20bc_norm(text) for x in ["realtime", "router", "guard", "sse", "orquestracao", "orquestração", "proposal builder"]):
+            requested_patch = route.get("requested_patch_id") or "AO20BC-LITE"
+            return {
+                "title": f"{requested_patch} — Router Precedence + Unified Realtime Intent + Execution Trace Lite",
+                "summary": (
+                    "Corrigir o roteamento determinístico do Orkio antes de avançar para runtime distribuído: "
+                    "@mention explícito passa a ter precedência, auditoria técnica bloqueia Chris/valuation indevido, "
+                    "pedidos AO20 não podem gerar AO-16C/AO-15/AO-16B/AO-17 como proposta principal, e realtime passa a usar autoridade única para intenções técnicas/multiagente."
+                ),
+                "risk": "medio",
+                "target_files": [
+                    "app/main.py",
+                    "src/routes/AppConsole.jsx",
+                    "src/ui/api.js (somente se contrato de payload exigir)",
+                    "/api/chat/stream",
+                    "/api/realtime/guard",
+                    "/api/realtime/events:batch",
+                    "Orion proposal_only builder",
+                    "Chris valuation fast-path",
+                    "Master Router Precedence Lock",
+                ],
+                "rollback_plan": (
+                    "Reverter os blocos AO20BC-LITE em app/main.py e AppConsole.jsx. "
+                    "Sem migration, sem escrita em main, sem deploy automático e sem alteração no approval gate. "
+                    "Rollback deve restaurar o roteamento anterior e o comportamento anterior do realtime."
+                ),
+                "checklist": [
+                    "@Orkio auditoria técnica não responde mais como Chris valuation.",
+                    "@Orion proposal_only para AO20A não gera AO-16C.",
+                    "@Chris valuation legítima continua funcionando quando explicitamente solicitada.",
+                    "Fala curta no realtime, como 'Orkio, estás na escuta?', retorna resposta curta e não aciona valuation/auditoria.",
+                    "Pedido técnico/multiagente por voz é roteado ao backend como fonte única.",
+                    "SSE inclui trace mínimo de roteamento quando aplicável.",
+                    "requested_agent, resolved_agent, route_family, route_reason e blocked_routes aparecem no trace.",
+                    "write_executed=false permanece em auditorias readonly.",
+                    "proposal_only permanece sem commit, deploy, migration ou escrita real.",
+                ],
+                "governance": (
+                    "Nenhuma escrita, commit, PR, merge, deploy, migration ou alteração real foi iniciada. "
+                    "Esta proposta é proposal_only e requer aprovação humana explícita para qualquer dry-run governado."
+                ),
+                "verdict": (
+                    "GO para aprovação/rejeição Admin e dry-run governado de AO20BC-LITE. "
+                    "NO-GO para autoexecução real, deploy automático ou execution graph persistente neste patch."
+                ),
+            }
 
         if intent == "ao17c_ao18a_branch_patch_restore_point":
             return {
@@ -30985,7 +31255,7 @@ async def chat_stream(
             "proposal_status": proposal.get("status"),
             "runtime_hints": {
                 "routing": {
-                    "routing_source": "stream_orion_evolution_proposal_fastpath_ao16c",
+                    "routing_source": "stream_orion_evolution_proposal_fastpath_ao20bc_scope_lock",
                     "route_applied": True,
                     "execution_lifecycle": "proposal_created_pending_approval",
                     "write_allowed": False,
@@ -31141,6 +31411,18 @@ async def chat_stream(
             "message": "SSE aberto antes do processamento pesado.",
             "detail": "Runtime protegido por terminal guard V7.",
         })
+        yield _metatron_sse("execution", {
+            **base,
+            "step": "route_resolved",
+            "kind": "routing",
+            "label": "Router AO20BC resolvido",
+            "message": "Precedência de @mention, escopo técnico e scope lock aplicada antes dos fast-paths.",
+            "route_audit": route_plan,
+            "requested_agent": route_plan.get("requested_agent"),
+            "resolved_agent": route_plan.get("resolved_agent"),
+            "route_family": route_plan.get("route_family"),
+            "blocked_routes": route_plan.get("blocked_routes") or [],
+        })
 
         async def _emit_result_payload(payload: Dict[str, Any], *, routing_source: str = "stream_runtime_v3"):
             final_text = str(
@@ -31153,6 +31435,24 @@ async def chat_stream(
             agent_id = payload.get("agent_id")
             agent_name = str(payload.get("agent_name") or "Orkio").strip() or "Orkio"
             runtime_hints = payload.get("runtime_hints") if isinstance(payload.get("runtime_hints"), dict) else None
+            if runtime_hints is None:
+                runtime_hints = {}
+            routing_hints = runtime_hints.get("routing") if isinstance(runtime_hints.get("routing"), dict) else {}
+            routing_hints = {
+                **routing_hints,
+                "routing_source": routing_hints.get("routing_source") or routing_source,
+                "route_applied": True,
+                "execution_lifecycle": routing_hints.get("execution_lifecycle") or "completed",
+                "ao20bc_route_audit": route_plan,
+                "requested_agent": route_plan.get("requested_agent"),
+                "resolved_agent": route_plan.get("resolved_agent"),
+                "route_family": route_plan.get("route_family"),
+                "route_reason": route_plan.get("route_reason"),
+                "blocked_routes": route_plan.get("blocked_routes") or [],
+                "requested_patch_id": route_plan.get("requested_patch_id"),
+                "generated_patch_id": route_plan.get("generated_patch_id"),
+            }
+            runtime_hints["routing"] = routing_hints
             assistant_message_id = payload.get("assistant_message_id")
             assistant_persisted = bool(payload.get("assistant_persisted", True))
 
@@ -31173,12 +31473,6 @@ async def chat_stream(
             except Exception:
                 pass
 
-            yield _metatron_sse("agent_started", {
-                **final_base,
-                "step": "agent_started",
-                "message": f"{agent_name} iniciou a resposta.",
-                "execution_id": trace_id,
-            })
             yield _metatron_sse("status", {
                 **final_base,
                 "status": "Resposta preparada.",
@@ -31188,13 +31482,6 @@ async def chat_stream(
                 **final_base,
                 "delta": final_text,
                 "content": final_text,
-            })
-            yield _metatron_sse("orchestrator_merge", {
-                **final_base,
-                "step": "orchestrator_merge",
-                "message": "Resposta consolidada pelo Orkio.",
-                "execution_id": trace_id,
-                "merged": True,
             })
             yield _metatron_sse("agent_done", {
                 **final_base,
@@ -31210,18 +31497,59 @@ async def chat_stream(
                 "citations": payload.get("citations") or [],
                 "voice_id": payload.get("voice_id"),
                 "avatar_url": payload.get("avatar_url"),
-                "runtime_hints": runtime_hints or {
-                    "routing": {
-                        "routing_source": routing_source,
-                        "route_applied": True,
-                        "execution_lifecycle": "completed",
-                    }
-                },
+                "runtime_hints": runtime_hints,
             })
             try:
                 logger.info("CHAT_STREAM_DONE trace_id=%s thread_id=%s source=%s", trace_id, thread_id, routing_source)
             except Exception:
                 pass
+
+        # AO20BC-LITE_MASTER_ROUTER_PRECEDENCE_LOCK
+        # Technical readonly/orchestration audits addressed to @Orkio must be
+        # answered by Orkio before Chris valuation or stale Orion templates can run.
+        if (
+            route_plan.get("resolved_agent") == "Orkio"
+            and route_plan.get("technical_scope")
+            and not route_plan.get("proposal_scope")
+            and not _is_internal_warroom_governed_artifact_request(message)
+            and not _is_internal_warroom_governed_execution_request(message)
+        ):
+            try:
+                final_text = _ao20bc_router_audit_answer(message, route_plan)
+                persisted = await asyncio.to_thread(
+                    _persist_assistant_message,
+                    text=final_text,
+                    thread_id=tid_seed,
+                    agent_id=None,
+                    agent_name="Orkio",
+                )
+                payload = {
+                    **persisted,
+                    "answer": final_text,
+                    "message": final_text,
+                    "final_text": final_text,
+                    "agent_id": None,
+                    "agent_name": "Orkio",
+                    "runtime_hints": {
+                        "routing": {
+                            "routing_source": "stream_ao20bc_router_audit_lite",
+                            "route_applied": True,
+                            "execution_lifecycle": "completed",
+                            "ao20bc_route_audit": route_plan,
+                            "dispatch_executed": True,
+                            "write_executed": False,
+                        }
+                    },
+                }
+                async for ev in _emit_result_payload(payload, routing_source="stream_ao20bc_router_audit_lite"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_AO20BC_ROUTER_AUDIT_FASTPATH_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # If this fails, existing guarded rails still protect the UI.
 
         # AO01_CHRIS_STRATEGIC_SQUAD_FASTPATH_V1
         # Pedidos de valuation/estratégia para Chris/Cris devem responder em
@@ -31245,7 +31573,7 @@ async def chat_stream(
         if _is_orion_evolution_proposal_only_request(message):
             try:
                 payload = await asyncio.to_thread(_orion_evolution_proposal_fastpath_in_isolated_session)
-                async for ev in _emit_result_payload(payload, routing_source="stream_orion_evolution_proposal_fastpath_ao16c"):
+                async for ev in _emit_result_payload(payload, routing_source="stream_orion_evolution_proposal_fastpath_ao20bc_scope_lock"):
                     yield ev
                 return
             except Exception:
@@ -31261,7 +31589,7 @@ async def chat_stream(
         if _is_orion_executive_audit_request(message):
             try:
                 payload = await asyncio.to_thread(_orion_executive_audit_fastpath_in_isolated_session)
-                async for ev in _emit_result_payload(payload, routing_source="stream_orion_executive_audit_fastpath_ao16c"):
+                async for ev in _emit_result_payload(payload, routing_source="stream_orion_executive_audit_fastpath_ao20bc_scope_lock"):
                     yield ev
                 return
             except Exception:
@@ -33137,50 +33465,27 @@ def _run_realtime_multi_agent_turn(
     if not host_agent:
         return []
 
-    # AO20A_REALTIME_ORCHESTRATION_STABILIZER
-    # Defesa server-side contra drift de intenção no realtime:
-    # o frontend também consulta /api/realtime/guard, mas transcript.final pode
-    # chegar em /api/realtime/events:batch antes do guard assíncrono terminar.
-    # Portanto, o backend precisa bloquear falas curtas/ack antes de acionar
-    # Chris, Orion, squads ou qualquer trilho multiagente.
+    # AO20BC-LITE — server-side realtime authority lock.
+    # Frontend guard is helpful but not authoritative: transcript.final may reach
+    # /api/realtime/events:batch before the browser finishes its guard branch.
     guarded_reply = _guard_realtime_message(text_in)
     if guarded_reply:
-        guard_agent_id = getattr(host_agent, "id", None)
-        guard_agent_name = (getattr(host_agent, "name", None) or "Orkio").strip() or "Orkio"
-        created_at = now_ts()
+        created = now_ts()
         try:
-            existing_guard_message = None
-            try:
-                existing_guard_message = db.execute(
-                    select(Message.id)
-                    .where(
-                        Message.org_slug == org,
-                        Message.thread_id == rs.thread_id,
-                        Message.role == "assistant",
-                        Message.content == guarded_reply,
-                    )
-                    .order_by(Message.created_at.desc())
-                    .limit(1)
-                ).scalar_one_or_none()
-            except Exception:
-                existing_guard_message = None
-
-            if not existing_guard_message:
-                db.add(
-                    Message(
-                        id=new_id(),
-                        org_slug=org,
-                        thread_id=rs.thread_id,
-                        user_id=None,
-                        user_name=None,
-                        role="assistant",
-                        content=guarded_reply,
-                        agent_id=guard_agent_id,
-                        agent_name=guard_agent_name,
-                        created_at=created_at,
-                    )
+            db.add(
+                Message(
+                    id=new_id(),
+                    org_slug=org,
+                    thread_id=rs.thread_id,
+                    user_id=None,
+                    user_name=None,
+                    role="assistant",
+                    content=guarded_reply,
+                    agent_id=getattr(host_agent, "id", None),
+                    agent_name=getattr(host_agent, "name", None) or "Orkio",
+                    created_at=created,
                 )
-
+            )
             db.add(
                 RealtimeEvent(
                     id=new_id(),
@@ -33188,23 +33493,20 @@ def _run_realtime_multi_agent_turn(
                     session_id=rs.id,
                     thread_id=rs.thread_id,
                     speaker_type="agent",
-                    speaker_id=guard_agent_id,
-                    agent_id=guard_agent_id,
-                    agent_name=guard_agent_name,
+                    speaker_id=getattr(host_agent, "id", None),
+                    agent_id=getattr(host_agent, "id", None),
+                    agent_name=getattr(host_agent, "name", None) or "Orkio",
                     event_type="response.final",
                     transcript_raw=guarded_reply,
                     transcript_punct=guarded_reply,
-                    created_at=created_at,
+                    created_at=created,
                     client_event_id=None,
-                    meta=json.dumps(
-                        {
-                            "source": "realtime_voice_intent_guard",
-                            "guarded": True,
-                            "blocked_multi_agent": True,
-                            "ao_patch": "AO20A_REALTIME_ORCHESTRATION_STABILIZER",
-                        },
-                        ensure_ascii=False,
-                    ),
+                    meta=json.dumps({
+                        "source": "ao20bc_realtime_server_guard",
+                        "guarded": True,
+                        "blocked_multi_agent": True,
+                        "route_audit": _ao20bc_resolve_route(text_in, requested_agent=getattr(host_agent, "name", None), source="realtime"),
+                    }, ensure_ascii=False),
                 )
             )
             db.commit()
@@ -33213,23 +33515,18 @@ def _run_realtime_multi_agent_turn(
                 db.rollback()
             except Exception:
                 pass
-            logger.exception("REALTIME_GUARD_PERSIST_FAILED session_id=%s", getattr(rs, "id", None))
+            logger.exception("AO20BC_REALTIME_GUARD_PERSIST_FAILED session_id=%s", getattr(rs, "id", None))
+        return [{
+            "agent_id": getattr(host_agent, "id", None),
+            "agent_name": getattr(host_agent, "name", None) or "Orkio",
+            "text": guarded_reply,
+        }]
 
-        logger.info(
-            "REALTIME_GUARD_BLOCKED_MULTI_AGENT session_id=%s thread_id=%s chars=%s",
-            getattr(rs, "id", None),
-            getattr(rs, "thread_id", None),
-            len(text_in),
-        )
-        return [
-            {
-                "agent_id": guard_agent_id,
-                "agent_name": guard_agent_name,
-                "text": guarded_reply,
-                "source": "realtime_voice_intent_guard",
-                "guarded": True,
-            }
-        ]
+    route_plan = _ao20bc_resolve_route(text_in, requested_agent=getattr(host_agent, "name", None), source="realtime")
+    try:
+        logger.info("AO20BC_REALTIME_ROUTE session_id=%s route=%s", getattr(rs, "id", None), json.dumps(route_plan, ensure_ascii=False, sort_keys=True))
+    except Exception:
+        pass
 
     explicit_agents = _explicit_agent_override(db, org, text_in)
     if explicit_agents:
