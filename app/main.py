@@ -33722,6 +33722,14 @@ async def chat_stream(
             })
             return
 
+        # AO20K-HF4C-HF1_ROUTE_PLAN_SAFE_BOOTSTRAP
+        route_plan_safe = {}
+        try:
+            if "route_plan" in locals() and isinstance(route_plan, dict):
+                route_plan_safe = _ao20k_hf2_json_safe(route_plan)
+        except Exception:
+            route_plan_safe = {}
+
         yield _metatron_sse("execution", {
             **base,
             "step": "route_resolved",
