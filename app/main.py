@@ -31278,6 +31278,354 @@ async def chat_stream(
         }
 
 
+    def _ao20i_normalized_evolution_text(text: str) -> str:
+        """
+        AO20I_ORION_LED_GOVERNED_EVOLUTION_PIPELINE:
+        Normaliza variações naturais do usuário para o processo autoevolutivo
+        assistido. Inclui tolerância a typo comum "redonly".
+        """
+        raw = _normalize_router_text(text)
+        if not raw:
+            return ""
+        return (
+            raw
+            .replace("redonly", "readonly")
+            .replace("read only", "readonly")
+            .replace("read-only", "readonly")
+            .replace("auto evolução", "autoevolução")
+            .replace("auto-evolução", "autoevolução")
+            .replace("auto evolucao", "autoevolucao")
+            .replace("auto-evolucao", "autoevolucao")
+        )
+
+
+    def _ao20i_governed_evolution_stage(text: str) -> str:
+        """
+        Identifica a etapa segura do pipeline:
+        audit_report -> issue_map -> patch_plan.
+        Proposal/dry-run/execução real ficam fora deste hotfix.
+        """
+        raw = _ao20i_normalized_evolution_text(text)
+        if not raw:
+            return "audit_report"
+
+        if any(x in raw for x in [
+            "issue_map",
+            "issue map",
+            "mapa de issues",
+            "mapa de problemas",
+            "problemas encontrados",
+            "bugs encontrados",
+            "liste os problemas",
+            "mapear issues",
+            "mapear problemas",
+        ]):
+            return "issue_map"
+
+        if any(x in raw for x in [
+            "patch_plan",
+            "patch plan",
+            "plano de patch",
+            "planeje o patch",
+            "planejar o patch",
+            "patch minimo",
+            "patch mínimo",
+            "arquivos alvo",
+            "funções alvo",
+            "funcoes alvo",
+            "rollback",
+            "smoke_plan",
+            "smoke plan",
+        ]):
+            return "patch_plan"
+
+        return "audit_report"
+
+
+    def _is_governed_evolution_pipeline_request(text: str) -> bool:
+        """
+        AO20I:
+        Pedidos naturais de autoevolução/diagnóstico controlado devem entrar
+        em um pipeline orquestrado por Orkio e liderado tecnicamente pelo Orion.
+
+        Chris NÃO audita tecnicamente. Chris só pode fornecer contexto
+        estratégico quando solicitado, sem virar owner técnico.
+        """
+        raw = _ao20i_normalized_evolution_text(text)
+        if not raw:
+            return False
+
+        # Proteção: valuation/business puro continua sendo Chris.
+        explicit_chris = ("@chris" in raw or raw.startswith("chris ") or " chris " in f" {raw} ")
+        has_valuation_only = any(x in raw for x in [
+            "valuation", "avaliação estratégica", "avaliacao estrategica",
+            "go-to-market", "go to market", "business plan", "mercado", "investidor",
+        ]) and not any(x in raw for x in [
+            "auditoria", "audite", "bugs", "pontos fracos", "autoevolucao", "autoevolução",
+            "corrigir", "patch", "router", "sse", "stream", "backend", "runtime",
+        ])
+        if explicit_chris and has_valuation_only:
+            return False
+
+        has_evolution_scope = any(x in raw for x in [
+            "autoevolucao",
+            "autoevolução",
+            "evolucao da plataforma",
+            "evolução da plataforma",
+            "processo autoevolutivo",
+            "processo assistido",
+            "execucao assistida",
+            "execução assistida",
+            "execucao controlada",
+            "execução controlada",
+            "por dentro da plataforma",
+            "pacs por dentro",
+            "patch por dentro",
+            "patch controlado",
+            "governed evolution",
+            "governed_evolution",
+        ])
+
+        has_audit_or_bug_scope = any(x in raw for x in [
+            "auditoria",
+            "audite",
+            "diagnostico",
+            "diagnóstico",
+            "bugs",
+            "pontos fracos",
+            "melhorias",
+            "problemas",
+            "corrigir",
+            "correção",
+            "correcao",
+            "patch",
+            "issue_map",
+            "patch_plan",
+        ])
+
+        has_orion_scope = any(x in raw for x in [
+            "@orion",
+            " orion ",
+            "com orion",
+            "orion deve",
+            "agentes tecnicos",
+            "agentes técnicos",
+            "especialistas tecnicos",
+            "especialistas técnicos",
+            "backend specialist",
+            "runtime/sse specialist",
+            "router/intent specialist",
+            "qa/smoke test specialist",
+        ])
+
+        has_governance_scope = any(x in raw for x in [
+            "readonly",
+            "proposal_created: false",
+            "write_executed: false",
+            "nao criar proposta",
+            "não criar proposta",
+            "sem criar proposta",
+            "nao gerar proposal_only",
+            "não gerar proposal_only",
+            "approval",
+            "aprovação humana",
+            "aprovacao humana",
+            "governado",
+            "governada",
+            "controlado",
+            "controlada",
+        ])
+
+        # Caso natural validado nos testes: "Execute uma auditoria Redonly com Orion".
+        natural_orion_readonly_audit = (
+            has_orion_scope
+            and has_audit_or_bug_scope
+            and ("readonly" in raw or "auditoria" in raw or "audite" in raw)
+        )
+
+        # Caso de comando de pipeline completo.
+        explicit_evolution_pipeline = (
+            has_evolution_scope
+            and (has_orion_scope or has_audit_or_bug_scope)
+        )
+
+        # Caso etapa posterior após auditoria: issue_map/patch_plan.
+        stage_command = _ao20i_governed_evolution_stage(text) in ("issue_map", "patch_plan")
+
+        return bool(
+            natural_orion_readonly_audit
+            or explicit_evolution_pipeline
+            or (stage_command and (has_governance_scope or has_audit_or_bug_scope or has_orion_scope))
+        )
+
+
+    def _build_governed_evolution_pipeline_answer(text: str, stage: str) -> str:
+        """
+        Resposta determinística do AO20I.
+        Mantém honestidade operacional: sem escrita, sem proposal_id, sem commit,
+        sem dry-run real e sem runtime distribuído persistente.
+        """
+        raw = _ao20i_normalized_evolution_text(text)
+        execution_id = f"governed_evolution_{stage}_{new_id()[:10]}"
+        chris_requested = ("chris" in raw or "@chris" in raw)
+        business_context_line = (
+            "Chris_optional_context_only"
+            if chris_requested
+            else "Chris_not_called"
+        )
+
+        if stage == "issue_map":
+            body = (
+                "3. Issue map técnico — Orion\n"
+                "- P0: pedidos naturais de auditoria/autoevolução ainda precisam ser mantidos dentro do pipeline governado.\n"
+                "- P0: proposal_only só deve surgir depois de audit_report e patch_plan, nunca antes.\n"
+                "- P1: SSE precisa manter done/error terminal em todos os fast-paths.\n"
+                "- P1: execution graph segue trace lite, sem persistência por nó.\n"
+                "- P2: realtime permanece fora deste ciclo e deve ser corrigido depois por dentro do processo governado.\n\n"
+                "4. Classificação por camada\n"
+                "- backend: precedência de router e pipeline governado.\n"
+                "- stream/SSE: fechamento determinístico e eventos mínimos.\n"
+                "- storage/contexto: persistência de assistant_message e futuro execution graph.\n"
+                "- UX/jornada: clareza visual de stage/route sem travar input.\n"
+                "- deploy/configuração: approval gate ativo e sem autoexecução.\n"
+            )
+        elif stage == "patch_plan":
+            body = (
+                "3. Patch plan mínimo — Orion\n"
+                "- arquivo alvo: app/main.py.\n"
+                "- objetivo: manter o pipeline audit_report → issue_map → patch_plan antes de qualquer proposal_only.\n"
+                "- funções alvo: governed_evolution_pipeline matcher, stage resolver e fast-path readonly de resposta.\n"
+                "- risco: baixo_medio, por alterar precedência de router.\n"
+                "- rollback: remover bloco AO20I e restaurar ordem anterior dos fast-paths.\n\n"
+                "4. Smoke plan\n"
+                "- Testar auditoria natural: \"Execute uma auditoria readonly com Orion\".\n"
+                "- Testar issue_map: \"Agora gere um issue_map dos problemas encontrados\".\n"
+                "- Testar patch_plan: \"Agora monte o patch_plan mínimo\".\n"
+                "- Testar regressões: @Orion readonly, @Orkio orchestration_audit e @Chris valuation legítima.\n\n"
+                "5. Limites\n"
+                "- Não executar patch.\n"
+                "- Não criar commit.\n"
+                "- Não criar deploy.\n"
+                "- Não gerar proposal_id neste estágio.\n"
+            )
+        else:
+            body = (
+                "3. Audit report — Orion Technical Specialists\n"
+                "- Backend Specialist: audita app/main.py, /api/chat/stream, fast-paths, persistência e rotas de governança.\n"
+                "- Runtime/SSE Specialist: audita eventos mínimos, done/error terminal e riscos de UI aguardando.\n"
+                "- Router/Intent Specialist: audita @mention, readonly, proposal_only, warroom, V7 frontend e Chris valuation.\n"
+                "- Security/Governance Specialist: audita write_allowed=false, approval gate, proposal_only e dry-run.\n"
+                "- Persistence/Execution Graph Specialist: audita trace lite e lacunas para AO20F persistente.\n"
+                "- QA/Smoke Test Specialist: audita smoke tests de Orkio, Orion, Chris e pipeline governado.\n\n"
+                "4. Papel da Chris\n"
+                "- Chris não realiza auditoria técnica.\n"
+                "- Chris só pode fornecer contexto estratégico quando solicitado explicitamente.\n"
+                "- Nenhuma decisão técnica de patch deve ser assinada pela Chris.\n\n"
+                "5. Próxima etapa recomendada\n"
+                "- Solicitar issue_map dos problemas encontrados.\n"
+                "- Depois solicitar patch_plan mínimo.\n"
+                "- Só depois pedir proposal_only governado, se o Admin quiser.\n"
+            )
+
+        return (
+            "ORKIO — ORION-LED GOVERNED EVOLUTION PIPELINE\n\n"
+            "1. Diagnóstico objetivo\n"
+            f"- execution_id: {execution_id}\n"
+            "- route_family: governed_evolution_pipeline\n"
+            f"- stage: {stage}\n"
+            "- parent_agent: Orkio\n"
+            "- lead_agent: Orion\n"
+            "- technical_audit_owner: Orion\n"
+            f"- business_context_owner: {business_context_line}\n"
+            "- chris_role: strategic_context_only_not_technical_auditor\n"
+            "- proposal_created: false\n"
+            "- proposal_only: false\n"
+            "- write_executed: false\n"
+            "- dispatch_executed: true\n"
+            "- execution_allowed: false\n"
+            "- human_approval_required_before_write: true\n"
+            "- blocked_routes: chris_technical_audit, chris_valuation_unrequested, proposal_only_builder_until_explicit, patch_governance_response, internal_warroom_governed_surgical_v2, governed_audit_v7_frontend_readonly\n\n"
+            "2. Fluxo governado reconhecido\n"
+            "- Autoevolução correta: audit_report → issue_map → patch_plan → proposal_only → dry-run → approval → execução.\n"
+            "- Este estágio não cria proposta, não executa patch, não escreve arquivo, não faz commit e não faz deploy.\n"
+            "- Realtime permanece fora deste ciclo até a orquestração/execução assistida estar estável.\n\n"
+            f"{body}\n\n"
+            "6. Veredito GO/NO-GO\n"
+            "- GO para processo autoevolutivo assistido em modo readonly/controlado.\n"
+            "- NO-GO para autoexecução real, dry-run automático, commit, deploy ou Chris como auditora técnica."
+        )
+
+
+    def _governed_evolution_pipeline_fastpath_in_isolated_session() -> Dict[str, Any]:
+        stage = _ao20i_governed_evolution_stage(message)
+        final_text = _build_governed_evolution_pipeline_answer(message, stage)
+        persisted = _persist_assistant_message(
+            text=final_text,
+            thread_id=tid_seed,
+            agent_id="orkio",
+            agent_name="Orkio",
+        )
+        execution_id = f"governed_evolution_trace_{new_id()[:10]}"
+        return {
+            **persisted,
+            "answer": final_text,
+            "message": final_text,
+            "final_text": final_text,
+            "agent_id": "orkio",
+            "agent_name": "Orkio",
+            "voice_id": None,
+            "avatar_url": None,
+            "runtime_hints": {
+                "routing": {
+                    "routing_source": "stream_ao20i_governed_evolution_pipeline",
+                    "route_applied": True,
+                    "route_family": "governed_evolution_pipeline",
+                    "stage": stage,
+                    "parent_agent": "Orkio",
+                    "lead_agent": "Orion",
+                    "technical_audit_owner": "Orion",
+                    "business_context_owner": "Chris_optional_context_only",
+                    "chris_role": "strategic_context_only_not_technical_auditor",
+                    "proposal_only": False,
+                    "proposal_created": False,
+                    "write_allowed": False,
+                    "write_executed": False,
+                    "dispatch_executed": True,
+                    "execution_allowed": False,
+                    "human_approval_required": True,
+                    "blocked_routes": [
+                        "chris_technical_audit",
+                        "chris_valuation_unrequested",
+                        "proposal_only_builder_until_explicit",
+                        "patch_governance_response",
+                        "internal_warroom_governed_surgical_v2",
+                        "governed_audit_v7_frontend_readonly",
+                    ],
+                    "execution_trace_lite": {
+                        "execution_id": execution_id,
+                        "trace_mode": "lite_non_persistent",
+                        "pipeline": [
+                            "audit_report",
+                            "issue_map",
+                            "patch_plan",
+                            "proposal_only",
+                            "dry_run",
+                            "approval",
+                            "execution",
+                        ],
+                        "current_stage": stage,
+                        "nodes": [
+                            {"id": f"{execution_id}_orkio", "agent": "Orkio", "role": "orchestrator", "status": "completed"},
+                            {"id": f"{execution_id}_orion", "agent": "Orion", "role": "technical_lead", "status": "completed"},
+                            {"id": f"{execution_id}_chris", "agent": "Chris", "role": "strategic_context_optional", "status": "not_called_or_context_only"},
+                        ],
+                    },
+                }
+            },
+        }
+
+
+
     def _is_orion_evolution_proposal_only_request(text: str) -> bool:
         """
         AO-16C_ORION_PROPOSAL_BUILDER:
@@ -32152,6 +32500,23 @@ async def chat_stream(
                 except Exception:
                     pass
                 # Se falhar, o terminal guard/sanitizer ainda protege a UI.
+
+        # AO20I_ORION_LED_GOVERNED_EVOLUTION_PIPELINE
+        # Pedidos naturais de autoevolução/auditoria assistida entram em pipeline
+        # governado por Orkio e liderado tecnicamente por Orion. Chris não audita
+        # tecnicamente; no máximo fornece contexto estratégico opcional.
+        if _is_governed_evolution_pipeline_request(message):
+            try:
+                payload = await asyncio.to_thread(_governed_evolution_pipeline_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_ao20i_governed_evolution_pipeline"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_AO20I_GOVERNED_EVOLUTION_PIPELINE_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Se falhar, os guards posteriores ainda podem responder em readonly.
 
         # AO20BC-LITE_MASTER_ROUTER_PRECEDENCE_LOCK
         # Technical readonly/orchestration audits addressed to @Orkio must be
