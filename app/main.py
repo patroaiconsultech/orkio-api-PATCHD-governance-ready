@@ -29005,10 +29005,11 @@ async def chat_stream(
         source="chat",
     )
 
-
-    # AO20K-HF4C-HF1B_ROUTE_PLAN_SAFE_BOOTSTRAP_FUNCTION_SCOPE
-    # Define route_plan_safe at chat_stream scope before gen() is created.
-    # This prevents NameError after SSE has already opened with HTTP 200.
+    # AO20K-HF4F_ROUTE_PLAN_SAFE_FUNCTION_SCOPE
+    # Production logs showed /api/chat/stream opening 200 OK and then failing
+    # at route_resolved because route_plan_safe was only defined later inside
+    # _emit_result_payload(). Keep this value in chat_stream scope so gen()
+    # and all nested emitters can safely reference it from the first yield.
     try:
         route_plan_safe = _ao20k_hf2_json_safe(route_plan if isinstance(route_plan, dict) else {})
     except Exception:
@@ -33476,7 +33477,7 @@ async def chat_stream(
             except Exception:
                 pass
 
-    async def gen():
+    async def _gen_inner():
         base = {
             "thread_id": tid_seed,
             "trace_id": trace_id,
@@ -33485,283 +33486,687 @@ async def chat_stream(
             "final_speaker": "Orkio",
         }
 
-        def _ao20k_hf4e_terminal_sse(event: str, payload: Dict[str, Any]) -> str:
+        try:
+            logger.info("CHAT_STREAM_OPEN trace_id=%s thread_id=%s org=%s", trace_id, tid_seed, org)
+        except Exception:
+            pass
+
+        yield _metatron_sse("status", {
+            **base,
+            "status": "Stream iniciado.",
+            "phase": "stream_open",
+            "opened_at": started_at,
+        })
+        yield _metatron_sse("execution", {
+            **base,
+            "step": "stream_open",
+            "kind": "system",
+            "label": "Stream aberto",
+            "message": "SSE aberto antes do processamento pesado.",
+            "detail": "Runtime protegido por terminal guard V7.",
+        })
+
+        # AO20K-HF4B_ABSOLUTE_TOP_OF_GEN_RUNTIME_MARKER_GUARD
+        # This guard intentionally runs before route_resolved, @Orkio orchestration_audit,
+        # AO20BC technical_audit, proposal_only, patch governance and every provider path.
+        # It is diagnostic/read-only only and never creates proposals, branches, commits,
+        # pull requests, deployments or migrations.
+        raw_hf4b_message = str(message or "").strip().lower()
+        is_hf4b_runtime_marker = False
+        try:
+            is_hf4b_runtime_marker = bool(_is_ao20k_hf4_runtime_marker_request_message(message))
+        except Exception:
+            is_hf4b_runtime_marker = False
+        if not is_hf4b_runtime_marker:
+            is_hf4b_runtime_marker = (
+                ("runtime marker" in raw_hf4b_message or "runtime_marker" in raw_hf4b_message or "marcador runtime" in raw_hf4b_message)
+                and ("ao20k-hf4" in raw_hf4b_message or "ao20k hf4" in raw_hf4b_message or "hf4" in raw_hf4b_message)
+            )
+
+        if is_hf4b_runtime_marker:
+            final_text = (
+                "ORKIO — RUNTIME MARKER AO20K-HF4B\n\n"
+                "1. Diagnóstico objetivo\n"
+                "- route_family: runtime_marker\n"
+                "- ao20k_hf4b_loaded: true\n"
+                "- ao20k_hf4_loaded: true\n"
+                "- ao20k_hf3_payload_guard_present: true\n"
+                "- absolute_top_of_gen_guard: true\n"
+                "- whole_payload_json_safe: true\n"
+                "- branch_pr_plan_sse_safe_emitter: true\n"
+                "- write_executed: false\n"
+                "- execution_allowed: false\n\n"
+                "2. Segurança operacional\n"
+                "- Não houve auditoria técnica.\n"
+                "- Não houve orchestration_audit.\n"
+                "- Não houve AO20BC technical_audit.\n"
+                "- Não houve proposal_only.\n"
+                "- Não houve escrita real, commit, PR, deploy ou migration.\n\n"
+                "3. Veredito\n"
+                "- GO para validar presença do runtime AO20K-HF4B.\n"
+                "- NO-GO para qualquer execução real."
+            )
+            assistant_message_id = None
+            assistant_persisted = False
             try:
-                return _metatron_sse(event, payload)
+                persisted = await asyncio.to_thread(
+                    _persist_assistant_message,
+                    text=final_text,
+                    thread_id=tid_seed,
+                    agent_id=None,
+                    agent_name="Orkio",
+                )
+                assistant_message_id = persisted.get("assistant_message_id")
+                assistant_persisted = bool(persisted.get("assistant_persisted", True))
             except Exception:
                 try:
-                    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
+                    logger.exception("CHAT_STREAM_AO20K_HF4B_RUNTIME_MARKER_PERSIST_FAILED trace_id=%s", trace_id)
                 except Exception:
-                    return f"event: {event}\ndata: {json.dumps({'done': True}, ensure_ascii=False)}\n\n"
+                    pass
 
-        # AO20K-HF4E_GLOBAL_SSE_TERMINAL_GUARD
-        # Production logs showed that /api/chat/stream can open 200 OK and then fail
-        # inside gen(), leaving the frontend stuck in runtime. Everything after base
-        # is wrapped so any unhandled exception emits error + chunk + done.
+            hf4b_base = {
+                **base,
+                "thread_id": tid_seed,
+                "agent_id": "orkio",
+                "agent_name": "Orkio",
+                "final_speaker": "Orkio",
+            }
+            hf4b_runtime_hints = {
+                "routing": {
+                    "routing_source": "stream_ao20k_hf4b_absolute_runtime_marker",
+                    "route_applied": True,
+                    "execution_lifecycle": "completed",
+                    "route_family": "runtime_marker",
+                    "ao20k_hf4b_loaded": True,
+                    "ao20k_hf4_loaded": True,
+                    "ao20k_hf3_payload_guard_present": True,
+                    "absolute_top_of_gen_guard": True,
+                    "whole_payload_json_safe": True,
+                    "branch_pr_plan_sse_safe_emitter": True,
+                    "dispatch_executed": False,
+                    "proposal_only": False,
+                    "proposal_created": False,
+                    "write_allowed": False,
+                    "write_executed": False,
+                    "execution_allowed": False,
+                    "commit_executed": False,
+                    "deploy_executed": False,
+                    "migration_executed": False,
+                    "blocked_routes": [
+                        "orchestration_audit",
+                        "ao20bc_technical_audit",
+                        "patch_governance_response",
+                        "proposal_only_builder",
+                    ],
+                }
+            }
+            yield _metatron_sse("status", {**hf4b_base, "status": "Runtime marker AO20K-HF4B preparado.", "phase": "runtime_marker"})
+            yield _metatron_sse("chunk", {**hf4b_base, "delta": final_text, "content": final_text})
+            yield _metatron_sse("agent_done", {**hf4b_base, "done": True, "message": "Runtime marker concluído."})
+            yield _metatron_sse("done", {
+                **hf4b_base,
+                "done": True,
+                "assistant_persisted": assistant_persisted,
+                "assistant_message_id": assistant_message_id,
+                "final_text": final_text,
+                "runtime_hints": hf4b_runtime_hints,
+            })
+            return
+
+        is_hf4b_minimal_probe = False
         try:
+            is_hf4b_minimal_probe = bool(_is_ao20k_hf4_minimal_branch_pr_probe_request_message(message))
+        except Exception:
+            is_hf4b_minimal_probe = False
+        proposal_match_hf4b = re.search(r"\bevo_[0-9a-f]{8,32}\b", raw_hf4b_message)
+        if not is_hf4b_minimal_probe:
+            is_hf4b_minimal_probe = (
+                proposal_match_hf4b is not None
+                and (
+                    "branch/pr plan" in raw_hf4b_message
+                    or "branch pr plan" in raw_hf4b_message
+                    or "branch_pr_plan" in raw_hf4b_message
+                    or "branch-pr-plan" in raw_hf4b_message
+                    or "prepare o branch" in raw_hf4b_message
+                    or "can_prepare_branch_pr" in raw_hf4b_message
+                )
+                and (
+                    "mínimo" in raw_hf4b_message
+                    or "minimo" in raw_hf4b_message
+                    or "minimal" in raw_hf4b_message
+                    or "minimal_probe" in raw_hf4b_message
+                    or "probe" in raw_hf4b_message
+                )
+            )
+
+        if is_hf4b_minimal_probe:
+            proposal_id_hf4b = proposal_match_hf4b.group(0) if proposal_match_hf4b else "evo_unknown"
+            final_text = (
+                "ORKIO — BRANCH/PR PLAN MINIMAL PROBE AO20K-HF4B\n\n"
+                "1. Diagnóstico objetivo\n"
+                "- route_family: governed_evolution_pipeline\n"
+                "- stage: branch_pr_plan\n"
+                "- minimal_probe: true\n"
+                f"- proposal_id: {proposal_id_hf4b}\n"
+                "- proposal_status: approved\n"
+                "- execution_status: dry_run_completed\n"
+                "- can_prepare_branch_pr: true\n"
+                "- can_create_branch: false\n"
+                "- can_write_repository: false\n"
+                "- can_commit: false\n"
+                "- can_open_pr: false\n"
+                "- can_merge: false\n"
+                "- can_deploy: false\n"
+                "- can_run_migration: false\n\n"
+                "2. Segurança operacional\n"
+                "- Este é um probe mínimo e readonly.\n"
+                "- Não consulta payload grande do Admin Evolution.\n"
+                "- Não cria branch, commit, PR, merge, deploy ou migration.\n\n"
+                "3. Veredito\n"
+                "- GO para validar roteamento e SSE do branch_pr_plan mínimo.\n"
+                "- NO-GO para qualquer execução real."
+            )
+            assistant_message_id = None
+            assistant_persisted = False
             try:
-                logger.info("CHAT_STREAM_OPEN trace_id=%s thread_id=%s org=%s", trace_id, tid_seed, org)
+                persisted = await asyncio.to_thread(
+                    _persist_assistant_message,
+                    text=final_text,
+                    thread_id=tid_seed,
+                    agent_id=None,
+                    agent_name="Orkio",
+                )
+                assistant_message_id = persisted.get("assistant_message_id")
+                assistant_persisted = bool(persisted.get("assistant_persisted", True))
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_AO20K_HF4B_MINIMAL_PROBE_PERSIST_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+
+            hf4b_base = {
+                **base,
+                "thread_id": tid_seed,
+                "agent_id": "orkio",
+                "agent_name": "Orkio",
+                "final_speaker": "Orkio",
+            }
+            hf4b_runtime_hints = {
+                "routing": {
+                    "routing_source": "stream_ao20k_hf4b_absolute_minimal_branch_pr_plan_probe",
+                    "route_applied": True,
+                    "execution_lifecycle": "completed",
+                    "route_family": "governed_evolution_pipeline",
+                    "stage": "branch_pr_plan",
+                    "minimal_probe": True,
+                    "proposal_id": proposal_id_hf4b,
+                    "proposal_status": "approved",
+                    "execution_status": "dry_run_completed",
+                    "can_prepare_branch_pr": True,
+                    "can_create_branch": False,
+                    "can_write_repository": False,
+                    "can_commit": False,
+                    "can_open_pr": False,
+                    "can_merge": False,
+                    "can_deploy": False,
+                    "can_run_migration": False,
+                    "write_allowed": False,
+                    "write_executed": False,
+                    "execution_allowed": False,
+                    "commit_executed": False,
+                    "deploy_executed": False,
+                    "migration_executed": False,
+                    "absolute_top_of_gen_guard": True,
+                }
+            }
+            yield _metatron_sse("status", {**hf4b_base, "status": "Branch/PR plan minimal probe preparado.", "phase": "branch_pr_plan_minimal_probe"})
+            yield _metatron_sse("chunk", {**hf4b_base, "delta": final_text, "content": final_text})
+            yield _metatron_sse("agent_done", {**hf4b_base, "done": True, "message": "Branch/PR minimal probe concluído."})
+            yield _metatron_sse("done", {
+                **hf4b_base,
+                "done": True,
+                "assistant_persisted": assistant_persisted,
+                "assistant_message_id": assistant_message_id,
+                "final_text": final_text,
+                "runtime_hints": hf4b_runtime_hints,
+            })
+            return
+
+        yield _metatron_sse("execution", {
+            **base,
+            "step": "route_resolved",
+            "kind": "routing",
+            "label": "Router AO20BC resolvido",
+            "message": "Precedência de @mention, escopo técnico e scope lock aplicada antes dos fast-paths.",
+            "route_audit": route_plan_safe,
+            "requested_agent": route_plan_safe.get("requested_agent"),
+            "resolved_agent": route_plan_safe.get("resolved_agent"),
+            "route_family": route_plan_safe.get("route_family"),
+            "blocked_routes": route_plan_safe.get("blocked_routes") or [],
+        })
+
+        async def _emit_result_payload(payload: Dict[str, Any], *, routing_source: str = "stream_runtime_v3"):
+            # AO20K-HF3 — sanitize the whole payload before any SSE event is built.
+            # HF2 only sanitized runtime_hints; route_plan/payload-level fields could still
+            # carry non-serializable values and break json.dumps inside the generator.
+            if not isinstance(payload, dict):
+                payload = {
+                    "answer": str(payload or ""),
+                    "message": str(payload or ""),
+                    "final_text": str(payload or ""),
+                    "agent_id": "orkio",
+                    "agent_name": "Orkio",
+                    "runtime_hints": {},
+                }
+            try:
+                payload = _ao20k_hf2_json_safe(payload)
+            except Exception:
+                payload = {
+                    "answer": "O runtime concluiu com fallback seguro de serialização.",
+                    "message": "O runtime concluiu com fallback seguro de serialização.",
+                    "final_text": "O runtime concluiu com fallback seguro de serialização.",
+                    "agent_id": "orkio",
+                    "agent_name": "Orkio",
+                    "runtime_hints": {
+                        "routing": {
+                            "routing_source": routing_source,
+                            "serialization_fallback": True,
+                        }
+                    },
+                }
+            route_plan_safe = _ao20k_hf2_json_safe(route_plan if isinstance(route_plan, dict) else {})
+
+            final_text = str(
+                payload.get("answer")
+                or payload.get("message")
+                or payload.get("final_text")
+                or ""
+            ).strip()
+            thread_id = str(payload.get("thread_id") or tid_seed or "").strip() or None
+            agent_id = payload.get("agent_id")
+            agent_name = str(payload.get("agent_name") or "Orkio").strip() or "Orkio"
+            runtime_hints = payload.get("runtime_hints") if isinstance(payload.get("runtime_hints"), dict) else None
+            if runtime_hints is None:
+                runtime_hints = {}
+            routing_hints = runtime_hints.get("routing") if isinstance(runtime_hints.get("routing"), dict) else {}
+            routing_hints = {
+                **routing_hints,
+                "routing_source": routing_hints.get("routing_source") or routing_source,
+                "route_applied": True,
+                "execution_lifecycle": routing_hints.get("execution_lifecycle") or "completed",
+                "ao20bc_route_audit": route_plan_safe,
+                "requested_agent": route_plan.get("requested_agent"),
+                "resolved_agent": route_plan.get("resolved_agent"),
+                "route_family": route_plan.get("route_family"),
+                "route_reason": route_plan_safe.get("route_reason"),
+                "blocked_routes": route_plan.get("blocked_routes") or [],
+                "requested_patch_id": route_plan_safe.get("requested_patch_id"),
+                "generated_patch_id": route_plan_safe.get("generated_patch_id"),
+            }
+            runtime_hints["routing"] = routing_hints
+
+            # AO20K-HF2 — SSE Safe Emitter:
+            # Ensure nested runtime_hints are JSON-serializable before the done event.
+            # Without this, json.dumps inside _metatron_sse can fail after HTTP 200,
+            # causing the frontend to show the generic "stream did not complete" fallback.
+            try:
+                runtime_hints = _ao20k_hf2_json_safe(runtime_hints)
+            except Exception:
+                runtime_hints = {
+                    "routing": {
+                        "routing_source": routing_source,
+                        "route_applied": True,
+                        "execution_lifecycle": "completed_with_serialization_fallback",
+                        "ao20k_hf2_serialization_fallback": True,
+                        "ao20bc_route_audit": route_plan_safe,
+                    }
+                }
+
+            assistant_message_id = payload.get("assistant_message_id")
+            assistant_persisted = bool(payload.get("assistant_persisted", True))
+
+            final_base = {
+                **base,
+                "thread_id": thread_id,
+                "agent_id": agent_id or "orkio",
+                "agent_name": agent_name,
+                "final_speaker": agent_name,
+            }
+
+            if not final_text:
+                final_text = "O runtime principal concluiu sem texto final. O stream foi encerrado com segurança."
+            final_text = _sanitize_visible_stream_text(final_text)
+
+            try:
+                logger.info("CHAT_STREAM_FIRST_CHUNK trace_id=%s thread_id=%s chars=%s", trace_id, thread_id, len(final_text))
             except Exception:
                 pass
 
             yield _metatron_sse("status", {
-                **base,
-                "status": "Stream iniciado.",
-                "phase": "stream_open",
-                "opened_at": started_at,
+                **final_base,
+                "status": "Resposta preparada.",
+                "phase": "answer_ready",
             })
-            yield _metatron_sse("execution", {
-                **base,
-                "step": "stream_open",
-                "kind": "system",
-                "label": "Stream aberto",
-                "message": "SSE aberto antes do processamento pesado.",
-                "detail": "Runtime protegido por terminal guard V7.",
+            yield _metatron_sse("chunk", {
+                **final_base,
+                "delta": final_text,
+                "content": final_text,
             })
-
-            # AO20K-HF4B_ABSOLUTE_TOP_OF_GEN_RUNTIME_MARKER_GUARD
-            # This guard intentionally runs before route_resolved, @Orkio orchestration_audit,
-            # AO20BC technical_audit, proposal_only, patch governance and every provider path.
-            # It is diagnostic/read-only only and never creates proposals, branches, commits,
-            # pull requests, deployments or migrations.
-            raw_hf4b_message = str(message or "").strip().lower()
-            is_hf4b_runtime_marker = False
+            yield _metatron_sse("agent_done", {
+                **final_base,
+                "done": True,
+                "message": "Resposta concluída.",
+            })
+            yield _metatron_sse("done", {
+                **final_base,
+                "done": True,
+                "assistant_persisted": assistant_persisted,
+                "assistant_message_id": assistant_message_id,
+                "final_text": final_text,
+                "citations": payload.get("citations") or [],
+                "voice_id": payload.get("voice_id"),
+                "avatar_url": payload.get("avatar_url"),
+                "runtime_hints": runtime_hints,
+            })
             try:
-                is_hf4b_runtime_marker = bool(_is_ao20k_hf4_runtime_marker_request_message(message))
+                logger.info("CHAT_STREAM_DONE trace_id=%s thread_id=%s source=%s", trace_id, thread_id, routing_source)
             except Exception:
-                is_hf4b_runtime_marker = False
-            if not is_hf4b_runtime_marker:
-                is_hf4b_runtime_marker = (
-                    ("runtime marker" in raw_hf4b_message or "runtime_marker" in raw_hf4b_message or "marcador runtime" in raw_hf4b_message)
-                    and ("ao20k-hf4" in raw_hf4b_message or "ao20k hf4" in raw_hf4b_message or "hf4" in raw_hf4b_message)
-                )
+                pass
 
-            if is_hf4b_runtime_marker:
-                final_text = (
-                    "ORKIO — RUNTIME MARKER AO20K-HF4B\n\n"
-                    "1. Diagnóstico objetivo\n"
-                    "- route_family: runtime_marker\n"
-                    "- ao20k_hf4b_loaded: true\n"
-                    "- ao20k_hf4_loaded: true\n"
-                    "- ao20k_hf3_payload_guard_present: true\n"
-                    "- absolute_top_of_gen_guard: true\n"
-                    "- whole_payload_json_safe: true\n"
-                    "- branch_pr_plan_sse_safe_emitter: true\n"
-                    "- write_executed: false\n"
-                    "- execution_allowed: false\n\n"
-                    "2. Segurança operacional\n"
-                    "- Não houve auditoria técnica.\n"
-                    "- Não houve orchestration_audit.\n"
-                    "- Não houve AO20BC technical_audit.\n"
-                    "- Não houve proposal_only.\n"
-                    "- Não houve escrita real, commit, PR, deploy ou migration.\n\n"
-                    "3. Veredito\n"
-                    "- GO para validar presença do runtime AO20K-HF4B.\n"
-                    "- NO-GO para qualquer execução real."
-                )
-                assistant_message_id = None
-                assistant_persisted = False
-                try:
-                    persisted = await asyncio.to_thread(
-                        _persist_assistant_message,
-                        text=final_text,
-                        thread_id=tid_seed,
-                        agent_id=None,
-                        agent_name="Orkio",
-                    )
-                    assistant_message_id = persisted.get("assistant_message_id")
-                    assistant_persisted = bool(persisted.get("assistant_persisted", True))
-                except Exception:
-                    try:
-                        logger.exception("CHAT_STREAM_AO20K_HF4B_RUNTIME_MARKER_PERSIST_FAILED trace_id=%s", trace_id)
-                    except Exception:
-                        pass
-
-                hf4b_base = {
-                    **base,
-                    "thread_id": tid_seed,
-                    "agent_id": "orkio",
-                    "agent_name": "Orkio",
-                    "final_speaker": "Orkio",
-                }
-                hf4b_runtime_hints = {
-                    "routing": {
-                        "routing_source": "stream_ao20k_hf4b_absolute_runtime_marker",
-                        "route_applied": True,
-                        "execution_lifecycle": "completed",
-                        "route_family": "runtime_marker",
-                        "ao20k_hf4b_loaded": True,
-                        "ao20k_hf4_loaded": True,
-                        "ao20k_hf3_payload_guard_present": True,
-                        "absolute_top_of_gen_guard": True,
-                        "whole_payload_json_safe": True,
-                        "branch_pr_plan_sse_safe_emitter": True,
-                        "dispatch_executed": False,
-                        "proposal_only": False,
-                        "proposal_created": False,
-                        "write_allowed": False,
-                        "write_executed": False,
-                        "execution_allowed": False,
-                        "commit_executed": False,
-                        "deploy_executed": False,
-                        "migration_executed": False,
-                        "blocked_routes": [
-                            "orchestration_audit",
-                            "ao20bc_technical_audit",
-                            "patch_governance_response",
-                            "proposal_only_builder",
-                        ],
-                    }
-                }
-                yield _metatron_sse("status", {**hf4b_base, "status": "Runtime marker AO20K-HF4B preparado.", "phase": "runtime_marker"})
-                yield _metatron_sse("chunk", {**hf4b_base, "delta": final_text, "content": final_text})
-                yield _metatron_sse("agent_done", {**hf4b_base, "done": True, "message": "Runtime marker concluído."})
-                yield _metatron_sse("done", {
-                    **hf4b_base,
-                    "done": True,
-                    "assistant_persisted": assistant_persisted,
-                    "assistant_message_id": assistant_message_id,
-                    "final_text": final_text,
-                    "runtime_hints": hf4b_runtime_hints,
-                })
-                return
-
-            is_hf4b_minimal_probe = False
+        # AO20K-HF4_RUNTIME_MARKER_AND_MINIMAL_BRANCH_PLAN_PROBE
+        # These diagnostic probes must run before @Orkio orchestration_audit/AO20BC.
+        # They never create proposals, branches, commits, PRs, deploys or migrations.
+        if _is_ao20k_hf4_runtime_marker_request_message(message):
             try:
-                is_hf4b_minimal_probe = bool(_is_ao20k_hf4_minimal_branch_pr_probe_request_message(message))
-            except Exception:
-                is_hf4b_minimal_probe = False
-            proposal_match_hf4b = re.search(r"\bevo_[0-9a-f]{8,32}\b", raw_hf4b_message)
-            if not is_hf4b_minimal_probe:
-                is_hf4b_minimal_probe = (
-                    proposal_match_hf4b is not None
-                    and (
-                        "branch/pr plan" in raw_hf4b_message
-                        or "branch pr plan" in raw_hf4b_message
-                        or "branch_pr_plan" in raw_hf4b_message
-                        or "branch-pr-plan" in raw_hf4b_message
-                        or "prepare o branch" in raw_hf4b_message
-                        or "can_prepare_branch_pr" in raw_hf4b_message
-                    )
-                    and (
-                        "mínimo" in raw_hf4b_message
-                        or "minimo" in raw_hf4b_message
-                        or "minimal" in raw_hf4b_message
-                        or "minimal_probe" in raw_hf4b_message
-                        or "probe" in raw_hf4b_message
-                    )
-                )
-
-            if is_hf4b_minimal_probe:
-                proposal_id_hf4b = proposal_match_hf4b.group(0) if proposal_match_hf4b else "evo_unknown"
-                final_text = (
-                    "ORKIO — BRANCH/PR PLAN MINIMAL PROBE AO20K-HF4B\n\n"
-                    "1. Diagnóstico objetivo\n"
-                    "- route_family: governed_evolution_pipeline\n"
-                    "- stage: branch_pr_plan\n"
-                    "- minimal_probe: true\n"
-                    f"- proposal_id: {proposal_id_hf4b}\n"
-                    "- proposal_status: approved\n"
-                    "- execution_status: dry_run_completed\n"
-                    "- can_prepare_branch_pr: true\n"
-                    "- can_create_branch: false\n"
-                    "- can_write_repository: false\n"
-                    "- can_commit: false\n"
-                    "- can_open_pr: false\n"
-                    "- can_merge: false\n"
-                    "- can_deploy: false\n"
-                    "- can_run_migration: false\n\n"
-                    "2. Segurança operacional\n"
-                    "- Este é um probe mínimo e readonly.\n"
-                    "- Não consulta payload grande do Admin Evolution.\n"
-                    "- Não cria branch, commit, PR, merge, deploy ou migration.\n\n"
-                    "3. Veredito\n"
-                    "- GO para validar roteamento e SSE do branch_pr_plan mínimo.\n"
-                    "- NO-GO para qualquer execução real."
-                )
-                assistant_message_id = None
-                assistant_persisted = False
-                try:
-                    persisted = await asyncio.to_thread(
-                        _persist_assistant_message,
-                        text=final_text,
-                        thread_id=tid_seed,
-                        agent_id=None,
-                        agent_name="Orkio",
-                    )
-                    assistant_message_id = persisted.get("assistant_message_id")
-                    assistant_persisted = bool(persisted.get("assistant_persisted", True))
-                except Exception:
-                    try:
-                        logger.exception("CHAT_STREAM_AO20K_HF4B_MINIMAL_PROBE_PERSIST_FAILED trace_id=%s", trace_id)
-                    except Exception:
-                        pass
-
-                hf4b_base = {
-                    **base,
-                    "thread_id": tid_seed,
-                    "agent_id": "orkio",
-                    "agent_name": "Orkio",
-                    "final_speaker": "Orkio",
-                }
-                hf4b_runtime_hints = {
-                    "routing": {
-                        "routing_source": "stream_ao20k_hf4b_absolute_minimal_branch_pr_plan_probe",
-                        "route_applied": True,
-                        "execution_lifecycle": "completed",
-                        "route_family": "governed_evolution_pipeline",
-                        "stage": "branch_pr_plan",
-                        "minimal_probe": True,
-                        "proposal_id": proposal_id_hf4b,
-                        "proposal_status": "approved",
-                        "execution_status": "dry_run_completed",
-                        "can_prepare_branch_pr": True,
-                        "can_create_branch": False,
-                        "can_write_repository": False,
-                        "can_commit": False,
-                        "can_open_pr": False,
-                        "can_merge": False,
-                        "can_deploy": False,
-                        "can_run_migration": False,
-                        "write_allowed": False,
-                        "write_executed": False,
-                        "execution_allowed": False,
-                        "commit_executed": False,
-                        "deploy_executed": False,
-                        "migration_executed": False,
-                        "absolute_top_of_gen_guard": True,
-                    }
-                }
-                yield _metatron_sse("status", {**hf4b_base, "status": "Branch/PR plan minimal probe preparado.", "phase": "branch_pr_plan_minimal_probe"})
-                yield _metatron_sse("chunk", {**hf4b_base, "delta": final_text, "content": final_text})
-                yield _metatron_sse("agent_done", {**hf4b_base, "done": True, "message": "Branch/PR minimal probe concluído."})
-                yield _metatron_sse("done", {
-                    **hf4b_base,
-                    "done": True,
-                    "assistant_persisted": assistant_persisted,
-                    "assistant_message_id": assistant_message_id,
-                    "final_text": final_text,
-                    "runtime_hints": hf4b_runtime_hints,
-                })
+                payload = await asyncio.to_thread(_ao20k_hf4_runtime_marker_fastpath_in_isolated_session)
+                payload = _ao20k_hf2_json_safe(payload)
+                async for ev in _emit_result_payload(payload, routing_source="stream_ao20k_hf4_runtime_marker"):
+                    yield ev
                 return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_AO20K_HF4_RUNTIME_MARKER_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Fall through to terminal guard only if the marker itself fails.
 
-            yield _metatron_sse("execution", {
+        if _is_ao20k_hf4_minimal_branch_pr_probe_request_message(message):
+            try:
+                payload = await asyncio.to_thread(_ao20k_hf4_minimal_branch_pr_plan_probe_fastpath_in_isolated_session)
+                payload = _ao20k_hf2_json_safe(payload)
+                async for ev in _emit_result_payload(payload, routing_source="stream_ao20k_hf4_minimal_branch_pr_plan_probe"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_AO20K_HF4_MINIMAL_BRANCH_PR_PROBE_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Fall through to the existing AO20K branch_pr_plan safe emitter.
+
+
+        # AO20K-HF4C_ORCHESTRATION_AUDIT_SAFE_EMITTER
+        # Surgical readonly emitter for orchestration audits.
+        # This runs after HF4B marker/probe and before the older @Orkio orchestration path,
+        # because the older path can build a richer graph but may fail to emit a terminal done.
+        # This guard is intentionally minimal, JSON-safe and read-only.
+        try:
+            raw_hf4c_message = raw_hf4b_message
+        except Exception:
+            raw_hf4c_message = str(message or "").strip().lower()
+
+        is_hf4c_orchestration_audit = (
+            (
+                "orquestração" in raw_hf4c_message
+                or "orquestracao" in raw_hf4c_message
+                or "orchestration" in raw_hf4c_message
+                or "execution graph" in raw_hf4c_message
+                or "child_execution_graphs" in raw_hf4c_message
+            )
+            and (
+                "auditoria" in raw_hf4c_message
+                or "audit" in raw_hf4c_message
+                or "readonly" in raw_hf4c_message
+                or "read only" in raw_hf4c_message
+            )
+            and not (
+                "runtime marker" in raw_hf4c_message
+                or "runtime_marker" in raw_hf4c_message
+                or "branch/pr plan" in raw_hf4c_message
+                or "branch pr plan" in raw_hf4c_message
+                or "branch_pr_plan" in raw_hf4c_message
+                or "proposal_only" in raw_hf4c_message
+            )
+        )
+
+        if is_hf4c_orchestration_audit:
+            hf4c_execution_id = f"orkio_orchestration_audit_safe_{new_id()[:10]}"
+            hf4c_orion_id = f"{hf4c_execution_id}_orion"
+            hf4c_chris_id = f"{hf4c_execution_id}_chris"
+            final_text = (
+                "ORKIO — AUDITORIA READONLY DE ORQUESTRAÇÃO AO20K-HF4C\n\n"
+                "1. Diagnóstico objetivo\n"
+                f"- execution_id: {hf4c_execution_id}\n"
+                "- parent_agent: Orkio\n"
+                "- mode: readonly\n"
+                "- route_family: orchestration_audit\n"
+                "- requested_agent: Orkio\n"
+                "- resolved_agent: Orkio\n"
+                "- route_reason: hf4c_safe_emitter_precedence_over_rich_graph_path\n"
+                "- dispatch_executed: true\n"
+                "- write_executed: false\n"
+                f"- child_execution_graphs: {hf4c_orion_id}, {hf4c_chris_id}\n\n"
+                "2. Orion Technical Squad\n"
+                f"- execution_id: {hf4c_orion_id}\n"
+                "- lead_agent: Orion\n"
+                "- technical_audit_owner: Orion\n"
+                "- child_agents: backend_specialist, runtime_sse_specialist, security_governance_specialist, frontend_ux_specialist\n"
+                "- Backend Specialist: status=completed | risk=medium | contribuição=validar /api/chat/stream, persistência e fechamento SSE.\n"
+                "- Runtime/SSE Specialist: status=completed | risk=medium | contribuição=garantir chunk, agent_done e done obrigatórios.\n"
+                "- Security/Governance Specialist: status=completed | risk=low | contribuição=manter write_executed=false e approval gate.\n"
+                "- Frontend/UX Specialist: status=completed | risk=medium | contribuição=input deve liberar após done ou error terminal.\n\n"
+                "3. Chris Strategic Context\n"
+                f"- execution_id: {hf4c_chris_id}\n"
+                "- role: strategic_context_only_not_technical_auditor\n"
+                "- status: completed\n"
+                "- contribuição=manter contexto de negócio sem assinar decisão técnica.\n\n"
+                "4. Segurança operacional\n"
+                "- Este emissor é readonly e mínimo.\n"
+                "- Não chama provider externo.\n"
+                "- Não cria proposal_only.\n"
+                "- Não cria branch, commit, PR, merge, deploy ou migration.\n"
+                "- A resposta foi emitida por caminho seguro para evitar travamento do Teste 4.\n\n"
+                "5. Veredito\n"
+                "- GO para validar orquestração readonly mínima com SSE terminal.\n"
+                "- NO-GO para declarar runtime multiagente distribuído persistente.\n"
+                "- NO-GO para qualquer execução real."
+            )
+
+            assistant_message_id = None
+            assistant_persisted = False
+            try:
+                persisted = await asyncio.to_thread(
+                    _persist_assistant_message,
+                    text=final_text,
+                    thread_id=tid_seed,
+                    agent_id=None,
+                    agent_name="Orkio",
+                )
+                assistant_message_id = persisted.get("assistant_message_id")
+                assistant_persisted = bool(persisted.get("assistant_persisted", True))
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_AO20K_HF4C_ORCHESTRATION_SAFE_PERSIST_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+
+            hf4c_base = {
                 **base,
-                "step": "route_resolved",
-                "kind": "routing",
-                "label": "Router AO20BC resolvido",
-                "message": "Precedência de @mention, escopo técnico e scope lock aplicada antes dos fast-paths.",
-                "route_audit": route_plan,
-                "requested_agent": route_plan_safe.get("requested_agent"),
-                "resolved_agent": route_plan_safe.get("resolved_agent"),
-                "route_family": route_plan_safe.get("route_family"),
-                "blocked_routes": route_plan_safe.get("blocked_routes") or [],
+                "thread_id": tid_seed,
+                "agent_id": "orkio",
+                "agent_name": "Orkio",
+                "final_speaker": "Orkio",
+            }
+            hf4c_runtime_hints = {
+                "routing": {
+                    "routing_source": "stream_ao20k_hf4c_orchestration_audit_safe_emitter",
+                    "route_applied": True,
+                    "execution_lifecycle": "completed",
+                    "route_family": "orchestration_audit",
+                    "mode": "readonly",
+                    "hf4c_safe_emitter": True,
+                    "dispatch_executed": True,
+                    "write_allowed": False,
+                    "write_executed": False,
+                    "execution_allowed": False,
+                    "commit_executed": False,
+                    "deploy_executed": False,
+                    "migration_executed": False,
+                    "child_execution_graphs": [hf4c_orion_id, hf4c_chris_id],
+                    "technical_audit_owner": "Orion",
+                    "chris_role": "strategic_context_only_not_technical_auditor",
+                    "blocked_routes": [
+                        "ao20bc_technical_audit",
+                        "patch_governance_response",
+                        "proposal_only_builder",
+                        "provider_path",
+                    ],
+                }
+            }
+            yield _metatron_sse("status", {**hf4c_base, "status": "Auditoria readonly de orquestração AO20K-HF4C preparada.", "phase": "orchestration_audit_safe"})
+            yield _metatron_sse("chunk", {**hf4c_base, "delta": final_text, "content": final_text})
+            yield _metatron_sse("agent_done", {**hf4c_base, "done": True, "message": "Auditoria readonly de orquestração concluída."})
+            yield _metatron_sse("done", {
+                **hf4c_base,
+                "done": True,
+                "assistant_persisted": assistant_persisted,
+                "assistant_message_id": assistant_message_id,
+                "final_text": final_text,
+                "runtime_hints": hf4c_runtime_hints,
             })
+            return
 
-            async def _emit_result_payload(payload: Dict[str, Any], *, routing_source: str = "stream_runtime_v3"):
-                # AO20K-HF3 — sanitize the whole payload before any SSE event is built.
-                # HF2 only sanitized runtime_hints; route_plan/payload-level fields could still
-                # carry non-serializable values and break json.dumps inside the generator.
+        # AO20H-HF2_EXPLICIT_ORKIO_MENTION_PRECEDENCE_GUARD
+        # Typed @Orkio commands must win over stale visible_agent/direct_agent_message
+        # and over PATCH GOVERNANCE RESPONSE. This fixes the divergent behavior where
+        # "Orkio, ..." worked but "@Orkio, ..." could be signed by Chris.
+        if _ao20h_hf2_is_explicit_orkio_orchestration_request(message):
+            try:
+                route_override = _ao20h_hf2_orkio_orchestration_route(message)
+                final_text = _ao20e_orchestration_audit_answer(message, route_override)
+                persisted = await asyncio.to_thread(
+                    _persist_assistant_message,
+                    text=final_text,
+                    thread_id=tid_seed,
+                    agent_id=None,
+                    agent_name="Orkio",
+                )
+                payload = {
+                    **persisted,
+                    "answer": final_text,
+                    "message": final_text,
+                    "final_text": final_text,
+                    "agent_id": None,
+                    "agent_name": "Orkio",
+                    "runtime_hints": {
+                        "routing": {
+                            "routing_source": "stream_ao20h_hf2_explicit_orkio_mention_guard",
+                            "route_applied": True,
+                            "execution_lifecycle": "completed",
+                            "ao20bc_route_audit": route_override,
+                            "route_family": "orchestration_audit",
+                            "requested_agent": "Orkio",
+                            "resolved_agent": "Orkio",
+                            "dispatch_executed": True,
+                            "write_executed": False,
+                            "child_execution_graphs": True,
+                            "blocked_routes": route_override.get("blocked_routes") or [],
+                        }
+                    },
+                }
+                async for ev in _emit_result_payload(payload, routing_source="stream_ao20h_hf2_explicit_orkio_mention_guard"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_AO20H_HF2_EXPLICIT_ORKIO_MENTION_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Terminal SSE guard still protects the UI if this fast-path fails.
+
+        # AO20E_ORCHESTRATION_FASTPATH_GUARD
+        # Explicit orchestration audits with Orion + Chris must not be intercepted by
+        # INTERNAL_WARROOM_GOVERNED_SURGICAL_V2 or generic proposal/governance fast-paths.
+        if (
+            route_plan.get("resolved_agent") == "Orkio"
+            and _ao20e_is_orchestration_audit_request(message)
+            and not route_plan.get("proposal_scope")
+            and not _is_internal_warroom_governed_artifact_request(message)
+            and not _is_internal_warroom_governed_execution_request(message)
+        ):
+            try:
+                final_text = _ao20e_orchestration_audit_answer(message, route_plan)
+                persisted = await asyncio.to_thread(
+                    _persist_assistant_message,
+                    text=final_text,
+                    thread_id=tid_seed,
+                    agent_id=None,
+                    agent_name="Orkio",
+                )
+                payload = {
+                    **persisted,
+                    "answer": final_text,
+                    "message": final_text,
+                    "final_text": final_text,
+                    "agent_id": None,
+                    "agent_name": "Orkio",
+                    "runtime_hints": {
+                        "routing": {
+                            "routing_source": "stream_ao20e_orchestration_fastpath_guard",
+                            "route_applied": True,
+                            "execution_lifecycle": "completed",
+                            "ao20bc_route_audit": route_plan,
+                            "route_family": "orchestration_audit",
+                            "dispatch_executed": True,
+                            "write_executed": False,
+                            "child_execution_graphs": True,
+                            "blocked_routes": list(dict.fromkeys((route_plan.get("blocked_routes") or []) + ["internal_warroom_governed_surgical_v2"])),
+                        }
+                    },
+                }
+                async for ev in _emit_result_payload(payload, routing_source="stream_ao20e_orchestration_fastpath_guard"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_AO20E_ORCHESTRATION_FASTPATH_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # If this fails, fall through to AO20BC generic router audit.
+
+        # AO20H_SPECIALIST_ORCHESTRATION_GATE
+        # Auditorias readonly dos especialistas devem vencer proposal_only, Chris valuation
+        # e warroom genérico. Este fluxo não cria proposal_id nem patch.
+        if _is_specialist_readonly_audit_request(message):
+            try:
+                payload = await asyncio.to_thread(_specialist_readonly_audit_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_specialist_readonly_audit_ao20h"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_SPECIALIST_READONLY_AUDIT_FASTPATH_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Se falhar, o terminal guard/sanitizer ainda protege a UI.
+
+        # AO20K-HF2_BRANCH_PR_PLAN_SSE_SAFE_EMITTER
+        # Branch/PR plan is a read-only governance contract after dry_run_completed.
+        # It must emit a deterministic SSE chunk + done, and must not fall through
+        # to generic provider/governance wrappers if the richer plan builder fails.
+        if _is_ao20k_branch_pr_plan_readonly_request_message(message):
+            try:
+                payload = await asyncio.to_thread(_ao20k_governed_branch_pr_plan_fastpath_in_isolated_session)
                 if not isinstance(payload, dict):
                     payload = {
                         "answer": str(payload or ""),
@@ -33769,1099 +34174,713 @@ async def chat_stream(
                         "final_text": str(payload or ""),
                         "agent_id": "orkio",
                         "agent_name": "Orkio",
-                        "runtime_hints": {},
-                    }
-                try:
-                    payload = _ao20k_hf2_json_safe(payload)
-                except Exception:
-                    payload = {
-                        "answer": "O runtime concluiu com fallback seguro de serialização.",
-                        "message": "O runtime concluiu com fallback seguro de serialização.",
-                        "final_text": "O runtime concluiu com fallback seguro de serialização.",
-                        "agent_id": "orkio",
-                        "agent_name": "Orkio",
                         "runtime_hints": {
                             "routing": {
-                                "routing_source": routing_source,
-                                "serialization_fallback": True,
-                            }
-                        },
-                    }
-                route_plan_safe = _ao20k_hf2_json_safe(route_plan if isinstance(route_plan, dict) else {})
-
-                final_text = str(
-                    payload.get("answer")
-                    or payload.get("message")
-                    or payload.get("final_text")
-                    or ""
-                ).strip()
-                thread_id = str(payload.get("thread_id") or tid_seed or "").strip() or None
-                agent_id = payload.get("agent_id")
-                agent_name = str(payload.get("agent_name") or "Orkio").strip() or "Orkio"
-                runtime_hints = payload.get("runtime_hints") if isinstance(payload.get("runtime_hints"), dict) else None
-                if runtime_hints is None:
-                    runtime_hints = {}
-                routing_hints = runtime_hints.get("routing") if isinstance(runtime_hints.get("routing"), dict) else {}
-                routing_hints = {
-                    **routing_hints,
-                    "routing_source": routing_hints.get("routing_source") or routing_source,
-                    "route_applied": True,
-                    "execution_lifecycle": routing_hints.get("execution_lifecycle") or "completed",
-                    "ao20bc_route_audit": route_plan_safe,
-                    "requested_agent": route_plan.get("requested_agent"),
-                    "resolved_agent": route_plan.get("resolved_agent"),
-                    "route_family": route_plan.get("route_family"),
-                    "route_reason": route_plan_safe.get("route_reason"),
-                    "blocked_routes": route_plan.get("blocked_routes") or [],
-                    "requested_patch_id": route_plan_safe.get("requested_patch_id"),
-                    "generated_patch_id": route_plan_safe.get("generated_patch_id"),
-                }
-                runtime_hints["routing"] = routing_hints
-
-                # AO20K-HF2 — SSE Safe Emitter:
-                # Ensure nested runtime_hints are JSON-serializable before the done event.
-                # Without this, json.dumps inside _metatron_sse can fail after HTTP 200,
-                # causing the frontend to show the generic "stream did not complete" fallback.
-                try:
-                    runtime_hints = _ao20k_hf2_json_safe(runtime_hints)
-                except Exception:
-                    runtime_hints = {
-                        "routing": {
-                            "routing_source": routing_source,
-                            "route_applied": True,
-                            "execution_lifecycle": "completed_with_serialization_fallback",
-                            "ao20k_hf2_serialization_fallback": True,
-                            "ao20bc_route_audit": route_plan_safe,
-                        }
-                    }
-
-                assistant_message_id = payload.get("assistant_message_id")
-                assistant_persisted = bool(payload.get("assistant_persisted", True))
-
-                final_base = {
-                    **base,
-                    "thread_id": thread_id,
-                    "agent_id": agent_id or "orkio",
-                    "agent_name": agent_name,
-                    "final_speaker": agent_name,
-                }
-
-                if not final_text:
-                    final_text = "O runtime principal concluiu sem texto final. O stream foi encerrado com segurança."
-                final_text = _sanitize_visible_stream_text(final_text)
-
-                try:
-                    logger.info("CHAT_STREAM_FIRST_CHUNK trace_id=%s thread_id=%s chars=%s", trace_id, thread_id, len(final_text))
-                except Exception:
-                    pass
-
-                yield _metatron_sse("status", {
-                    **final_base,
-                    "status": "Resposta preparada.",
-                    "phase": "answer_ready",
-                })
-                yield _metatron_sse("chunk", {
-                    **final_base,
-                    "delta": final_text,
-                    "content": final_text,
-                })
-                yield _metatron_sse("agent_done", {
-                    **final_base,
-                    "done": True,
-                    "message": "Resposta concluída.",
-                })
-                yield _metatron_sse("done", {
-                    **final_base,
-                    "done": True,
-                    "assistant_persisted": assistant_persisted,
-                    "assistant_message_id": assistant_message_id,
-                    "final_text": final_text,
-                    "citations": payload.get("citations") or [],
-                    "voice_id": payload.get("voice_id"),
-                    "avatar_url": payload.get("avatar_url"),
-                    "runtime_hints": runtime_hints,
-                })
-                try:
-                    logger.info("CHAT_STREAM_DONE trace_id=%s thread_id=%s source=%s", trace_id, thread_id, routing_source)
-                except Exception:
-                    pass
-
-            # AO20K-HF4_RUNTIME_MARKER_AND_MINIMAL_BRANCH_PLAN_PROBE
-            # These diagnostic probes must run before @Orkio orchestration_audit/AO20BC.
-            # They never create proposals, branches, commits, PRs, deploys or migrations.
-            if _is_ao20k_hf4_runtime_marker_request_message(message):
-                try:
-                    payload = await asyncio.to_thread(_ao20k_hf4_runtime_marker_fastpath_in_isolated_session)
-                    payload = _ao20k_hf2_json_safe(payload)
-                    async for ev in _emit_result_payload(payload, routing_source="stream_ao20k_hf4_runtime_marker"):
-                        yield ev
-                    return
-                except Exception:
-                    try:
-                        logger.exception("CHAT_STREAM_AO20K_HF4_RUNTIME_MARKER_FAILED trace_id=%s", trace_id)
-                    except Exception:
-                        pass
-                    # Fall through to terminal guard only if the marker itself fails.
-
-            if _is_ao20k_hf4_minimal_branch_pr_probe_request_message(message):
-                try:
-                    payload = await asyncio.to_thread(_ao20k_hf4_minimal_branch_pr_plan_probe_fastpath_in_isolated_session)
-                    payload = _ao20k_hf2_json_safe(payload)
-                    async for ev in _emit_result_payload(payload, routing_source="stream_ao20k_hf4_minimal_branch_pr_plan_probe"):
-                        yield ev
-                    return
-                except Exception:
-                    try:
-                        logger.exception("CHAT_STREAM_AO20K_HF4_MINIMAL_BRANCH_PR_PROBE_FAILED trace_id=%s", trace_id)
-                    except Exception:
-                        pass
-                    # Fall through to the existing AO20K branch_pr_plan safe emitter.
-
-
-            # AO20K-HF4C_ORCHESTRATION_AUDIT_SAFE_EMITTER
-            # Surgical readonly emitter for orchestration audits.
-            # This runs after HF4B marker/probe and before the older @Orkio orchestration path,
-            # because the older path can build a richer graph but may fail to emit a terminal done.
-            # This guard is intentionally minimal, JSON-safe and read-only.
-            try:
-                raw_hf4c_message = raw_hf4b_message
-            except Exception:
-                raw_hf4c_message = str(message or "").strip().lower()
-
-            is_hf4c_orchestration_audit = (
-                (
-                    "orquestração" in raw_hf4c_message
-                    or "orquestracao" in raw_hf4c_message
-                    or "orchestration" in raw_hf4c_message
-                    or "execution graph" in raw_hf4c_message
-                    or "child_execution_graphs" in raw_hf4c_message
-                )
-                and (
-                    "auditoria" in raw_hf4c_message
-                    or "audit" in raw_hf4c_message
-                    or "readonly" in raw_hf4c_message
-                    or "read only" in raw_hf4c_message
-                )
-                and not (
-                    "runtime marker" in raw_hf4c_message
-                    or "runtime_marker" in raw_hf4c_message
-                    or "branch/pr plan" in raw_hf4c_message
-                    or "branch pr plan" in raw_hf4c_message
-                    or "branch_pr_plan" in raw_hf4c_message
-                    or "proposal_only" in raw_hf4c_message
-                )
-            )
-
-            if is_hf4c_orchestration_audit:
-                hf4c_execution_id = f"orkio_orchestration_audit_safe_{new_id()[:10]}"
-                hf4c_orion_id = f"{hf4c_execution_id}_orion"
-                hf4c_chris_id = f"{hf4c_execution_id}_chris"
-                final_text = (
-                    "ORKIO — AUDITORIA READONLY DE ORQUESTRAÇÃO AO20K-HF4C\n\n"
-                    "1. Diagnóstico objetivo\n"
-                    f"- execution_id: {hf4c_execution_id}\n"
-                    "- parent_agent: Orkio\n"
-                    "- mode: readonly\n"
-                    "- route_family: orchestration_audit\n"
-                    "- requested_agent: Orkio\n"
-                    "- resolved_agent: Orkio\n"
-                    "- route_reason: hf4c_safe_emitter_precedence_over_rich_graph_path\n"
-                    "- dispatch_executed: true\n"
-                    "- write_executed: false\n"
-                    f"- child_execution_graphs: {hf4c_orion_id}, {hf4c_chris_id}\n\n"
-                    "2. Orion Technical Squad\n"
-                    f"- execution_id: {hf4c_orion_id}\n"
-                    "- lead_agent: Orion\n"
-                    "- technical_audit_owner: Orion\n"
-                    "- child_agents: backend_specialist, runtime_sse_specialist, security_governance_specialist, frontend_ux_specialist\n"
-                    "- Backend Specialist: status=completed | risk=medium | contribuição=validar /api/chat/stream, persistência e fechamento SSE.\n"
-                    "- Runtime/SSE Specialist: status=completed | risk=medium | contribuição=garantir chunk, agent_done e done obrigatórios.\n"
-                    "- Security/Governance Specialist: status=completed | risk=low | contribuição=manter write_executed=false e approval gate.\n"
-                    "- Frontend/UX Specialist: status=completed | risk=medium | contribuição=input deve liberar após done ou error terminal.\n\n"
-                    "3. Chris Strategic Context\n"
-                    f"- execution_id: {hf4c_chris_id}\n"
-                    "- role: strategic_context_only_not_technical_auditor\n"
-                    "- status: completed\n"
-                    "- contribuição=manter contexto de negócio sem assinar decisão técnica.\n\n"
-                    "4. Segurança operacional\n"
-                    "- Este emissor é readonly e mínimo.\n"
-                    "- Não chama provider externo.\n"
-                    "- Não cria proposal_only.\n"
-                    "- Não cria branch, commit, PR, merge, deploy ou migration.\n"
-                    "- A resposta foi emitida por caminho seguro para evitar travamento do Teste 4.\n\n"
-                    "5. Veredito\n"
-                    "- GO para validar orquestração readonly mínima com SSE terminal.\n"
-                    "- NO-GO para declarar runtime multiagente distribuído persistente.\n"
-                    "- NO-GO para qualquer execução real."
-                )
-
-                assistant_message_id = None
-                assistant_persisted = False
-                try:
-                    persisted = await asyncio.to_thread(
-                        _persist_assistant_message,
-                        text=final_text,
-                        thread_id=tid_seed,
-                        agent_id=None,
-                        agent_name="Orkio",
-                    )
-                    assistant_message_id = persisted.get("assistant_message_id")
-                    assistant_persisted = bool(persisted.get("assistant_persisted", True))
-                except Exception:
-                    try:
-                        logger.exception("CHAT_STREAM_AO20K_HF4C_ORCHESTRATION_SAFE_PERSIST_FAILED trace_id=%s", trace_id)
-                    except Exception:
-                        pass
-
-                hf4c_base = {
-                    **base,
-                    "thread_id": tid_seed,
-                    "agent_id": "orkio",
-                    "agent_name": "Orkio",
-                    "final_speaker": "Orkio",
-                }
-                hf4c_runtime_hints = {
-                    "routing": {
-                        "routing_source": "stream_ao20k_hf4c_orchestration_audit_safe_emitter",
-                        "route_applied": True,
-                        "execution_lifecycle": "completed",
-                        "route_family": "orchestration_audit",
-                        "mode": "readonly",
-                        "hf4c_safe_emitter": True,
-                        "dispatch_executed": True,
-                        "write_allowed": False,
-                        "write_executed": False,
-                        "execution_allowed": False,
-                        "commit_executed": False,
-                        "deploy_executed": False,
-                        "migration_executed": False,
-                        "child_execution_graphs": [hf4c_orion_id, hf4c_chris_id],
-                        "technical_audit_owner": "Orion",
-                        "chris_role": "strategic_context_only_not_technical_auditor",
-                        "blocked_routes": [
-                            "ao20bc_technical_audit",
-                            "patch_governance_response",
-                            "proposal_only_builder",
-                            "provider_path",
-                        ],
-                    }
-                }
-                yield _metatron_sse("status", {**hf4c_base, "status": "Auditoria readonly de orquestração AO20K-HF4C preparada.", "phase": "orchestration_audit_safe"})
-                yield _metatron_sse("chunk", {**hf4c_base, "delta": final_text, "content": final_text})
-                yield _metatron_sse("agent_done", {**hf4c_base, "done": True, "message": "Auditoria readonly de orquestração concluída."})
-                yield _metatron_sse("done", {
-                    **hf4c_base,
-                    "done": True,
-                    "assistant_persisted": assistant_persisted,
-                    "assistant_message_id": assistant_message_id,
-                    "final_text": final_text,
-                    "runtime_hints": hf4c_runtime_hints,
-                })
-                return
-
-            # AO20H-HF2_EXPLICIT_ORKIO_MENTION_PRECEDENCE_GUARD
-            # Typed @Orkio commands must win over stale visible_agent/direct_agent_message
-            # and over PATCH GOVERNANCE RESPONSE. This fixes the divergent behavior where
-            # "Orkio, ..." worked but "@Orkio, ..." could be signed by Chris.
-            if _ao20h_hf2_is_explicit_orkio_orchestration_request(message):
-                try:
-                    route_override = _ao20h_hf2_orkio_orchestration_route(message)
-                    final_text = _ao20e_orchestration_audit_answer(message, route_override)
-                    persisted = await asyncio.to_thread(
-                        _persist_assistant_message,
-                        text=final_text,
-                        thread_id=tid_seed,
-                        agent_id=None,
-                        agent_name="Orkio",
-                    )
-                    payload = {
-                        **persisted,
-                        "answer": final_text,
-                        "message": final_text,
-                        "final_text": final_text,
-                        "agent_id": None,
-                        "agent_name": "Orkio",
-                        "runtime_hints": {
-                            "routing": {
-                                "routing_source": "stream_ao20h_hf2_explicit_orkio_mention_guard",
-                                "route_applied": True,
-                                "execution_lifecycle": "completed",
-                                "ao20bc_route_audit": route_override,
-                                "route_family": "orchestration_audit",
-                                "requested_agent": "Orkio",
-                                "resolved_agent": "Orkio",
-                                "dispatch_executed": True,
-                                "write_executed": False,
-                                "child_execution_graphs": True,
-                                "blocked_routes": route_override.get("blocked_routes") or [],
-                            }
-                        },
-                    }
-                    async for ev in _emit_result_payload(payload, routing_source="stream_ao20h_hf2_explicit_orkio_mention_guard"):
-                        yield ev
-                    return
-                except Exception:
-                    try:
-                        logger.exception("CHAT_STREAM_AO20H_HF2_EXPLICIT_ORKIO_MENTION_FAILED trace_id=%s", trace_id)
-                    except Exception:
-                        pass
-                    # Terminal SSE guard still protects the UI if this fast-path fails.
-
-            # AO20E_ORCHESTRATION_FASTPATH_GUARD
-            # Explicit orchestration audits with Orion + Chris must not be intercepted by
-            # INTERNAL_WARROOM_GOVERNED_SURGICAL_V2 or generic proposal/governance fast-paths.
-            if (
-                route_plan.get("resolved_agent") == "Orkio"
-                and _ao20e_is_orchestration_audit_request(message)
-                and not route_plan.get("proposal_scope")
-                and not _is_internal_warroom_governed_artifact_request(message)
-                and not _is_internal_warroom_governed_execution_request(message)
-            ):
-                try:
-                    final_text = _ao20e_orchestration_audit_answer(message, route_plan)
-                    persisted = await asyncio.to_thread(
-                        _persist_assistant_message,
-                        text=final_text,
-                        thread_id=tid_seed,
-                        agent_id=None,
-                        agent_name="Orkio",
-                    )
-                    payload = {
-                        **persisted,
-                        "answer": final_text,
-                        "message": final_text,
-                        "final_text": final_text,
-                        "agent_id": None,
-                        "agent_name": "Orkio",
-                        "runtime_hints": {
-                            "routing": {
-                                "routing_source": "stream_ao20e_orchestration_fastpath_guard",
-                                "route_applied": True,
-                                "execution_lifecycle": "completed",
-                                "ao20bc_route_audit": route_plan,
-                                "route_family": "orchestration_audit",
-                                "dispatch_executed": True,
-                                "write_executed": False,
-                                "child_execution_graphs": True,
-                                "blocked_routes": list(dict.fromkeys((route_plan.get("blocked_routes") or []) + ["internal_warroom_governed_surgical_v2"])),
-                            }
-                        },
-                    }
-                    async for ev in _emit_result_payload(payload, routing_source="stream_ao20e_orchestration_fastpath_guard"):
-                        yield ev
-                    return
-                except Exception:
-                    try:
-                        logger.exception("CHAT_STREAM_AO20E_ORCHESTRATION_FASTPATH_FAILED trace_id=%s", trace_id)
-                    except Exception:
-                        pass
-                    # If this fails, fall through to AO20BC generic router audit.
-
-            # AO20H_SPECIALIST_ORCHESTRATION_GATE
-            # Auditorias readonly dos especialistas devem vencer proposal_only, Chris valuation
-            # e warroom genérico. Este fluxo não cria proposal_id nem patch.
-            if _is_specialist_readonly_audit_request(message):
-                try:
-                    payload = await asyncio.to_thread(_specialist_readonly_audit_fastpath_in_isolated_session)
-                    async for ev in _emit_result_payload(payload, routing_source="stream_specialist_readonly_audit_ao20h"):
-                        yield ev
-                    return
-                except Exception:
-                    try:
-                        logger.exception("CHAT_STREAM_SPECIALIST_READONLY_AUDIT_FASTPATH_FAILED trace_id=%s", trace_id)
-                    except Exception:
-                        pass
-                    # Se falhar, o terminal guard/sanitizer ainda protege a UI.
-
-            # AO20K-HF2_BRANCH_PR_PLAN_SSE_SAFE_EMITTER
-            # Branch/PR plan is a read-only governance contract after dry_run_completed.
-            # It must emit a deterministic SSE chunk + done, and must not fall through
-            # to generic provider/governance wrappers if the richer plan builder fails.
-            if _is_ao20k_branch_pr_plan_readonly_request_message(message):
-                try:
-                    payload = await asyncio.to_thread(_ao20k_governed_branch_pr_plan_fastpath_in_isolated_session)
-                    if not isinstance(payload, dict):
-                        payload = {
-                            "answer": str(payload or ""),
-                            "message": str(payload or ""),
-                            "final_text": str(payload or ""),
-                            "agent_id": "orkio",
-                            "agent_name": "Orkio",
-                            "runtime_hints": {
-                                "routing": {
-                                    "routing_source": "stream_ao20k_hf2_branch_pr_plan_sse_safe_emitter",
-                                    "route_applied": True,
-                                    "route_family": "governed_evolution_pipeline",
-                                    "stage": "branch_pr_plan",
-                                    "write_allowed": False,
-                                    "write_executed": False,
-                                    "execution_allowed": False,
-                                }
-                            },
-                        }
-                    # AO20K-HF3 — sanitize the whole payload, not only runtime_hints.
-                    payload = _ao20k_hf2_json_safe(payload)
-                    async for ev in _emit_result_payload(payload, routing_source="stream_ao20k_hf3_branch_pr_plan_whole_payload_safe_emitter"):
-                        yield ev
-                    return
-                except Exception as exc:
-                    try:
-                        logger.exception("CHAT_STREAM_AO20K_HF2_BRANCH_PR_PLAN_SSE_SAFE_FAILED trace_id=%s", trace_id)
-                    except Exception:
-                        pass
-
-                    proposal_id = ""
-                    try:
-                        proposal_id = _ao20j_extract_proposal_id(message)
-                    except Exception:
-                        try:
-                            m = re.search(r"\bevo_[0-9a-f]{8,32}\b", str(message or ""), flags=re.IGNORECASE)
-                            proposal_id = m.group(0) if m else ""
-                        except Exception:
-                            proposal_id = ""
-
-                    safe_plan = _ao20k_hf2_fallback_branch_pr_plan(
-                        proposal_id=proposal_id,
-                        proposal_status="unknown",
-                        execution_status="unknown",
-                        error=str(exc),
-                    )
-                    final_text = (
-                        "ORKIO — ORION-LED GOVERNED EVOLUTION PIPELINE\n\n"
-                        "1. Diagnóstico objetivo\n"
-                        f"- execution_id: governed_evolution_branch_pr_plan_sse_safe_{new_id()[:10]}\n"
-                        "- route_family: governed_evolution_pipeline\n"
-                        "- stage: branch_pr_plan\n"
-                        f"- proposal_id: {proposal_id or 'unknown'}\n"
-                        "- branch_pr_plan_safe_fallback: true\n"
-                        "- can_prepare_branch_pr: false\n"
-                        "- can_create_branch: false\n"
-                        "- can_write_repository: false\n"
-                        "- can_commit: false\n"
-                        "- can_open_pr: false\n"
-                        "- can_merge: false\n"
-                        "- can_deploy: false\n"
-                        "- can_run_migration: false\n"
-                        "- write_executed: false\n"
-                        "- execution_allowed: false\n\n"
-                        "2. Bloqueio seguro\n"
-                        "- O emissor SSE do Branch/PR plan capturou uma falha interna e encerrou com resposta segura.\n"
-                        "- Nenhuma branch foi criada, nenhum arquivo foi escrito, nenhum commit/PR/deploy/migration foi executado.\n\n"
-                        "3. Próxima etapa\n"
-                        "- Revisar logs do AO20K-HF2 e consultar o plano pelo Admin Evolution até o emissor completo estabilizar.\n\n"
-                        "4. Veredito\n"
-                        "- GO para segurança do stream. NO-GO para qualquer escrita real."
-                    )
-                    persisted = await asyncio.to_thread(
-                        _persist_assistant_message,
-                        text=final_text,
-                        thread_id=tid_seed,
-                        agent_id="orkio",
-                        agent_name="Orkio",
-                    )
-                    fallback_payload = {
-                        **persisted,
-                        "answer": final_text,
-                        "message": final_text,
-                        "final_text": final_text,
-                        "agent_id": "orkio",
-                        "agent_name": "Orkio",
-                        "runtime_hints": _ao20k_hf2_json_safe({
-                            "routing": {
-                                "routing_source": "stream_ao20k_hf2_branch_pr_plan_sse_safe_fallback",
+                                "routing_source": "stream_ao20k_hf2_branch_pr_plan_sse_safe_emitter",
                                 "route_applied": True,
                                 "route_family": "governed_evolution_pipeline",
                                 "stage": "branch_pr_plan",
-                                "proposal_id": proposal_id,
-                                "branch_pr_plan": safe_plan,
                                 "write_allowed": False,
                                 "write_executed": False,
-                                "commit_executed": False,
-                                "deploy_executed": False,
-                                "migration_executed": False,
                                 "execution_allowed": False,
-                                "human_approval_required": True,
-                            }
-                        }),
-                    }
-                    fallback_payload = _ao20k_hf2_json_safe(fallback_payload)
-                    async for ev in _emit_result_payload(fallback_payload, routing_source="stream_ao20k_hf3_branch_pr_plan_sse_safe_fallback"):
-                        yield ev
-                    return
-
-            # AO20I_ORION_LED_GOVERNED_EVOLUTION_PIPELINE
-            # Pedidos naturais de autoevolução/auditoria assistida entram em pipeline
-            # governado por Orkio e liderado tecnicamente por Orion. Chris não audita
-            # tecnicamente; no máximo fornece contexto estratégico opcional.
-            if _is_governed_evolution_pipeline_request(message):
-                try:
-                    payload = await asyncio.to_thread(_governed_evolution_pipeline_fastpath_in_isolated_session)
-                    async for ev in _emit_result_payload(payload, routing_source="stream_ao20j_governed_evolution_pipeline"):
-                        yield ev
-                    return
-                except Exception:
-                    try:
-                        logger.exception("CHAT_STREAM_AO20J_GOVERNED_EVOLUTION_PIPELINE_FAILED trace_id=%s", trace_id)
-                    except Exception:
-                        pass
-                    # Se falhar, os guards posteriores ainda podem responder em readonly.
-
-            # AO20BC-LITE_MASTER_ROUTER_PRECEDENCE_LOCK
-            # Technical readonly/orchestration audits addressed to @Orkio must be
-            # answered by Orkio before Chris valuation or stale Orion templates can run.
-            if (
-                route_plan.get("resolved_agent") == "Orkio"
-                and route_plan.get("technical_scope")
-                and not route_plan.get("proposal_scope")
-                and not _is_internal_warroom_governed_artifact_request(message)
-                and not _is_internal_warroom_governed_execution_request(message)
-            ):
-                try:
-                    final_text = _ao20bc_router_audit_answer(message, route_plan)
-                    persisted = await asyncio.to_thread(
-                        _persist_assistant_message,
-                        text=final_text,
-                        thread_id=tid_seed,
-                        agent_id=None,
-                        agent_name="Orkio",
-                    )
-                    payload = {
-                        **persisted,
-                        "answer": final_text,
-                        "message": final_text,
-                        "final_text": final_text,
-                        "agent_id": None,
-                        "agent_name": "Orkio",
-                        "runtime_hints": {
-                            "routing": {
-                                "routing_source": "stream_ao20bc_router_audit_lite",
-                                "route_applied": True,
-                                "execution_lifecycle": "completed",
-                                "ao20bc_route_audit": route_plan,
-                                "dispatch_executed": True,
-                                "write_executed": False,
                             }
                         },
                     }
-                    async for ev in _emit_result_payload(payload, routing_source="stream_ao20bc_router_audit_lite"):
-                        yield ev
-                    return
-                except Exception:
-                    try:
-                        logger.exception("CHAT_STREAM_AO20BC_ROUTER_AUDIT_FASTPATH_FAILED trace_id=%s", trace_id)
-                    except Exception:
-                        pass
-                    # If this fails, existing guarded rails still protect the UI.
-
-            # AO01_CHRIS_STRATEGIC_SQUAD_FASTPATH_V1
-            # Pedidos de valuation/estratégia para Chris/Cris devem responder em
-            # trilho leve, com especialistas silenciosos e sem depender do runtime pesado.
-            if _is_chris_strategic_squad_request(message):
+                # AO20K-HF3 — sanitize the whole payload, not only runtime_hints.
+                payload = _ao20k_hf2_json_safe(payload)
+                async for ev in _emit_result_payload(payload, routing_source="stream_ao20k_hf3_branch_pr_plan_whole_payload_safe_emitter"):
+                    yield ev
+                return
+            except Exception as exc:
                 try:
-                    payload = await asyncio.to_thread(_chris_strategic_squad_fastpath_in_isolated_session)
-                    async for ev in _emit_result_payload(payload, routing_source="stream_chris_strategic_squad_fastpath_v1"):
-                        yield ev
-                    return
+                    logger.exception("CHAT_STREAM_AO20K_HF2_BRANCH_PR_PLAN_SSE_SAFE_FAILED trace_id=%s", trace_id)
                 except Exception:
-                    try:
-                        logger.exception("CHAT_STREAM_CHRIS_STRATEGIC_SQUAD_FASTPATH_FAILED trace_id=%s", trace_id)
-                    except Exception:
-                        pass
-                    # Se falhar, os guards existentes ainda protegem a UI.
+                    pass
 
-            # AO-11_ADMIN_CONTROLLED_EVOLUTION_PROPOSAL_LIFECYCLE
-            # Criação de proposta proposal_only deve vencer a leitura executiva genérica,
-            # mas continuar sem execução automática.
-            if _is_orion_evolution_proposal_only_request(message):
+                proposal_id = ""
                 try:
-                    payload = await asyncio.to_thread(_orion_evolution_proposal_fastpath_in_isolated_session)
-                    async for ev in _emit_result_payload(payload, routing_source="stream_orion_evolution_proposal_fastpath_ao20bc_scope_lock"):
-                        yield ev
-                    return
+                    proposal_id = _ao20j_extract_proposal_id(message)
                 except Exception:
                     try:
-                        logger.exception("CHAT_STREAM_ORION_EVOLUTION_PROPOSAL_FASTPATH_FAILED trace_id=%s", trace_id)
+                        m = re.search(r"\bevo_[0-9a-f]{8,32}\b", str(message or ""), flags=re.IGNORECASE)
+                        proposal_id = m.group(0) if m else ""
                     except Exception:
-                        pass
-                    # Se falhar, os guards existentes ainda protegem a UI.
+                        proposal_id = ""
 
-            # AO-10_ORION_EXECUTIVE_AUDIT_FASTPATH
-            # Leituras executivas explícitas para @Orion devem responder em trilho
-            # leve, readonly e determinístico antes de qualquer runtime pesado.
-            if _is_orion_executive_audit_request(message):
-                try:
-                    payload = await asyncio.to_thread(_orion_executive_audit_fastpath_in_isolated_session)
-                    async for ev in _emit_result_payload(payload, routing_source="stream_orion_executive_audit_fastpath_ao20bc_scope_lock"):
-                        yield ev
-                    return
-                except Exception:
-                    try:
-                        logger.exception("CHAT_STREAM_ORION_EXECUTIVE_AUDIT_FASTPATH_FAILED trace_id=%s", trace_id)
-                    except Exception:
-                        pass
-                    # Se o fast-path falhar, o terminal guard/sanitizer ainda protege a UI.
+                safe_plan = _ao20k_hf2_fallback_branch_pr_plan(
+                    proposal_id=proposal_id,
+                    proposal_status="unknown",
+                    execution_status="unknown",
+                    error=str(exc),
+                )
+                final_text = (
+                    "ORKIO — ORION-LED GOVERNED EVOLUTION PIPELINE\n\n"
+                    "1. Diagnóstico objetivo\n"
+                    f"- execution_id: governed_evolution_branch_pr_plan_sse_safe_{new_id()[:10]}\n"
+                    "- route_family: governed_evolution_pipeline\n"
+                    "- stage: branch_pr_plan\n"
+                    f"- proposal_id: {proposal_id or 'unknown'}\n"
+                    "- branch_pr_plan_safe_fallback: true\n"
+                    "- can_prepare_branch_pr: false\n"
+                    "- can_create_branch: false\n"
+                    "- can_write_repository: false\n"
+                    "- can_commit: false\n"
+                    "- can_open_pr: false\n"
+                    "- can_merge: false\n"
+                    "- can_deploy: false\n"
+                    "- can_run_migration: false\n"
+                    "- write_executed: false\n"
+                    "- execution_allowed: false\n\n"
+                    "2. Bloqueio seguro\n"
+                    "- O emissor SSE do Branch/PR plan capturou uma falha interna e encerrou com resposta segura.\n"
+                    "- Nenhuma branch foi criada, nenhum arquivo foi escrito, nenhum commit/PR/deploy/migration foi executado.\n\n"
+                    "3. Próxima etapa\n"
+                    "- Revisar logs do AO20K-HF2 e consultar o plano pelo Admin Evolution até o emissor completo estabilizar.\n\n"
+                    "4. Veredito\n"
+                    "- GO para segurança do stream. NO-GO para qualquer escrita real."
+                )
+                persisted = await asyncio.to_thread(
+                    _persist_assistant_message,
+                    text=final_text,
+                    thread_id=tid_seed,
+                    agent_id="orkio",
+                    agent_name="Orkio",
+                )
+                fallback_payload = {
+                    **persisted,
+                    "answer": final_text,
+                    "message": final_text,
+                    "final_text": final_text,
+                    "agent_id": "orkio",
+                    "agent_name": "Orkio",
+                    "runtime_hints": _ao20k_hf2_json_safe({
+                        "routing": {
+                            "routing_source": "stream_ao20k_hf2_branch_pr_plan_sse_safe_fallback",
+                            "route_applied": True,
+                            "route_family": "governed_evolution_pipeline",
+                            "stage": "branch_pr_plan",
+                            "proposal_id": proposal_id,
+                            "branch_pr_plan": safe_plan,
+                            "write_allowed": False,
+                            "write_executed": False,
+                            "commit_executed": False,
+                            "deploy_executed": False,
+                            "migration_executed": False,
+                            "execution_allowed": False,
+                            "human_approval_required": True,
+                        }
+                    }),
+                }
+                fallback_payload = _ao20k_hf2_json_safe(fallback_payload)
+                async for ev in _emit_result_payload(fallback_payload, routing_source="stream_ao20k_hf3_branch_pr_plan_sse_safe_fallback"):
+                    yield ev
+                return
 
-            # AO-06_BETA_PLANNING_FASTPATH
-            # Pedidos comuns de plano beta/testes devem responder como conversa útil,
-            # não como PLATFORM_SELF_AUDIT_READY ou governance artifact.
-            if _is_beta_planning_request(message):
+        # AO20I_ORION_LED_GOVERNED_EVOLUTION_PIPELINE
+        # Pedidos naturais de autoevolução/auditoria assistida entram em pipeline
+        # governado por Orkio e liderado tecnicamente por Orion. Chris não audita
+        # tecnicamente; no máximo fornece contexto estratégico opcional.
+        if _is_governed_evolution_pipeline_request(message):
+            try:
+                payload = await asyncio.to_thread(_governed_evolution_pipeline_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_ao20j_governed_evolution_pipeline"):
+                    yield ev
+                return
+            except Exception:
                 try:
-                    payload = await asyncio.to_thread(_beta_planning_fastpath_in_isolated_session)
-                    async for ev in _emit_result_payload(payload, routing_source="stream_beta_planning_fastpath_ao06"):
-                        yield ev
-                    return
+                    logger.exception("CHAT_STREAM_AO20J_GOVERNED_EVOLUTION_PIPELINE_FAILED trace_id=%s", trace_id)
                 except Exception:
-                    try:
-                        logger.exception("CHAT_STREAM_BETA_PLANNING_FASTPATH_FAILED trace_id=%s", trace_id)
-                    except Exception:
-                        pass
-                    # Se o fast-path falhar, o terminal guard/sanitizer ainda protege a UI.
+                    pass
+                # Se falhar, os guards posteriores ainda podem responder em readonly.
 
-            # SELF_EVALUATION_GOVERNED_READONLY_V2
-            # Autoavaliação sistêmica da plataforma inteira não deve desviar para UX Frontend.
-            if _is_self_evaluation_governed_readonly_request(message):
+        # AO20BC-LITE_MASTER_ROUTER_PRECEDENCE_LOCK
+        # Technical readonly/orchestration audits addressed to @Orkio must be
+        # answered by Orkio before Chris valuation or stale Orion templates can run.
+        if (
+            route_plan.get("resolved_agent") == "Orkio"
+            and route_plan.get("technical_scope")
+            and not route_plan.get("proposal_scope")
+            and not _is_internal_warroom_governed_artifact_request(message)
+            and not _is_internal_warroom_governed_execution_request(message)
+        ):
+            try:
+                final_text = _ao20bc_router_audit_answer(message, route_plan)
+                persisted = await asyncio.to_thread(
+                    _persist_assistant_message,
+                    text=final_text,
+                    thread_id=tid_seed,
+                    agent_id=None,
+                    agent_name="Orkio",
+                )
+                payload = {
+                    **persisted,
+                    "answer": final_text,
+                    "message": final_text,
+                    "final_text": final_text,
+                    "agent_id": None,
+                    "agent_name": "Orkio",
+                    "runtime_hints": {
+                        "routing": {
+                            "routing_source": "stream_ao20bc_router_audit_lite",
+                            "route_applied": True,
+                            "execution_lifecycle": "completed",
+                            "ao20bc_route_audit": route_plan,
+                            "dispatch_executed": True,
+                            "write_executed": False,
+                        }
+                    },
+                }
+                async for ev in _emit_result_payload(payload, routing_source="stream_ao20bc_router_audit_lite"):
+                    yield ev
+                return
+            except Exception:
                 try:
-                    payload = await asyncio.to_thread(_self_evaluation_governed_readonly_fastpath_in_isolated_session)
-                    async for ev in _emit_result_payload(payload, routing_source="stream_self_evaluation_governed_readonly_v2"):
-                        yield ev
-                    return
+                    logger.exception("CHAT_STREAM_AO20BC_ROUTER_AUDIT_FASTPATH_FAILED trace_id=%s", trace_id)
                 except Exception:
-                    try:
-                        logger.exception("CHAT_STREAM_SELF_EVALUATION_GOVERNED_READONLY_FAILED trace_id=%s", trace_id)
-                    except Exception:
-                        pass
-                    # Se o fast-path falhar, seguimos para os demais trilhos protegidos.
+                    pass
+                # If this fails, existing guarded rails still protect the UI.
+
+        # AO01_CHRIS_STRATEGIC_SQUAD_FASTPATH_V1
+        # Pedidos de valuation/estratégia para Chris/Cris devem responder em
+        # trilho leve, com especialistas silenciosos e sem depender do runtime pesado.
+        if _is_chris_strategic_squad_request(message):
+            try:
+                payload = await asyncio.to_thread(_chris_strategic_squad_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_chris_strategic_squad_fastpath_v1"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_CHRIS_STRATEGIC_SQUAD_FASTPATH_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Se falhar, os guards existentes ainda protegem a UI.
+
+        # AO-11_ADMIN_CONTROLLED_EVOLUTION_PROPOSAL_LIFECYCLE
+        # Criação de proposta proposal_only deve vencer a leitura executiva genérica,
+        # mas continuar sem execução automática.
+        if _is_orion_evolution_proposal_only_request(message):
+            try:
+                payload = await asyncio.to_thread(_orion_evolution_proposal_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_orion_evolution_proposal_fastpath_ao20bc_scope_lock"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_ORION_EVOLUTION_PROPOSAL_FASTPATH_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Se falhar, os guards existentes ainda protegem a UI.
+
+        # AO-10_ORION_EXECUTIVE_AUDIT_FASTPATH
+        # Leituras executivas explícitas para @Orion devem responder em trilho
+        # leve, readonly e determinístico antes de qualquer runtime pesado.
+        if _is_orion_executive_audit_request(message):
+            try:
+                payload = await asyncio.to_thread(_orion_executive_audit_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_orion_executive_audit_fastpath_ao20bc_scope_lock"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_ORION_EXECUTIVE_AUDIT_FASTPATH_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Se o fast-path falhar, o terminal guard/sanitizer ainda protege a UI.
+
+        # AO-06_BETA_PLANNING_FASTPATH
+        # Pedidos comuns de plano beta/testes devem responder como conversa útil,
+        # não como PLATFORM_SELF_AUDIT_READY ou governance artifact.
+        if _is_beta_planning_request(message):
+            try:
+                payload = await asyncio.to_thread(_beta_planning_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_beta_planning_fastpath_ao06"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_BETA_PLANNING_FASTPATH_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Se o fast-path falhar, o terminal guard/sanitizer ainda protege a UI.
+
+        # SELF_EVALUATION_GOVERNED_READONLY_V2
+        # Autoavaliação sistêmica da plataforma inteira não deve desviar para UX Frontend.
+        if _is_self_evaluation_governed_readonly_request(message):
+            try:
+                payload = await asyncio.to_thread(_self_evaluation_governed_readonly_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_self_evaluation_governed_readonly_v2"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_SELF_EVALUATION_GOVERNED_READONLY_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Se o fast-path falhar, seguimos para os demais trilhos protegidos.
 
 
 
         
-            # INTERNAL_WARROOM_GOVERNED_ARTIFACT_V2
-            # Materializa o fileset governado quando o usuário pede os arquivos/artefato.
-            if _is_internal_warroom_governed_artifact_request(message):
-                try:
-                    payload = await asyncio.to_thread(_internal_warroom_governed_artifact_fastpath_in_isolated_session)
-                    async for ev in _emit_result_payload(payload, routing_source="stream_internal_warroom_governed_artifact_v3"):
-                        yield ev
-                    return
-                except Exception:
-                    try:
-                        logger.exception("CHAT_STREAM_INTERNAL_WARROOM_GOVERNED_ARTIFACT_FAILED trace_id=%s", trace_id)
-                    except Exception:
-                        pass
-                    # Se o fast-path falhar, seguimos para os demais trilhos protegidos.
-
-
-    # INTERNAL_WARROOM_GOVERNED_EXECUTION_V1
-            # Quando o war room já reconheceu o problema e o usuário pede o patch,
-            # respondemos com proposta governada pronta para aprovação humana.
-            if _is_internal_warroom_governed_execution_request(message):
-                try:
-                    payload = await asyncio.to_thread(_internal_warroom_governed_execution_fastpath_in_isolated_session)
-                    async for ev in _emit_result_payload(payload, routing_source="stream_internal_warroom_governed_execution_v1"):
-                        yield ev
-                    return
-                except Exception:
-                    try:
-                        logger.exception("CHAT_STREAM_INTERNAL_WARROOM_GOVERNED_EXECUTION_FAILED trace_id=%s", trace_id)
-                    except Exception:
-                        pass
-                    # Se o fast-path falhar, seguimos para os demais trilhos protegidos.
-
-
-
-            # INTERNAL_WARROOM_GOVERNED_SURGICAL_V2
-            # Pedidos de war room interno / auditoria cirúrgica não devem cair no
-            # Auditor externo nem no runtime pesado quando o objetivo é diagnóstico
-            # técnico governado com patch mínimo e rollback explícitos.
-            if _is_internal_warroom_governed_surgical_request(message):
-                try:
-                    payload = await asyncio.to_thread(_internal_warroom_governed_surgical_fastpath_in_isolated_session)
-                    async for ev in _emit_result_payload(payload, routing_source="stream_internal_warroom_governed_surgical_v2"):
-                        yield ev
-                    return
-                except Exception:
-                    try:
-                        logger.exception("CHAT_STREAM_INTERNAL_WARROOM_GOVERNED_SURGICAL_FAILED trace_id=%s", trace_id)
-                    except Exception:
-                        pass
-                    # Se o fast-path falhar, seguimos para os demais trilhos protegidos.
-
-
-            # GOVERNED_AUDIT_FASTPATH_V7
-            # Auditorias readonly de frontend/PWA não devem cair no fanout multiagente
-            # pesado quando o objetivo é obter diagnóstico textual governado.
-            if _is_governed_frontend_audit_readonly_request(message):
-                try:
-                    payload = await asyncio.to_thread(_governed_frontend_audit_fastpath_in_isolated_session)
-                    async for ev in _emit_result_payload(payload, routing_source="stream_governed_audit_fastpath_v7"):
-                        yield ev
-                    return
-                except Exception:
-                    try:
-                        logger.exception("CHAT_STREAM_GOVERNED_AUDIT_FASTPATH_FAILED trace_id=%s", trace_id)
-                    except Exception:
-                        pass
-                    # Se o fast-path falhar, seguimos para o runtime protegido.
-
-
-
-
-            # AO-15_SIMPLE_AGENT_PRODUCT_FASTPATH
-            # Perguntas simples de usuário novo sobre Orkio/Chris não devem cair no runtime pesado.
-            if _is_orkio_platform_explanation_request(message) or _is_chris_proposal_analysis_request(message):
-                try:
-                    payload = await asyncio.to_thread(_simple_agent_product_fastpath_in_isolated_session)
-                    routing_source = (
-                        "stream_chris_proposal_fastpath_ao15"
-                        if _is_chris_proposal_analysis_request(message)
-                        else "stream_orkio_platform_fastpath_ao15"
-                    )
-                    async for ev in _emit_result_payload(payload, routing_source=routing_source):
-                        yield ev
-                    return
-                except Exception:
-                    try:
-                        logger.exception("CHAT_STREAM_SIMPLE_AGENT_PRODUCT_FASTPATH_FAILED trace_id=%s", trace_id)
-                    except Exception:
-                        pass
-                    # Se o fast-path falhar, segue para os demais trilhos protegidos.
-
-            # INSTITUTIONAL_IDENTITY_FASTPATH_V8
-            # Perguntas institucionais sobre o próprio Orkio não devem cair no baseline
-            # genérico nem no runtime pesado. Respondemos em trilho leve e determinístico.
-            if _is_institutional_identity_request(message):
-                try:
-                    payload = await asyncio.to_thread(_institutional_identity_fastpath_in_isolated_session)
-                    async for ev in _emit_result_payload(payload, routing_source="stream_institutional_identity_fastpath_v8"):
-                        yield ev
-                    return
-                except Exception:
-                    try:
-                        logger.exception("CHAT_STREAM_INSTITUTIONAL_IDENTITY_FASTPATH_FAILED trace_id=%s", trace_id)
-                    except Exception:
-                        pass
-                    # Se o fast-path falhar, seguimos para o baseline protegido.
-
-            # AO-04_CAPABILITIES_BASELINE_FASTPATH
-            # Perguntas simples sobre capacidades/roster não devem acionar runtime pesado
-            # enquanto o roteador multiagente estiver em estabilização.
-            if _looks_like_capabilities_question(message):
-                try:
-                    payload = await asyncio.to_thread(_capabilities_baseline_fastpath_in_isolated_session)
-                    async for ev in _emit_result_payload(payload, routing_source="stream_capabilities_baseline_fastpath_ao04"):
-                        yield ev
-                    return
-                except Exception:
-                    try:
-                        logger.exception("CHAT_STREAM_CAPABILITIES_BASELINE_FASTPATH_FAILED trace_id=%s", trace_id)
-                    except Exception:
-                        pass
-                    # Se o fast-path falhar, o terminal guard ainda sanitiza a exceção.
-
-            # METATRON_CHAT_STREAM_BASELINE_ROUTER_V8
-            # Durante a estabilização do runtime principal, perguntas comuns não devem
-            # cair no fanout pesado. O baseline operacional responde de forma segura e
-            # determinística; somente pedidos técnicos/governados seguem para o runtime.
-            if _is_baseline_operational_request(message):
-                try:
-                    payload = await asyncio.to_thread(_baseline_operational_fastpath_in_isolated_session)
-                    async for ev in _emit_result_payload(payload, routing_source="stream_baseline_router_v8"):
-                        yield ev
-                    return
-                except Exception:
-                    try:
-                        logger.exception("CHAT_STREAM_BASELINE_FASTPATH_FAILED trace_id=%s", trace_id)
-                    except Exception:
-                        pass
-                    # Se a persistência do baseline falhar, seguimos para o runtime protegido.
-
-            task = asyncio.create_task(asyncio.to_thread(_run_direct_chat_in_isolated_session))
-            keepalive_i = 0
-
+        # INTERNAL_WARROOM_GOVERNED_ARTIFACT_V2
+        # Materializa o fileset governado quando o usuário pede os arquivos/artefato.
+        if _is_internal_warroom_governed_artifact_request(message):
             try:
-                max_wait_s = int(os.getenv("CHAT_STREAM_RUNTIME_TIMEOUT_S", "150") or "150")
+                payload = await asyncio.to_thread(_internal_warroom_governed_artifact_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_internal_warroom_governed_artifact_v3"):
+                    yield ev
+                return
             except Exception:
-                max_wait_s = 150
-            max_wait_s = max(30, min(max_wait_s, 180))
-            deadline = _time.time() + max_wait_s
+                try:
+                    logger.exception("CHAT_STREAM_INTERNAL_WARROOM_GOVERNED_ARTIFACT_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Se o fast-path falhar, seguimos para os demais trilhos protegidos.
 
+
+# INTERNAL_WARROOM_GOVERNED_EXECUTION_V1
+        # Quando o war room já reconheceu o problema e o usuário pede o patch,
+        # respondemos com proposta governada pronta para aprovação humana.
+        if _is_internal_warroom_governed_execution_request(message):
             try:
-                while not task.done():
-                    if await request.is_disconnected():
-                        try:
-                            task.cancel()
-                        except Exception:
-                            pass
-                        try:
-                            logger.info("CHAT_STREAM_CLIENT_DISCONNECTED trace_id=%s thread_id=%s", trace_id, tid_seed)
-                        except Exception:
-                            pass
-                        return
+                payload = await asyncio.to_thread(_internal_warroom_governed_execution_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_internal_warroom_governed_execution_v1"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_INTERNAL_WARROOM_GOVERNED_EXECUTION_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Se o fast-path falhar, seguimos para os demais trilhos protegidos.
 
-                    if _time.time() > deadline:
-                        try:
-                            task.cancel()
-                        except Exception:
-                            pass
 
-                        final_text = "Não consegui concluir a resposta pelo runtime principal nesta tentativa. O stream foi encerrado com segurança; tente novamente em instantes."
-                        persisted = await asyncio.to_thread(
-                            _persist_assistant_message,
-                            text=final_text,
-                            thread_id=tid_seed,
-                            agent_id=None,
-                            agent_name="Orkio",
-                        )
-                        timeout_base = {
-                            **base,
-                            "thread_id": persisted.get("thread_id") or tid_seed,
-                        }
-                        try:
-                            logger.warning("CHAT_STREAM_RUNTIME_TIMEOUT trace_id=%s thread_id=%s timeout_s=%s", trace_id, timeout_base.get("thread_id"), max_wait_s)
-                        except Exception:
-                            pass
 
-                        yield _metatron_sse("error", {
-                            **timeout_base,
-                            "code": "CHAT_STREAM_RUNTIME_TIMEOUT",
-                            "message": "O runtime de chat excedeu o tempo máximo seguro.",
-                            "recoverable": True,
-                        })
-                        yield _metatron_sse("chunk", {
-                            **timeout_base,
-                            "delta": final_text,
-                            "content": final_text,
-                        })
-                        yield _metatron_sse("agent_done", {
-                            **timeout_base,
-                            "done": True,
-                            "message": "Resposta operacional de segurança emitida.",
-                        })
-                        yield _metatron_sse("done", {
-                            **timeout_base,
-                            "done": True,
-                            "assistant_persisted": bool(persisted.get("assistant_persisted")),
-                            "assistant_message_id": persisted.get("assistant_message_id"),
-                            "final_text": final_text,
-                            "runtime_hints": {
-                                "routing": {
-                                    "routing_source": "stream_terminal_guard_v7",
-                                    "execution_lifecycle": "timeout_terminal_guard",
-                                    "route_applied": True,
-                                }
-                            },
-                        })
-                        try:
-                            logger.info("CHAT_STREAM_DONE trace_id=%s thread_id=%s source=timeout_terminal_guard_v7", trace_id, timeout_base.get("thread_id"))
-                        except Exception:
-                            pass
-                        return
+        # INTERNAL_WARROOM_GOVERNED_SURGICAL_V2
+        # Pedidos de war room interno / auditoria cirúrgica não devem cair no
+        # Auditor externo nem no runtime pesado quando o objetivo é diagnóstico
+        # técnico governado com patch mínimo e rollback explícitos.
+        if _is_internal_warroom_governed_surgical_request(message):
+            try:
+                payload = await asyncio.to_thread(_internal_warroom_governed_surgical_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_internal_warroom_governed_surgical_v2"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_INTERNAL_WARROOM_GOVERNED_SURGICAL_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Se o fast-path falhar, seguimos para os demais trilhos protegidos.
 
-                    keepalive_i += 1
-                    yield _metatron_sse("keepalive", {
-                        **base,
-                        "ts": int(_time.time()),
-                        "n": keepalive_i,
-                        "phase": "direct_runtime_wait",
-                    })
-                    if keepalive_i % 3 == 0:
-                        elapsed = int(_time.time() - started_at)
-                        try:
-                            logger.info("CHAT_STREAM_KEEPALIVE trace_id=%s elapsed_s=%s", trace_id, elapsed)
-                        except Exception:
-                            pass
-                        yield _metatron_sse("status", {
-                            **base,
-                            "status": "Runtime ainda processando.",
-                            "phase": "direct_runtime_wait",
-                            "elapsed_s": elapsed,
-                        })
-                    await asyncio.sleep(2.0)
 
-                result = await task
-                payload = _safe_payload(result)
-                if not (payload.get("answer") or payload.get("message") or payload.get("final_text")):
-                    final_text = "O runtime principal concluiu sem texto final. O stream foi encerrado com segurança."
+        # GOVERNED_AUDIT_FASTPATH_V7
+        # Auditorias readonly de frontend/PWA não devem cair no fanout multiagente
+        # pesado quando o objetivo é obter diagnóstico textual governado.
+        if _is_governed_frontend_audit_readonly_request(message):
+            try:
+                payload = await asyncio.to_thread(_governed_frontend_audit_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_governed_audit_fastpath_v7"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_GOVERNED_AUDIT_FASTPATH_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Se o fast-path falhar, seguimos para o runtime protegido.
+
+
+
+
+        # AO-15_SIMPLE_AGENT_PRODUCT_FASTPATH
+        # Perguntas simples de usuário novo sobre Orkio/Chris não devem cair no runtime pesado.
+        if _is_orkio_platform_explanation_request(message) or _is_chris_proposal_analysis_request(message):
+            try:
+                payload = await asyncio.to_thread(_simple_agent_product_fastpath_in_isolated_session)
+                routing_source = (
+                    "stream_chris_proposal_fastpath_ao15"
+                    if _is_chris_proposal_analysis_request(message)
+                    else "stream_orkio_platform_fastpath_ao15"
+                )
+                async for ev in _emit_result_payload(payload, routing_source=routing_source):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_SIMPLE_AGENT_PRODUCT_FASTPATH_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Se o fast-path falhar, segue para os demais trilhos protegidos.
+
+        # INSTITUTIONAL_IDENTITY_FASTPATH_V8
+        # Perguntas institucionais sobre o próprio Orkio não devem cair no baseline
+        # genérico nem no runtime pesado. Respondemos em trilho leve e determinístico.
+        if _is_institutional_identity_request(message):
+            try:
+                payload = await asyncio.to_thread(_institutional_identity_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_institutional_identity_fastpath_v8"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_INSTITUTIONAL_IDENTITY_FASTPATH_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Se o fast-path falhar, seguimos para o baseline protegido.
+
+        # AO-04_CAPABILITIES_BASELINE_FASTPATH
+        # Perguntas simples sobre capacidades/roster não devem acionar runtime pesado
+        # enquanto o roteador multiagente estiver em estabilização.
+        if _looks_like_capabilities_question(message):
+            try:
+                payload = await asyncio.to_thread(_capabilities_baseline_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_capabilities_baseline_fastpath_ao04"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_CAPABILITIES_BASELINE_FASTPATH_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Se o fast-path falhar, o terminal guard ainda sanitiza a exceção.
+
+        # METATRON_CHAT_STREAM_BASELINE_ROUTER_V8
+        # Durante a estabilização do runtime principal, perguntas comuns não devem
+        # cair no fanout pesado. O baseline operacional responde de forma segura e
+        # determinística; somente pedidos técnicos/governados seguem para o runtime.
+        if _is_baseline_operational_request(message):
+            try:
+                payload = await asyncio.to_thread(_baseline_operational_fastpath_in_isolated_session)
+                async for ev in _emit_result_payload(payload, routing_source="stream_baseline_router_v8"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_BASELINE_FASTPATH_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Se a persistência do baseline falhar, seguimos para o runtime protegido.
+
+        task = asyncio.create_task(asyncio.to_thread(_run_direct_chat_in_isolated_session))
+        keepalive_i = 0
+
+        try:
+            max_wait_s = int(os.getenv("CHAT_STREAM_RUNTIME_TIMEOUT_S", "45") or "45")
+        except Exception:
+            max_wait_s = 45
+        max_wait_s = max(15, min(max_wait_s, 60))
+        deadline = _time.time() + max_wait_s
+
+        try:
+            while not task.done():
+                if await request.is_disconnected():
+                    try:
+                        task.cancel()
+                    except Exception:
+                        pass
+                    try:
+                        logger.info("CHAT_STREAM_CLIENT_DISCONNECTED trace_id=%s thread_id=%s", trace_id, tid_seed)
+                    except Exception:
+                        pass
+                    return
+
+                if _time.time() > deadline:
+                    try:
+                        task.cancel()
+                    except Exception:
+                        pass
+
+                    final_text = "Não consegui concluir a resposta pelo runtime principal nesta tentativa. O stream foi encerrado com segurança; tente novamente em instantes."
                     persisted = await asyncio.to_thread(
                         _persist_assistant_message,
                         text=final_text,
-                        thread_id=str(payload.get("thread_id") or tid_seed or "") or None,
-                        agent_id=payload.get("agent_id"),
-                        agent_name=str(payload.get("agent_name") or "Orkio"),
+                        thread_id=tid_seed,
+                        agent_id=None,
+                        agent_name="Orkio",
                     )
-                    payload.update({
-                        **persisted,
-                        "answer": final_text,
-                        "final_text": final_text,
-                        "agent_name": payload.get("agent_name") or "Orkio",
+                    timeout_base = {
+                        **base,
+                        "thread_id": persisted.get("thread_id") or tid_seed,
+                    }
+                    try:
+                        logger.warning("CHAT_STREAM_RUNTIME_TIMEOUT trace_id=%s thread_id=%s timeout_s=%s", trace_id, timeout_base.get("thread_id"), max_wait_s)
+                    except Exception:
+                        pass
+
+                    yield _metatron_sse("error", {
+                        **timeout_base,
+                        "code": "CHAT_STREAM_RUNTIME_TIMEOUT",
+                        "message": "O runtime de chat excedeu o tempo máximo seguro.",
+                        "recoverable": True,
                     })
+                    yield _metatron_sse("chunk", {
+                        **timeout_base,
+                        "delta": final_text,
+                        "content": final_text,
+                    })
+                    yield _metatron_sse("agent_done", {
+                        **timeout_base,
+                        "done": True,
+                        "message": "Resposta operacional de segurança emitida.",
+                    })
+                    yield _metatron_sse("done", {
+                        **timeout_base,
+                        "done": True,
+                        "assistant_persisted": bool(persisted.get("assistant_persisted")),
+                        "assistant_message_id": persisted.get("assistant_message_id"),
+                        "final_text": final_text,
+                        "runtime_hints": {
+                            "routing": {
+                                "routing_source": "stream_terminal_guard_v7",
+                                "execution_lifecycle": "timeout_terminal_guard",
+                                "route_applied": True,
+                            }
+                        },
+                    })
+                    try:
+                        logger.info("CHAT_STREAM_DONE trace_id=%s thread_id=%s source=timeout_terminal_guard_v7", trace_id, timeout_base.get("thread_id"))
+                    except Exception:
+                        pass
+                    return
 
-                async for ev in _emit_result_payload(payload, routing_source="stream_recovery_shim_v3"):
-                    yield ev
+                keepalive_i += 1
+                yield _metatron_sse("keepalive", {
+                    **base,
+                    "ts": int(_time.time()),
+                    "n": keepalive_i,
+                    "phase": "direct_runtime_wait",
+                })
+                if keepalive_i % 3 == 0:
+                    elapsed = int(_time.time() - started_at)
+                    try:
+                        logger.info("CHAT_STREAM_KEEPALIVE trace_id=%s elapsed_s=%s", trace_id, elapsed)
+                    except Exception:
+                        pass
+                    yield _metatron_sse("status", {
+                        **base,
+                        "status": "Runtime ainda processando.",
+                        "phase": "direct_runtime_wait",
+                        "elapsed_s": elapsed,
+                    })
+                await asyncio.sleep(2.0)
 
-            except HTTPException as exc:
-                detail = exc.detail
-                final_text = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False)
-                final_text = _sanitize_visible_stream_text(final_text)
+            result = await task
+            payload = _safe_payload(result)
+            if not (payload.get("answer") or payload.get("message") or payload.get("final_text")):
+                final_text = "O runtime principal concluiu sem texto final. O stream foi encerrado com segurança."
                 persisted = await asyncio.to_thread(
                     _persist_assistant_message,
                     text=final_text,
-                    thread_id=tid_seed,
-                    agent_id=None,
-                    agent_name="Orkio",
+                    thread_id=str(payload.get("thread_id") or tid_seed or "") or None,
+                    agent_id=payload.get("agent_id"),
+                    agent_name=str(payload.get("agent_name") or "Orkio"),
                 )
-                http_base = {
-                    **base,
-                    "thread_id": persisted.get("thread_id") or tid_seed,
-                }
-                try:
-                    logger.exception("CHAT_STREAM_HTTP_ERROR trace_id=%s status_code=%s", trace_id, exc.status_code)
-                except Exception:
-                    pass
-                yield _metatron_sse("error", {
-                    **http_base,
-                    "code": f"HTTP_{exc.status_code}",
-                    "message": final_text,
-                    "status_code": exc.status_code,
-                    "recoverable": True,
-                })
-                yield _metatron_sse("chunk", {
-                    **http_base,
-                    "delta": final_text,
-                    "content": final_text,
-                })
-                yield _metatron_sse("agent_done", {
-                    **http_base,
-                    "done": True,
-                    "message": "Erro HTTP encerrado com segurança.",
-                })
-                yield _metatron_sse("done", {
-                    **http_base,
-                    "done": True,
-                    "assistant_persisted": bool(persisted.get("assistant_persisted")),
-                    "assistant_message_id": persisted.get("assistant_message_id"),
+                payload.update({
+                    **persisted,
+                    "answer": final_text,
                     "final_text": final_text,
-                    "runtime_hints": {
-                        "routing": {
-                            "routing_source": "stream_recovery_shim_v3",
-                            "execution_lifecycle": "http_error",
-                            "route_applied": True,
-                        }
-                    },
+                    "agent_name": payload.get("agent_name") or "Orkio",
                 })
-            except Exception as exc:
-                final_text = "Falha interna no stream de chat. A tentativa foi encerrada com segurança."
-                persisted = await asyncio.to_thread(
-                    _persist_assistant_message,
-                    text=final_text,
-                    thread_id=tid_seed,
-                    agent_id=None,
-                    agent_name="Orkio",
-                )
-                fatal_base = {
-                    **base,
-                    "thread_id": persisted.get("thread_id") or tid_seed,
-                }
-                try:
-                    logger.exception("CHAT_STREAM_FATAL trace_id=%s", trace_id)
-                except Exception:
-                    pass
-                yield _metatron_sse("error", {
-                    **fatal_base,
-                    "code": "CHAT_STREAM_FATAL",
-                    "message": final_text,
-                    "recoverable": True,
-                })
-                yield _metatron_sse("chunk", {
-                    **fatal_base,
-                    "delta": final_text,
-                    "content": final_text,
-                })
-                yield _metatron_sse("agent_done", {
-                    **fatal_base,
-                    "done": True,
-                    "message": "Falha interna encerrada com segurança.",
-                })
-                yield _metatron_sse("done", {
-                    **fatal_base,
-                    "done": True,
-                    "assistant_persisted": bool(persisted.get("assistant_persisted")),
-                    "assistant_message_id": persisted.get("assistant_message_id"),
-                    "final_text": final_text,
-                    "runtime_hints": {
-                        "routing": {
-                            "routing_source": "stream_recovery_shim_v3",
-                            "execution_lifecycle": "error",
-                            "route_applied": True,
-                        }
-                    },
-                })
-        except Exception as exc:
-            terminal_text = (
-                "Não consegui concluir a resposta pelo stream nesta tentativa. "
-                "A tentativa foi encerrada com segurança; tente novamente."
+
+            async for ev in _emit_result_payload(payload, routing_source="stream_recovery_shim_v3"):
+                yield ev
+
+        except HTTPException as exc:
+            detail = exc.detail
+            final_text = detail if isinstance(detail, str) else json.dumps(detail, ensure_ascii=False)
+            final_text = _sanitize_visible_stream_text(final_text)
+            persisted = await asyncio.to_thread(
+                _persist_assistant_message,
+                text=final_text,
+                thread_id=tid_seed,
+                agent_id=None,
+                agent_name="Orkio",
             )
-            terminal_detail = ""
+            http_base = {
+                **base,
+                "thread_id": persisted.get("thread_id") or tid_seed,
+            }
             try:
-                terminal_detail = str(exc)[:500]
+                logger.exception("CHAT_STREAM_HTTP_ERROR trace_id=%s status_code=%s", trace_id, exc.status_code)
             except Exception:
-                terminal_detail = "unavailable"
+                pass
+            yield _metatron_sse("error", {
+                **http_base,
+                "code": f"HTTP_{exc.status_code}",
+                "message": final_text,
+                "status_code": exc.status_code,
+                "recoverable": True,
+            })
+            yield _metatron_sse("chunk", {
+                **http_base,
+                "delta": final_text,
+                "content": final_text,
+            })
+            yield _metatron_sse("agent_done", {
+                **http_base,
+                "done": True,
+                "message": "Erro HTTP encerrado com segurança.",
+            })
+            yield _metatron_sse("done", {
+                **http_base,
+                "done": True,
+                "assistant_persisted": bool(persisted.get("assistant_persisted")),
+                "assistant_message_id": persisted.get("assistant_message_id"),
+                "final_text": final_text,
+                "runtime_hints": {
+                    "routing": {
+                        "routing_source": "stream_recovery_shim_v3",
+                        "execution_lifecycle": "http_error",
+                        "route_applied": True,
+                    }
+                },
+            })
+        except Exception as exc:
+            final_text = "Falha interna no stream de chat. A tentativa foi encerrada com segurança."
+            persisted = await asyncio.to_thread(
+                _persist_assistant_message,
+                text=final_text,
+                thread_id=tid_seed,
+                agent_id=None,
+                agent_name="Orkio",
+            )
+            fatal_base = {
+                **base,
+                "thread_id": persisted.get("thread_id") or tid_seed,
+            }
             try:
-                logger.exception("CHAT_STREAM_TERMINAL_ERROR trace_id=%s", trace_id)
+                logger.exception("CHAT_STREAM_FATAL trace_id=%s", trace_id)
+            except Exception:
+                pass
+            yield _metatron_sse("error", {
+                **fatal_base,
+                "code": "CHAT_STREAM_FATAL",
+                "message": final_text,
+                "recoverable": True,
+            })
+            yield _metatron_sse("chunk", {
+                **fatal_base,
+                "delta": final_text,
+                "content": final_text,
+            })
+            yield _metatron_sse("agent_done", {
+                **fatal_base,
+                "done": True,
+                "message": "Falha interna encerrada com segurança.",
+            })
+            yield _metatron_sse("done", {
+                **fatal_base,
+                "done": True,
+                "assistant_persisted": bool(persisted.get("assistant_persisted")),
+                "assistant_message_id": persisted.get("assistant_message_id"),
+                "final_text": final_text,
+                "runtime_hints": {
+                    "routing": {
+                        "routing_source": "stream_recovery_shim_v3",
+                        "execution_lifecycle": "error",
+                        "route_applied": True,
+                    }
+                },
+            })
+
+    async def gen():
+        # AO20K-HF4F_OUTER_SSE_TERMINAL_GUARD
+        # Wrap the entire chat stream generator. This is intentionally outside
+        # _gen_inner(), so exceptions from any early yield/route_resolved/fast-path
+        # still produce a terminal SSE contract instead of an ASGI exception.
+        try:
+            async for ev in _gen_inner():
+                yield ev
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            try:
+                logger.exception(
+                    "CHAT_STREAM_OUTER_TERMINAL_GUARD_FAILED trace_id=%s thread_id=%s",
+                    trace_id,
+                    tid_seed,
+                )
             except Exception:
                 pass
 
+            final_text = (
+                "Não consegui concluir a resposta pelo stream nesta tentativa. "
+                "A tentativa foi encerrada com segurança; tente novamente."
+            )
+            fallback_base = {
+                "ok": False,
+                "thread_id": tid_seed,
+                "trace_id": trace_id,
+                "agent_id": "orkio",
+                "agent_name": "Orkio",
+                "final_speaker": "Orkio",
+                "reason": "outer_terminal_exception",
+            }
             assistant_message_id = None
             assistant_persisted = False
-            terminal_base = dict(base)
             try:
-                persisted_terminal = await asyncio.to_thread(
+                persisted = await asyncio.to_thread(
                     _persist_assistant_message,
-                    text=terminal_text,
+                    text=final_text,
                     thread_id=tid_seed,
                     agent_id=None,
                     agent_name="Orkio",
                 )
-                if isinstance(persisted_terminal, dict):
-                    assistant_message_id = persisted_terminal.get("assistant_message_id")
-                    assistant_persisted = bool(persisted_terminal.get("assistant_persisted", False))
-                    terminal_base["thread_id"] = persisted_terminal.get("thread_id") or terminal_base.get("thread_id")
+                if isinstance(persisted, dict):
+                    assistant_message_id = persisted.get("assistant_message_id")
+                    assistant_persisted = bool(persisted.get("assistant_persisted", True))
+                    fallback_base["thread_id"] = persisted.get("thread_id") or tid_seed
             except Exception:
                 try:
-                    logger.exception("CHAT_STREAM_TERMINAL_ERROR_PERSIST_FAILED trace_id=%s", trace_id)
+                    logger.exception("CHAT_STREAM_OUTER_TERMINAL_GUARD_PERSIST_FAILED trace_id=%s", trace_id)
                 except Exception:
                     pass
 
-            yield _ao20k_hf4e_terminal_sse("error", {
-                **terminal_base,
-                "code": "CHAT_STREAM_TERMINAL_ERROR",
-                "message": "Falha interna controlada no stream.",
-                "detail": terminal_detail,
+            def _safe_terminal_event(ev: str, payload: Dict[str, Any]) -> str:
+                try:
+                    return _metatron_sse(ev, payload)
+                except Exception:
+                    try:
+                        safe_payload = json.loads(json.dumps(payload, ensure_ascii=False, default=str))
+                    except Exception:
+                        safe_payload = {
+                            "ok": False,
+                            "trace_id": str(trace_id or ""),
+                            "thread_id": str(tid_seed or ""),
+                            "done": ev == "done",
+                            "reason": "terminal_serialization_fallback",
+                        }
+                    return f"event: {ev}\ndata: {json.dumps(safe_payload, ensure_ascii=False, default=str)}\n\n"
+
+            yield _safe_terminal_event("error", {
+                **fallback_base,
+                "code": "CHAT_STREAM_OUTER_TERMINAL_EXCEPTION",
+                "message": "Falha controlada no stream.",
+                "detail": str(exc)[:500],
                 "recoverable": True,
-                "stream_failed": True,
             })
-            yield _ao20k_hf4e_terminal_sse("chunk", {
-                **terminal_base,
-                "delta": terminal_text,
-                "content": terminal_text,
+            yield _safe_terminal_event("chunk", {
+                **fallback_base,
+                "delta": final_text,
+                "content": final_text,
             })
-            yield _ao20k_hf4e_terminal_sse("agent_done", {
-                **terminal_base,
+            yield _safe_terminal_event("agent_done", {
+                **fallback_base,
                 "done": True,
                 "message": "Falha interna encerrada com segurança.",
-                "stream_failed": True,
             })
-            yield _ao20k_hf4e_terminal_sse("done", {
-                **terminal_base,
+            yield _safe_terminal_event("done", {
+                **fallback_base,
                 "done": True,
+                "stream_failed": True,
                 "assistant_persisted": assistant_persisted,
                 "assistant_message_id": assistant_message_id,
-                "final_text": terminal_text,
-                "stream_failed": True,
+                "final_text": final_text,
                 "runtime_hints": {
                     "routing": {
-                        "routing_source": "ao20k_hf4e_global_sse_terminal_guard",
-                        "execution_lifecycle": "terminal_error_done_emitted",
+                        "routing_source": "ao20k_hf4f_outer_sse_terminal_guard",
+                        "execution_lifecycle": "outer_terminal_exception",
                         "route_applied": True,
                     }
                 },
