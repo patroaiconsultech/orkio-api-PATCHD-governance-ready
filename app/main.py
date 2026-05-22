@@ -29005,6 +29005,16 @@ async def chat_stream(
         source="chat",
     )
 
+    # AO20K-HF4C-HF1B_ROUTE_PLAN_SAFE_BOOTSTRAP_FUNCTION_SCOPE
+    # Root cause validated in production logs:
+    # /api/chat/stream opens 200 OK and then gen() emits route_resolved
+    # while route_plan_safe is still undefined. Define it at chat_stream scope
+    # before gen() is created so every nested emitter has a safe closure value.
+    try:
+        route_plan_safe = _ao20k_hf2_json_safe(route_plan if isinstance(route_plan, dict) else {})
+    except Exception:
+        route_plan_safe = {}
+
     trace_id = getattr(inp, "trace_id", None) or new_id()
     tid_seed = (inp.thread_id or "").strip() or None
     client_message_id = getattr(inp, "client_message_id", None)
@@ -33722,21 +33732,13 @@ async def chat_stream(
             })
             return
 
-        # AO20K-HF4C-HF1_ROUTE_PLAN_SAFE_BOOTSTRAP
-        route_plan_safe = {}
-        try:
-            if "route_plan" in locals() and isinstance(route_plan, dict):
-                route_plan_safe = _ao20k_hf2_json_safe(route_plan)
-        except Exception:
-            route_plan_safe = {}
-
         yield _metatron_sse("execution", {
             **base,
             "step": "route_resolved",
             "kind": "routing",
             "label": "Router AO20BC resolvido",
             "message": "Precedência de @mention, escopo técnico e scope lock aplicada antes dos fast-paths.",
-            "route_audit": route_plan,
+            "route_audit": route_plan_safe,
             "requested_agent": route_plan_safe.get("requested_agent"),
             "resolved_agent": route_plan_safe.get("resolved_agent"),
             "route_family": route_plan_safe.get("route_family"),
@@ -33793,11 +33795,11 @@ async def chat_stream(
                 "route_applied": True,
                 "execution_lifecycle": routing_hints.get("execution_lifecycle") or "completed",
                 "ao20bc_route_audit": route_plan_safe,
-                "requested_agent": route_plan.get("requested_agent"),
-                "resolved_agent": route_plan.get("resolved_agent"),
-                "route_family": route_plan.get("route_family"),
+                "requested_agent": route_plan_safe.get("requested_agent"),
+                "resolved_agent": route_plan_safe.get("resolved_agent"),
+                "route_family": route_plan_safe.get("route_family"),
                 "route_reason": route_plan_safe.get("route_reason"),
-                "blocked_routes": route_plan.get("blocked_routes") or [],
+                "blocked_routes": route_plan_safe.get("blocked_routes") or [],
                 "requested_patch_id": route_plan_safe.get("requested_patch_id"),
                 "generated_patch_id": route_plan_safe.get("generated_patch_id"),
             }
