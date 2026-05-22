@@ -28323,6 +28323,82 @@ def governance_execute_approved_patch(
 # METATRON P0 — controlled self-evolution fast path
 # ================================
 
+def _is_ao20k_hf4_runtime_marker_request_message(user_text: str) -> bool:
+    """
+    AO20K-HF4 — Runtime Marker + Minimal Branch Plan Probe.
+
+    This matcher must run before @Orkio orchestration_audit and AO20BC technical audit.
+    It exists only to prove which runtime patch is actually loaded. It never creates
+    proposals, branches, commits, PRs, deploys or migrations.
+    """
+    low = str(user_text or "").strip().lower()
+    if not low:
+        return False
+
+    has_marker = any(marker in low for marker in (
+        "runtime marker",
+        "runtime_marker",
+        "marcador runtime",
+        "marker ao20k",
+        "ao20k-hf4 marker",
+        "ao20k hf4 marker",
+        "ao20k-hf3 marker",
+        "ao20k hf3 marker",
+    ))
+    has_ao20k_scope = any(marker in low for marker in (
+        "ao20k",
+        "ao20k-hf4",
+        "ao20k hf4",
+        "ao20k-hf3",
+        "ao20k hf3",
+        "hf4",
+        "hf3",
+    ))
+    return bool(has_marker and has_ao20k_scope)
+
+
+def _is_ao20k_hf4_minimal_branch_pr_probe_request_message(user_text: str) -> bool:
+    """
+    AO20K-HF4 minimal probe.
+
+    This is narrower than the normal AO20K branch_pr_plan matcher. It only catches
+    explicit "minimal probe" requests so we can isolate router/SSE from the larger
+    Admin Evolution branch plan payload.
+    """
+    low = str(user_text or "").strip().lower()
+    if not low:
+        return False
+
+    has_branch_plan = any(marker in low for marker in (
+        "branch/pr plan",
+        "branch pr plan",
+        "branch_pr_plan",
+        "branch-pr-plan",
+        "plano de branch/pr",
+        "plano de branch",
+        "plano de pr",
+        "prepare o branch/pr",
+        "prepare o branch",
+        "contrato de branch",
+        "can_prepare_branch_pr",
+    ))
+    has_minimal_probe = any(marker in low for marker in (
+        "mínimo",
+        "minimo",
+        "minimal",
+        "minimal_probe",
+        "probe mínimo",
+        "probe minimo",
+        "payload mínimo",
+        "payload minimo",
+        "teste mínimo",
+        "teste minimo",
+    ))
+    has_proposal_id = bool(re.search(r"\bevo_[0-9a-f]{8,32}\b", low))
+    return bool(has_branch_plan and has_minimal_probe and has_proposal_id)
+
+
+
 def _metatron_sse(event: str, payload: Dict[str, Any]) -> str:
     """
     AO20K-HF3 — Whole Payload JSON-Safe SSE Guard.
@@ -32479,6 +32555,197 @@ async def chat_stream(
         }
 
 
+
+    def _ao20k_hf4_runtime_marker_fastpath_in_isolated_session() -> Dict[str, Any]:
+        """
+        AO20K-HF4 — Runtime Marker.
+
+        Proves that the runtime loaded this patch without triggering orchestration,
+        technical audit, proposal_only, branch creation or any write path.
+        """
+        final_text = (
+            "ORKIO — RUNTIME MARKER AO20K-HF4\n\n"
+            "1. Diagnóstico objetivo\n"
+            "- route_family: runtime_marker\n"
+            "- ao20k_hf4_loaded: true\n"
+            "- ao20k_hf3_payload_guard_present: true\n"
+            "- whole_payload_json_safe: true\n"
+            "- branch_pr_plan_sse_safe_emitter: true\n"
+            "- write_executed: false\n"
+            "- execution_allowed: false\n\n"
+            "2. Segurança operacional\n"
+            "- Não houve auditoria técnica.\n"
+            "- Não houve orchestration_audit.\n"
+            "- Não houve proposal_only.\n"
+            "- Não houve escrita real, commit, PR, deploy ou migration.\n\n"
+            "3. Veredito\n"
+            "- GO para validar presença do runtime AO20K-HF4.\n"
+            "- NO-GO para qualquer execução real."
+        )
+        persisted = _persist_assistant_message(
+            text=final_text,
+            thread_id=tid_seed,
+            agent_id=None,
+            agent_name="Orkio",
+        )
+        return {
+            **persisted,
+            "answer": final_text,
+            "message": final_text,
+            "final_text": final_text,
+            "agent_id": None,
+            "agent_name": "Orkio",
+            "voice_id": None,
+            "avatar_url": None,
+            "runtime_hints": {
+                "routing": {
+                    "routing_source": "stream_ao20k_hf4_runtime_marker",
+                    "route_applied": True,
+                    "execution_lifecycle": "completed",
+                    "route_family": "runtime_marker",
+                    "ao20k_hf4_loaded": True,
+                    "ao20k_hf3_payload_guard_present": True,
+                    "whole_payload_json_safe": True,
+                    "branch_pr_plan_sse_safe_emitter": True,
+                    "write_allowed": False,
+                    "write_executed": False,
+                    "execution_allowed": False,
+                    "commit_executed": False,
+                    "deploy_executed": False,
+                    "migration_executed": False,
+                    "proposal_only": False,
+                    "dispatch_executed": False,
+                }
+            },
+        }
+
+
+    def _ao20k_hf4_minimal_branch_pr_plan_probe_fastpath_in_isolated_session() -> Dict[str, Any]:
+        """
+        AO20K-HF4 — Minimal Branch/PR Plan Probe.
+
+        This intentionally avoids the larger Admin branch plan builder. It uses only
+        a minimal proposal lookup and a small JSON-safe payload to isolate:
+        - router precedence,
+        - SSE chunk/done delivery,
+        - branch_pr_plan contract flags.
+        """
+        proposal_id = ""
+        try:
+            proposal_id = _ao20j_extract_proposal_id(message)
+        except Exception:
+            proposal_id = ""
+        if not proposal_id:
+            try:
+                m = re.search(r"\b(evo_[0-9a-fA-F]{8,32})\b", str(message or ""))
+                proposal_id = str(m.group(1)) if m else ""
+            except Exception:
+                proposal_id = ""
+
+        proposal = None
+        proposal_status = "unknown"
+        execution_status = "unknown"
+        try:
+            if proposal_id:
+                proposal = _admin_evolution_get_proposal(proposal_id)
+            if isinstance(proposal, dict):
+                proposal_status = str(
+                    proposal.get("status")
+                    or proposal.get("proposal_status")
+                    or "unknown"
+                ).strip().lower() or "unknown"
+                execution_status = str(
+                    proposal.get("execution_status")
+                    or "unknown"
+                ).strip().lower() or "unknown"
+        except Exception:
+            proposal = None
+
+        can_prepare = bool(
+            proposal_id
+            and proposal_status == "approved"
+            and execution_status == "dry_run_completed"
+        )
+
+        final_text = (
+            "ORKIO — ORION-LED GOVERNED EVOLUTION PIPELINE\n\n"
+            "1. Diagnóstico objetivo\n"
+            f"- execution_id: ao20k_hf4_branch_pr_plan_probe_{new_id()[:10]}\n"
+            "- route_family: governed_evolution_pipeline\n"
+            "- stage: branch_pr_plan\n"
+            "- minimal_probe: true\n"
+            f"- proposal_id: {proposal_id or 'not_found'}\n"
+            f"- proposal_status: {proposal_status}\n"
+            f"- execution_status: {execution_status}\n"
+            f"- can_prepare_branch_pr: {str(can_prepare).lower()}\n"
+            "- can_create_branch: false\n"
+            "- can_write_repository: false\n"
+            "- can_commit: false\n"
+            "- can_open_pr: false\n"
+            "- can_merge: false\n"
+            "- can_deploy: false\n"
+            "- can_run_migration: false\n"
+            "- write_allowed: false\n"
+            "- execution_allowed: false\n\n"
+            "2. Contrato readonly\n"
+            "- Este é um probe mínimo para validar router + SSE.\n"
+            "- Não chama o payload completo do Admin Branch/PR Plan.\n"
+            "- Não cria branch real, não escreve repositório, não faz commit, não abre PR, não faz deploy e não roda migration.\n\n"
+            "3. Próxima etapa\n"
+            "- Se este probe passar, o próximo passo é restaurar o payload completo em AO20K-HF5.\n\n"
+            "4. Veredito\n"
+            "- GO para validação de branch_pr_plan mínimo se can_prepare_branch_pr=true.\n"
+            "- NO-GO para qualquer ação real."
+        )
+
+        persisted = _persist_assistant_message(
+            text=final_text,
+            thread_id=tid_seed,
+            agent_id=None,
+            agent_name="Orkio",
+        )
+        return {
+            **persisted,
+            "answer": final_text,
+            "message": final_text,
+            "final_text": final_text,
+            "agent_id": None,
+            "agent_name": "Orkio",
+            "voice_id": None,
+            "avatar_url": None,
+            "proposal_id": proposal_id,
+            "runtime_hints": {
+                "routing": {
+                    "routing_source": "stream_ao20k_hf4_minimal_branch_pr_plan_probe",
+                    "route_applied": True,
+                    "execution_lifecycle": "completed",
+                    "route_family": "governed_evolution_pipeline",
+                    "stage": "branch_pr_plan",
+                    "minimal_probe": True,
+                    "proposal_id": proposal_id,
+                    "proposal_status": proposal_status,
+                    "execution_status": execution_status,
+                    "can_prepare_branch_pr": can_prepare,
+                    "can_create_branch": False,
+                    "can_write_repository": False,
+                    "can_commit": False,
+                    "can_open_pr": False,
+                    "can_merge": False,
+                    "can_deploy": False,
+                    "can_run_migration": False,
+                    "write_allowed": False,
+                    "write_executed": False,
+                    "execution_allowed": False,
+                    "commit_executed": False,
+                    "deploy_executed": False,
+                    "migration_executed": False,
+                    "proposal_only": False,
+                }
+            },
+        }
+
+
+
     def _governed_evolution_pipeline_fastpath_in_isolated_session() -> Dict[str, Any]:
         stage = _ao20i_governed_evolution_stage(message)
 
@@ -33368,6 +33635,37 @@ async def chat_stream(
                 logger.info("CHAT_STREAM_DONE trace_id=%s thread_id=%s source=%s", trace_id, thread_id, routing_source)
             except Exception:
                 pass
+
+        # AO20K-HF4_RUNTIME_MARKER_AND_MINIMAL_BRANCH_PLAN_PROBE
+        # These diagnostic probes must run before @Orkio orchestration_audit/AO20BC.
+        # They never create proposals, branches, commits, PRs, deploys or migrations.
+        if _is_ao20k_hf4_runtime_marker_request_message(message):
+            try:
+                payload = await asyncio.to_thread(_ao20k_hf4_runtime_marker_fastpath_in_isolated_session)
+                payload = _ao20k_hf2_json_safe(payload)
+                async for ev in _emit_result_payload(payload, routing_source="stream_ao20k_hf4_runtime_marker"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_AO20K_HF4_RUNTIME_MARKER_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Fall through to terminal guard only if the marker itself fails.
+
+        if _is_ao20k_hf4_minimal_branch_pr_probe_request_message(message):
+            try:
+                payload = await asyncio.to_thread(_ao20k_hf4_minimal_branch_pr_plan_probe_fastpath_in_isolated_session)
+                payload = _ao20k_hf2_json_safe(payload)
+                async for ev in _emit_result_payload(payload, routing_source="stream_ao20k_hf4_minimal_branch_pr_plan_probe"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_AO20K_HF4_MINIMAL_BRANCH_PR_PROBE_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Fall through to the existing AO20K branch_pr_plan safe emitter.
 
         # AO20H-HF2_EXPLICIT_ORKIO_MENTION_PRECEDENCE_GUARD
         # Typed @Orkio commands must win over stale visible_agent/direct_agent_message
