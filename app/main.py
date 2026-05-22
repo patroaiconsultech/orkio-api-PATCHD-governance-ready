@@ -31301,13 +31301,50 @@ async def chat_stream(
 
     def _ao20i_governed_evolution_stage(text: str) -> str:
         """
+        AO20J_GOVERNED_PROPOSAL_DRY_RUN_GATE:
         Identifica a etapa segura do pipeline:
-        audit_report -> issue_map -> patch_plan.
-        Proposal/dry-run/execução real ficam fora deste hotfix.
+        audit_report -> issue_map -> patch_plan -> proposal_only -> dry_run.
+
+        Observação operacional:
+        - proposal_only pode criar proposta governada no banco, mas não escreve repo.
+        - dry_run só roda se houver proposal_id aprovado; caso contrário bloqueia com orientação.
+        - execução real/commit/deploy/migration continuam fora deste hotfix.
         """
         raw = _ao20i_normalized_evolution_text(text)
         if not raw:
             return "audit_report"
+
+        if any(x in raw for x in [
+            "dry_run",
+            "dry run",
+            "dry-run",
+            "execute um dry-run",
+            "executar um dry-run",
+            "rodar dry-run",
+            "rode dry-run",
+            "simule a execução",
+            "simular execução",
+            "execução simulada",
+            "execucao simulada",
+            "sem escrita real",
+        ]):
+            return "dry_run"
+
+        if any(x in raw for x in [
+            "proposal_only",
+            "proposal only",
+            "proposta governada",
+            "crie uma proposal",
+            "criar uma proposal",
+            "crie uma proposta",
+            "criar uma proposta",
+            "gere uma proposta",
+            "gerar uma proposta",
+            "pending_approval",
+            "proposta para aprovação",
+            "proposta para aprovacao",
+        ]):
+            return "proposal_only"
 
         if any(x in raw for x in [
             "issue_map",
@@ -31449,8 +31486,8 @@ async def chat_stream(
             and (has_orion_scope or has_audit_or_bug_scope)
         )
 
-        # Caso etapa posterior após auditoria: issue_map/patch_plan.
-        stage_command = _ao20i_governed_evolution_stage(text) in ("issue_map", "patch_plan")
+        # Caso etapa posterior após auditoria: issue_map/patch_plan/proposal_only/dry_run.
+        stage_command = _ao20i_governed_evolution_stage(text) in ("issue_map", "patch_plan", "proposal_only", "dry_run")
 
         return bool(
             natural_orion_readonly_audit
@@ -31556,8 +31593,347 @@ async def chat_stream(
         )
 
 
+    def _ao20j_extract_proposal_id(text: str) -> str:
+        """
+        Extrai proposal_id explícito do comando de dry-run.
+        Mantém o gate seguro: sem proposal_id aprovado, não há dry-run.
+        """
+        raw = str(text or "")
+        m = re.search(r"\b(evo_[0-9a-fA-F]{8,32})\b", raw)
+        return str(m.group(1)) if m else ""
+
+
+    def _ao20j_latest_thread_proposal() -> Optional[Dict[str, Any]]:
+        """
+        Busca a proposta mais recente da thread atual como conveniência operacional.
+        Não autoriza execução; dry-run ainda exige status approved.
+        """
+        try:
+            proposals = _admin_evolution_list_proposals(org_slug=org)
+        except Exception:
+            return None
+        items = []
+        for p in list(proposals or []):
+            try:
+                if str(p.get("thread_id") or "") == str(tid_seed or ""):
+                    items.append(p)
+            except Exception:
+                pass
+        if not items:
+            return None
+        try:
+            items.sort(key=lambda p: int(p.get("created_at") or 0), reverse=True)
+        except Exception:
+            pass
+        return items[0] if items else None
+
+
+    def _ao20j_build_governed_proposal_spec() -> Dict[str, Any]:
+        """
+        AO20J:
+        Converte o patch_plan do pipeline governado em uma proposal_only auditável.
+        Este spec não escreve repositório, não comita e não faz deploy.
+        """
+        return {
+            "title": "AO20J — Governed Proposal & Dry-Run Gate",
+            "summary": (
+                "Adicionar um gate explícito para converter patch_plan em proposal_only governada e, "
+                "após aprovação humana, permitir somente dry-run controlado sem escrita real. "
+                "O fluxo permanece liderado tecnicamente por Orion, com Chris fora da auditoria técnica."
+            ),
+            "risk": "baixo_medio",
+            "target_files": [
+                "app/main.py",
+                "/api/chat/stream",
+                "governed_evolution_pipeline",
+                "/api/admin/evolution/proposals",
+                "/api/admin/evolution/executions",
+            ],
+            "rollback_plan": (
+                "Remover apenas os blocos AO20J do governed_evolution_pipeline em app/main.py, "
+                "restaurando o comportamento AO20I: audit_report, issue_map e patch_plan sem proposal/dry-run. "
+                "Nenhuma alteração de repo, commit, deploy ou migration é necessária para rollback deste gate."
+            ),
+            "checklist": [
+                "proposal_only só nasce após comando explícito depois do patch_plan.",
+                "proposal_created=true apenas no estágio proposal_only.",
+                "human_approval_required=true permanece obrigatório.",
+                "write_allowed=false permanece.",
+                "execution_allowed=false permanece.",
+                "dry-run sem aprovação retorna bloqueado, não executado.",
+                "dry-run com proposal_id aprovado registra execução controlada sem escrita real.",
+                "commit_executed=false permanece.",
+                "deploy_executed=false permanece.",
+                "migration_executed=false permanece.",
+                "Chris não assina decisão técnica.",
+                "Orion permanece como lead técnico.",
+            ],
+            "diff_preview": (
+                "Diff preview lógico: acrescentar stage resolver para proposal_only/dry_run; "
+                "criar payload governado de proposta; criar gate de dry-run aprovado; "
+                "manter bloqueio de escrita real, commit, deploy e migration."
+            ),
+            "smoke_plan": [
+                "Execute uma auditoria readonly com Orion.",
+                "Agora gere um issue_map dos problemas encontrados.",
+                "Agora monte o patch_plan mínimo.",
+                "Agora crie uma proposal_only governada para o patch_plan mínimo.",
+                "Tentar dry-run antes de aprovação deve bloquear.",
+                "Após aprovação Admin, dry-run deve concluir sem escrita real.",
+                "@Orion readonly continua sem proposal automático.",
+                "@Orkio orchestration_audit continua funcionando.",
+                "@Chris valuation legítima continua funcionando.",
+            ],
+        }
+
+
+    def _ao20j_governed_proposal_only_fastpath_in_isolated_session() -> Dict[str, Any]:
+        spec = _ao20j_build_governed_proposal_spec()
+        proposal = _admin_evolution_create_proposal(
+            org_slug=org,
+            user_id=uid,
+            thread_id=tid_seed,
+            source_message=message,
+            title=spec["title"],
+            summary=spec["summary"],
+            risk=spec["risk"],
+            target_files=spec["target_files"],
+            rollback_plan=spec["rollback_plan"],
+            checklist=spec["checklist"],
+        )
+        proposal_id = str(proposal.get("proposal_id") or "")
+        diff_preview = ""
+        smoke_plan = list(spec.get("smoke_plan") or [])
+        try:
+            diff_preview = _admin_evolution_build_diff_preview(proposal)
+        except Exception:
+            diff_preview = str(spec.get("diff_preview") or "")
+        try:
+            smoke_plan = _admin_evolution_default_smoke_checklist(proposal) or smoke_plan
+        except Exception:
+            pass
+
+        final_text = (
+            "ORKIO — ORION-LED GOVERNED EVOLUTION PIPELINE\n\n"
+            "1. Diagnóstico objetivo\n"
+            f"- execution_id: governed_evolution_proposal_only_{new_id()[:10]}\n"
+            "- route_family: governed_evolution_pipeline\n"
+            "- stage: proposal_only\n"
+            "- parent_agent: Orkio\n"
+            "- lead_agent: Orion\n"
+            "- technical_audit_owner: Orion\n"
+            "- business_context_owner: Chris_not_called\n"
+            "- chris_role: strategic_context_only_not_technical_auditor\n"
+            "- proposal_created: true\n"
+            "- proposal_only: true\n"
+            "- write_executed: false\n"
+            "- commit_executed: false\n"
+            "- deploy_executed: false\n"
+            "- migration_executed: false\n"
+            "- execution_allowed: false\n"
+            "- human_approval_required_before_write: true\n"
+            f"- proposal_id: {proposal_id}\n"
+            f"- proposal_status: {proposal.get('status')}\n\n"
+            "2. Proposta governada criada\n"
+            f"- título: {proposal.get('title')}\n"
+            f"- risco: {proposal.get('risk')}\n"
+            "- Este estágio registra proposta governada para aprovação humana.\n"
+            "- Nenhuma escrita em repositório, commit, deploy ou migration foi executada.\n\n"
+            "3. Diff preview\n"
+            f"{diff_preview}\n\n"
+            "4. Rollback plan\n"
+            f"{proposal.get('rollback_plan')}\n\n"
+            "5. Smoke plan\n"
+            + "\n".join([f"- {x}" for x in list(smoke_plan or [])])
+            + "\n\n6. Próxima etapa\n"
+            "- Admin deve aprovar ou rejeitar a proposal no painel.\n"
+            "- Dry-run só pode executar após aprovação humana explícita.\n\n"
+            "7. Veredito GO/NO-GO\n"
+            "- GO para aprovação/rejeição humana e dry-run posterior se aprovado.\n"
+            "- NO-GO para escrita real, commit, deploy, migration ou execução sem approval gate."
+        )
+        persisted = _persist_assistant_message(
+            text=final_text,
+            thread_id=tid_seed,
+            agent_id="orkio",
+            agent_name="Orkio",
+        )
+        return {
+            **persisted,
+            "answer": final_text,
+            "message": final_text,
+            "final_text": final_text,
+            "agent_id": "orkio",
+            "agent_name": "Orkio",
+            "voice_id": None,
+            "avatar_url": None,
+            "proposal_id": proposal_id,
+            "proposal_status": proposal.get("status"),
+            "runtime_hints": {
+                "routing": {
+                    "routing_source": "stream_ao20j_governed_proposal_gate",
+                    "route_applied": True,
+                    "route_family": "governed_evolution_pipeline",
+                    "stage": "proposal_only",
+                    "parent_agent": "Orkio",
+                    "lead_agent": "Orion",
+                    "technical_audit_owner": "Orion",
+                    "chris_role": "strategic_context_only_not_technical_auditor",
+                    "proposal_only": True,
+                    "proposal_created": True,
+                    "proposal_id": proposal_id,
+                    "write_allowed": False,
+                    "write_executed": False,
+                    "commit_executed": False,
+                    "deploy_executed": False,
+                    "migration_executed": False,
+                    "execution_allowed": False,
+                    "human_approval_required": True,
+                    "diff_preview": diff_preview,
+                    "smoke_plan": smoke_plan,
+                    "rollback_plan": proposal.get("rollback_plan"),
+                }
+            },
+        }
+
+
+    def _ao20j_governed_dry_run_fastpath_in_isolated_session() -> Dict[str, Any]:
+        proposal_id = _ao20j_extract_proposal_id(message)
+        proposal = None
+        if proposal_id:
+            try:
+                proposal = _admin_evolution_get_proposal(proposal_id)
+            except Exception:
+                proposal = None
+        else:
+            proposal = _ao20j_latest_thread_proposal()
+            proposal_id = str((proposal or {}).get("proposal_id") or "")
+
+        status_norm = str((proposal or {}).get("status") or "").strip().lower()
+        if not proposal_id or not proposal:
+            final_text = (
+                "ORKIO — ORION-LED GOVERNED EVOLUTION PIPELINE\n\n"
+                "1. Diagnóstico objetivo\n"
+                f"- execution_id: governed_evolution_dry_run_blocked_{new_id()[:10]}\n"
+                "- route_family: governed_evolution_pipeline\n"
+                "- stage: dry_run\n"
+                "- lead_agent: Orion\n"
+                "- dry_run_executed: false\n"
+                "- write_executed: false\n"
+                "- execution_allowed: false\n"
+                "- human_approval_required_before_write: true\n\n"
+                "2. Bloqueio seguro\n"
+                "- Nenhum proposal_id governado foi encontrado no comando ou na thread atual.\n"
+                "- Informe um proposal_id aprovado ou crie uma proposal_only governada antes.\n\n"
+                "3. Veredito\n"
+                "- NO-GO para dry-run sem proposta aprovada."
+            )
+        elif status_norm != "approved":
+            final_text = (
+                "ORKIO — ORION-LED GOVERNED EVOLUTION PIPELINE\n\n"
+                "1. Diagnóstico objetivo\n"
+                f"- execution_id: governed_evolution_dry_run_blocked_{new_id()[:10]}\n"
+                "- route_family: governed_evolution_pipeline\n"
+                "- stage: dry_run\n"
+                f"- proposal_id: {proposal_id}\n"
+                f"- proposal_status: {status_norm or 'unknown'}\n"
+                "- dry_run_executed: false\n"
+                "- write_executed: false\n"
+                "- commit_executed: false\n"
+                "- deploy_executed: false\n"
+                "- migration_executed: false\n"
+                "- execution_allowed: false\n"
+                "- human_approval_required_before_write: true\n\n"
+                "2. Bloqueio seguro\n"
+                "- Dry-run governado exige aprovação humana prévia da proposta.\n"
+                "- A proposta existe, mas ainda não está approved.\n"
+                "- Nenhuma escrita real, commit, deploy ou migration foi executada.\n\n"
+                "3. Próxima etapa\n"
+                "- Admin deve aprovar ou rejeitar a proposta no painel.\n"
+                "- Após aprovação, repita o comando de dry-run com o proposal_id.\n\n"
+                "4. Veredito\n"
+                "- GO para approval gate. NO-GO para dry-run antes da aprovação."
+            )
+        else:
+            result = _admin_evolution_create_dry_run_execution(
+                proposal_id,
+                actor=str(uid or ""),
+                org_slug=org,
+            )
+            smoke_plan = list(result.get("smoke_plan") or [])
+            final_text = (
+                "ORKIO — ORION-LED GOVERNED EVOLUTION PIPELINE\n\n"
+                "1. Diagnóstico objetivo\n"
+                f"- execution_id: {result.get('execution_id')}\n"
+                "- route_family: governed_evolution_pipeline\n"
+                "- stage: dry_run\n"
+                f"- proposal_id: {proposal_id}\n"
+                f"- proposal_status: {result.get('proposal_status')}\n"
+                "- dry_run_executed: true\n"
+                "- write_executed: false\n"
+                "- commit_executed: false\n"
+                "- deploy_executed: false\n"
+                "- migration_executed: false\n"
+                "- execution_allowed: false\n"
+                "- human_approval_required_before_write: true\n\n"
+                "2. Dry-run governado concluído\n"
+                "- Execução simulada registrada.\n"
+                "- Nenhuma escrita em repositório, commit, deploy ou migration foi executada.\n\n"
+                "3. Diff preview\n"
+                f"{result.get('diff_preview')}\n\n"
+                "4. Smoke result\n"
+                + "\n".join([f"- {x}" for x in smoke_plan])
+                + "\n\n5. Rollback plan\n"
+                f"{result.get('rollback_plan')}\n\n"
+                "6. Veredito\n"
+                "- GO para revisão humana do dry-run.\n"
+                "- NO-GO para execução real sem novo approval gate explícito."
+            )
+
+        persisted = _persist_assistant_message(
+            text=final_text,
+            thread_id=tid_seed,
+            agent_id="orkio",
+            agent_name="Orkio",
+        )
+        return {
+            **persisted,
+            "answer": final_text,
+            "message": final_text,
+            "final_text": final_text,
+            "agent_id": "orkio",
+            "agent_name": "Orkio",
+            "voice_id": None,
+            "avatar_url": None,
+            "proposal_id": proposal_id,
+            "runtime_hints": {
+                "routing": {
+                    "routing_source": "stream_ao20j_governed_dry_run_gate",
+                    "route_applied": True,
+                    "route_family": "governed_evolution_pipeline",
+                    "stage": "dry_run",
+                    "proposal_id": proposal_id,
+                    "write_allowed": False,
+                    "write_executed": False,
+                    "commit_executed": False,
+                    "deploy_executed": False,
+                    "migration_executed": False,
+                    "execution_allowed": False,
+                    "human_approval_required": True,
+                }
+            },
+        }
+
+
     def _governed_evolution_pipeline_fastpath_in_isolated_session() -> Dict[str, Any]:
         stage = _ao20i_governed_evolution_stage(message)
+
+        if stage == "proposal_only":
+            return _ao20j_governed_proposal_only_fastpath_in_isolated_session()
+
+        if stage == "dry_run":
+            return _ao20j_governed_dry_run_fastpath_in_isolated_session()
+
         final_text = _build_governed_evolution_pipeline_answer(message, stage)
         persisted = _persist_assistant_message(
             text=final_text,
@@ -31577,7 +31953,7 @@ async def chat_stream(
             "avatar_url": None,
             "runtime_hints": {
                 "routing": {
-                    "routing_source": "stream_ao20i_governed_evolution_pipeline",
+                    "routing_source": "stream_ao20j_governed_evolution_pipeline",
                     "route_applied": True,
                     "route_family": "governed_evolution_pipeline",
                     "stage": stage,
@@ -32508,12 +32884,12 @@ async def chat_stream(
         if _is_governed_evolution_pipeline_request(message):
             try:
                 payload = await asyncio.to_thread(_governed_evolution_pipeline_fastpath_in_isolated_session)
-                async for ev in _emit_result_payload(payload, routing_source="stream_ao20i_governed_evolution_pipeline"):
+                async for ev in _emit_result_payload(payload, routing_source="stream_ao20j_governed_evolution_pipeline"):
                     yield ev
                 return
             except Exception:
                 try:
-                    logger.exception("CHAT_STREAM_AO20I_GOVERNED_EVOLUTION_PIPELINE_FAILED trace_id=%s", trace_id)
+                    logger.exception("CHAT_STREAM_AO20J_GOVERNED_EVOLUTION_PIPELINE_FAILED trace_id=%s", trace_id)
                 except Exception:
                     pass
                 # Se falhar, os guards posteriores ainda podem responder em readonly.
