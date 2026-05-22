@@ -13678,6 +13678,125 @@ def _is_ao20k_branch_pr_plan_readonly_request_message(user_text: str) -> bool:
     return bool(has_proposal_id or has_completed_dry_run_context or has_readonly_contract)
 
 
+def _ao20k_hf2_json_safe(value: Any) -> Any:
+    """
+    AO20K-HF2 — Branch/PR Plan SSE Safe Emitter.
+
+    SSE payloads must be JSON-serializable. Some governance/admin helpers may
+    return datetime/Decimal/model-like values inside nested runtime_hints. If a
+    non-serializable value reaches _metatron_sse, json.dumps raises inside the
+    generator after HTTP 200 and the UI receives the generic stream failure.
+
+    This helper converts nested values to plain JSON types without changing the
+    visible governance contract.
+    """
+    try:
+        return json.loads(json.dumps(value, ensure_ascii=False, default=str))
+    except Exception:
+        if isinstance(value, dict):
+            out: Dict[str, Any] = {}
+            for k, v in value.items():
+                try:
+                    out[str(k)] = _ao20k_hf2_json_safe(v)
+                except Exception:
+                    out[str(k)] = str(v)
+            return out
+        if isinstance(value, (list, tuple, set)):
+            return [_ao20k_hf2_json_safe(v) for v in list(value)]
+        try:
+            return str(value)
+        except Exception:
+            return None
+
+
+def _ao20k_hf2_fallback_branch_pr_plan(
+    *,
+    proposal_id: str,
+    proposal_status: str = "approved",
+    execution_status: str = "dry_run_completed",
+    error: str = "",
+) -> Dict[str, Any]:
+    """Minimal read-only Branch/PR plan used if the richer admin plan builder fails."""
+    pid = str(proposal_id or "").strip()
+    status = str(proposal_status or "approved").strip() or "approved"
+    exec_status = str(execution_status or "dry_run_completed").strip() or "dry_run_completed"
+    return {
+        "ok": True,
+        "stage": "AO-17A",
+        "mode": "branch_pr_runner_plan_readonly",
+        "proposal_id": pid,
+        "proposal_status": status,
+        "execution_id": "",
+        "execution_status": exec_status,
+        "dry_run_completed": exec_status == "dry_run_completed",
+        "can_prepare_branch_pr": status == "approved" and exec_status == "dry_run_completed",
+        "can_create_branch": False,
+        "can_write_repository": False,
+        "can_commit": False,
+        "can_open_pr": False,
+        "can_merge": False,
+        "can_deploy": False,
+        "can_run_migration": False,
+        "execution_enabled": False,
+        "can_execute_real": False,
+        "write_allowed": False,
+        "suggested_branch": f"ao-17/{pid}" if pid else "ao-17/pending-proposal",
+        "suggested_pr_title": "AO-17: Governed Branch/PR Plan",
+        "risk": "baixo_medio",
+        "required_before_branch_write": [
+            "Admin confirma que o dry-run foi concluído e revisado.",
+            "Diff preview, smoke_plan e rollback_plan foram aceitos.",
+            "Runner escreve somente em branch temporária.",
+            "Runner nunca escreve direto em main.",
+            "Nenhum deploy automático é permitido.",
+            "Nenhuma migration automática é permitida.",
+            "Build e smoke devem rodar antes de qualquer merge.",
+            "Rollback plan deve existir antes de qualquer deploy.",
+        ],
+        "branch_contract": {
+            "write_scope": "branch_only_future_gate",
+            "main_branch_write_allowed": False,
+            "force_push_allowed": False,
+            "direct_deploy_allowed": False,
+            "migration_allowed": False,
+            "requires_admin_approval_before_write": True,
+            "requires_admin_approval_before_merge": True,
+            "requires_admin_approval_before_deploy": True,
+        },
+        "rollback_contract": {
+            "rollback_plan_required": True,
+            "rollback_dry_run_required": True,
+            "rollback_without_admin_approval": False,
+            "rollback_plan": "Reverter apenas o bloco do estágio governado que estiver sob revisão, nunca escrever em main sem aprovação.",
+        },
+        "smoke_contract": {
+            "build_required": True,
+            "smoke_required": True,
+            "admin_review_required": True,
+            "minimum_checks": [
+                "Build WEB/API compila.",
+                "Admin Evolution abre.",
+                "Fluxo de auth permanece funcional.",
+                "Proposal/dry-run/executions permanecem funcionais.",
+                "Nenhuma escrita direta em main ocorreu.",
+                "Nenhum deploy automático ocorreu.",
+            ],
+        },
+        "blocked_actions": [
+            "write_repository",
+            "write_main_branch",
+            "commit",
+            "open_pr",
+            "merge",
+            "deploy",
+            "migration",
+        ],
+        "next_required_stage": "AO-17B branch creation only after explicit Admin approval",
+        "message": "AO-17A pronto para revisão em modo read-only. Nenhuma branch/commit/PR/deploy/migration foi executada.",
+        "fallback_reason": str(error or "")[:500],
+    }
+
+
 def _is_patch_governance_request_message(user_text: str) -> bool:
     low = str(user_text or "").strip().lower()
     if not low:
@@ -32231,7 +32350,24 @@ async def chat_stream(
             )
             plan = {}
         else:
-            plan = _admin_evolution_build_branch_pr_plan(proposal)
+            try:
+                plan = _admin_evolution_build_branch_pr_plan(proposal)
+                plan = _ao20k_hf2_json_safe(plan)
+            except Exception as exc:
+                try:
+                    logger.exception(
+                        "AO20K_HF2_BRANCH_PR_PLAN_BUILD_FAILED proposal_id=%s trace_id=%s",
+                        proposal_id,
+                        trace_id,
+                    )
+                except Exception:
+                    pass
+                plan = _ao20k_hf2_fallback_branch_pr_plan(
+                    proposal_id=proposal_id,
+                    proposal_status=status_norm or "approved",
+                    execution_status=execution_status or "dry_run_completed",
+                    error=str(exc),
+                )
             final_text = (
                 "ORKIO — ORION-LED GOVERNED EVOLUTION PIPELINE\n\n"
                 "1. Diagnóstico objetivo\n"
@@ -33113,6 +33249,24 @@ async def chat_stream(
                 "generated_patch_id": route_plan.get("generated_patch_id"),
             }
             runtime_hints["routing"] = routing_hints
+
+            # AO20K-HF2 — SSE Safe Emitter:
+            # Ensure nested runtime_hints are JSON-serializable before the done event.
+            # Without this, json.dumps inside _metatron_sse can fail after HTTP 200,
+            # causing the frontend to show the generic "stream did not complete" fallback.
+            try:
+                runtime_hints = _ao20k_hf2_json_safe(runtime_hints)
+            except Exception:
+                runtime_hints = {
+                    "routing": {
+                        "routing_source": routing_source,
+                        "route_applied": True,
+                        "execution_lifecycle": "completed_with_serialization_fallback",
+                        "ao20k_hf2_serialization_fallback": True,
+                        "ao20bc_route_audit": route_plan,
+                    }
+                }
+
             assistant_message_id = payload.get("assistant_message_id")
             assistant_persisted = bool(payload.get("assistant_persisted", True))
 
@@ -33277,6 +33431,120 @@ async def chat_stream(
                 except Exception:
                     pass
                 # Se falhar, o terminal guard/sanitizer ainda protege a UI.
+
+        # AO20K-HF2_BRANCH_PR_PLAN_SSE_SAFE_EMITTER
+        # Branch/PR plan is a read-only governance contract after dry_run_completed.
+        # It must emit a deterministic SSE chunk + done, and must not fall through
+        # to generic provider/governance wrappers if the richer plan builder fails.
+        if _is_ao20k_branch_pr_plan_readonly_request_message(message):
+            try:
+                payload = await asyncio.to_thread(_ao20k_governed_branch_pr_plan_fastpath_in_isolated_session)
+                if not isinstance(payload, dict):
+                    payload = {
+                        "answer": str(payload or ""),
+                        "message": str(payload or ""),
+                        "final_text": str(payload or ""),
+                        "agent_id": "orkio",
+                        "agent_name": "Orkio",
+                        "runtime_hints": {
+                            "routing": {
+                                "routing_source": "stream_ao20k_hf2_branch_pr_plan_sse_safe_emitter",
+                                "route_applied": True,
+                                "route_family": "governed_evolution_pipeline",
+                                "stage": "branch_pr_plan",
+                                "write_allowed": False,
+                                "write_executed": False,
+                                "execution_allowed": False,
+                            }
+                        },
+                    }
+                payload["runtime_hints"] = _ao20k_hf2_json_safe(payload.get("runtime_hints") or {})
+                async for ev in _emit_result_payload(payload, routing_source="stream_ao20k_hf2_branch_pr_plan_sse_safe_emitter"):
+                    yield ev
+                return
+            except Exception as exc:
+                try:
+                    logger.exception("CHAT_STREAM_AO20K_HF2_BRANCH_PR_PLAN_SSE_SAFE_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+
+                proposal_id = ""
+                try:
+                    proposal_id = _ao20j_extract_proposal_id(message)
+                except Exception:
+                    try:
+                        m = re.search(r"\bevo_[0-9a-f]{8,32}\b", str(message or ""), flags=re.IGNORECASE)
+                        proposal_id = m.group(0) if m else ""
+                    except Exception:
+                        proposal_id = ""
+
+                safe_plan = _ao20k_hf2_fallback_branch_pr_plan(
+                    proposal_id=proposal_id,
+                    proposal_status="unknown",
+                    execution_status="unknown",
+                    error=str(exc),
+                )
+                final_text = (
+                    "ORKIO — ORION-LED GOVERNED EVOLUTION PIPELINE\n\n"
+                    "1. Diagnóstico objetivo\n"
+                    f"- execution_id: governed_evolution_branch_pr_plan_sse_safe_{new_id()[:10]}\n"
+                    "- route_family: governed_evolution_pipeline\n"
+                    "- stage: branch_pr_plan\n"
+                    f"- proposal_id: {proposal_id or 'unknown'}\n"
+                    "- branch_pr_plan_safe_fallback: true\n"
+                    "- can_prepare_branch_pr: false\n"
+                    "- can_create_branch: false\n"
+                    "- can_write_repository: false\n"
+                    "- can_commit: false\n"
+                    "- can_open_pr: false\n"
+                    "- can_merge: false\n"
+                    "- can_deploy: false\n"
+                    "- can_run_migration: false\n"
+                    "- write_executed: false\n"
+                    "- execution_allowed: false\n\n"
+                    "2. Bloqueio seguro\n"
+                    "- O emissor SSE do Branch/PR plan capturou uma falha interna e encerrou com resposta segura.\n"
+                    "- Nenhuma branch foi criada, nenhum arquivo foi escrito, nenhum commit/PR/deploy/migration foi executado.\n\n"
+                    "3. Próxima etapa\n"
+                    "- Revisar logs do AO20K-HF2 e consultar o plano pelo Admin Evolution até o emissor completo estabilizar.\n\n"
+                    "4. Veredito\n"
+                    "- GO para segurança do stream. NO-GO para qualquer escrita real."
+                )
+                persisted = await asyncio.to_thread(
+                    _persist_assistant_message,
+                    text=final_text,
+                    thread_id=tid_seed,
+                    agent_id="orkio",
+                    agent_name="Orkio",
+                )
+                fallback_payload = {
+                    **persisted,
+                    "answer": final_text,
+                    "message": final_text,
+                    "final_text": final_text,
+                    "agent_id": "orkio",
+                    "agent_name": "Orkio",
+                    "runtime_hints": _ao20k_hf2_json_safe({
+                        "routing": {
+                            "routing_source": "stream_ao20k_hf2_branch_pr_plan_sse_safe_fallback",
+                            "route_applied": True,
+                            "route_family": "governed_evolution_pipeline",
+                            "stage": "branch_pr_plan",
+                            "proposal_id": proposal_id,
+                            "branch_pr_plan": safe_plan,
+                            "write_allowed": False,
+                            "write_executed": False,
+                            "commit_executed": False,
+                            "deploy_executed": False,
+                            "migration_executed": False,
+                            "execution_allowed": False,
+                            "human_approval_required": True,
+                        }
+                    }),
+                }
+                async for ev in _emit_result_payload(fallback_payload, routing_source="stream_ao20k_hf2_branch_pr_plan_sse_safe_fallback"):
+                    yield ev
+                return
 
         # AO20I_ORION_LED_GOVERNED_EVOLUTION_PIPELINE
         # Pedidos naturais de autoevolução/auditoria assistida entram em pipeline
