@@ -31197,7 +31197,7 @@ async def chat_stream(
             "12. Pontos fracos arquiteturais\n"
             "- Fast-paths ainda competem por precedência.\n"
             "- A camada de auditoria interna dos especialistas precisava existir antes de proposal_only.\n"
-            "- Autoevolução correta deve seguir: audit_report → issue_map → patch_plan → proposal_only → dry-run → approval → execução.\n\n"
+            "- Autoevolução correta deve seguir: audit_report → issue_map → patch_plan → proposal_only → dry-run → branch/PR plan → approval → execução.\n\n"
             "13. Patch mínimo recomendado\n"
             "- Manter AO20H Specialist Orchestration & Governed Evolution Gate ativo.\n"
             "- Próximo patch depois da validação: Realtime Orchestration Bridge.\n\n"
@@ -31303,7 +31303,13 @@ async def chat_stream(
         """
         AO20J_HF1_PROPOSAL_STAGE_PRECEDENCE_NEGATIVE_DRY_RUN_GUARD:
         Identifica a etapa segura do pipeline:
-        audit_report -> issue_map -> patch_plan -> proposal_only -> dry_run.
+        audit_report -> issue_map -> patch_plan -> proposal_only -> dry_run -> branch_pr_plan.
+
+        AO20K_BRANCH_PR_PLAN_APPROVAL_GATE:
+        - após dry_run_completed, expõe somente contrato read-only de branch/PR;
+        - não cria branch, não escreve repositório, não faz commit, não abre PR,
+          não faz merge, deploy ou migration;
+        - exige novo approval gate antes de qualquer escrita futura.
 
         Correção HF1:
         - "crie proposal_only/proposta governada" vence menções negativas a dry-run.
@@ -31316,6 +31322,42 @@ async def chat_stream(
 
         def _has_any(items: List[str]) -> bool:
             return any(x in raw for x in items)
+
+        branch_pr_plan_positive_markers = [
+            "branch_pr_plan",
+            "branch-pr-plan",
+            "branch/pr plan",
+            "branch pr plan",
+            "plano branch/pr",
+            "plano de branch/pr",
+            "plano de branch",
+            "plano de pr",
+            "plano de pull request",
+            "prepare branch/pr",
+            "preparar branch/pr",
+            "preparar plano branch",
+            "preparar plano de branch",
+            "preparar branch",
+            "preparar pr",
+            "prepare o branch",
+            "prepare o pr",
+            "ao-17a",
+            "ao17a",
+            "branch/PR runner",
+            "branch pr runner",
+            "can_prepare_branch_pr",
+            "branch_pr_runner_plan",
+            "branch_pr_runner_plan_readonly",
+            "próxima etapa branch",
+            "proxima etapa branch",
+            "contrato de branch",
+            "contrato branch",
+        ]
+
+        # AO20K: plano de branch/PR é uma etapa read-only posterior ao dry-run.
+        # Deve vencer menções históricas a dry-run quando o usuário pede o próximo contrato.
+        if _has_any(branch_pr_plan_positive_markers):
+            return "branch_pr_plan"
 
         proposal_positive_markers = [
             "proposal_only",
@@ -31475,6 +31517,14 @@ async def chat_stream(
             "evolucao da plataforma",
             "evolução da plataforma",
             "processo autoevolutivo",
+            "branch/pr",
+            "branch pr",
+            "branch_pr_plan",
+            "branch-pr-plan",
+            "ao-17a",
+            "ao17a",
+            "branch runner",
+            "pr runner",
             "processo assistido",
             "execucao assistida",
             "execução assistida",
@@ -31530,6 +31580,13 @@ async def chat_stream(
             "nao gerar proposal_only",
             "não gerar proposal_only",
             "approval",
+            "branch",
+            "branch/pr",
+            "pull request",
+            "pr governado",
+            "ao-17a",
+            "ao17a",
+            "dry_run_completed",
             "aprovação humana",
             "aprovacao humana",
             "governado",
@@ -31551,8 +31608,8 @@ async def chat_stream(
             and (has_orion_scope or has_audit_or_bug_scope)
         )
 
-        # Caso etapa posterior após auditoria: issue_map/patch_plan/proposal_only/dry_run.
-        stage_command = _ao20i_governed_evolution_stage(text) in ("issue_map", "patch_plan", "proposal_only", "dry_run")
+        # Caso etapa posterior após auditoria: issue_map/patch_plan/proposal_only/dry_run/branch_pr_plan.
+        stage_command = _ao20i_governed_evolution_stage(text) in ("issue_map", "patch_plan", "proposal_only", "dry_run", "branch_pr_plan")
 
         return bool(
             natural_orion_readonly_audit
@@ -31648,7 +31705,7 @@ async def chat_stream(
             "- human_approval_required_before_write: true\n"
             "- blocked_routes: chris_technical_audit, chris_valuation_unrequested, proposal_only_builder_until_explicit, patch_governance_response, internal_warroom_governed_surgical_v2, governed_audit_v7_frontend_readonly\n\n"
             "2. Fluxo governado reconhecido\n"
-            "- Autoevolução correta: audit_report → issue_map → patch_plan → proposal_only → dry-run → approval → execução.\n"
+            "- Autoevolução correta: audit_report → issue_map → patch_plan → proposal_only → dry-run → branch/PR plan → approval → execução.\n"
             "- Este estágio não cria proposta, não executa patch, não escreve arquivo, não faz commit e não faz deploy.\n"
             "- Realtime permanece fora deste ciclo até a orquestração/execução assistida estar estável.\n\n"
             f"{body}\n\n"
@@ -31990,6 +32047,175 @@ async def chat_stream(
         }
 
 
+    def _ao20k_governed_branch_pr_plan_fastpath_in_isolated_session() -> Dict[str, Any]:
+        """
+        AO20K — Branch/PR Plan Approval Gate.
+
+        Expõe contrato read-only para a próxima etapa após dry_run_completed.
+        Não cria branch, não escreve repositório, não faz commit, não abre PR,
+        não faz merge, deploy ou migration.
+        """
+        proposal_id = _ao20j_extract_proposal_id(message)
+        proposal = None
+        if proposal_id:
+            try:
+                proposal = _admin_evolution_get_proposal(proposal_id)
+            except Exception:
+                proposal = None
+        else:
+            proposal = _ao20j_latest_thread_proposal()
+            proposal_id = str((proposal or {}).get("proposal_id") or "")
+
+        status_norm = str((proposal or {}).get("status") or proposal.get("proposal_status") if proposal else "").strip().lower()
+        execution_status = str((proposal or {}).get("execution_status") or "not_started").strip().lower() if proposal else "not_started"
+        dry_run_completed = execution_status == "dry_run_completed"
+
+        if not proposal_id or not proposal:
+            final_text = (
+                "ORKIO — ORION-LED GOVERNED EVOLUTION PIPELINE\n\n"
+                "1. Diagnóstico objetivo\n"
+                f"- execution_id: governed_evolution_branch_pr_plan_blocked_{new_id()[:10]}\n"
+                "- route_family: governed_evolution_pipeline\n"
+                "- stage: branch_pr_plan\n"
+                "- lead_agent: Orion\n"
+                "- proposal_found: false\n"
+                "- can_prepare_branch_pr: false\n"
+                "- can_create_branch: false\n"
+                "- can_write_repository: false\n"
+                "- can_commit: false\n"
+                "- can_open_pr: false\n"
+                "- can_merge: false\n"
+                "- can_deploy: false\n"
+                "- can_run_migration: false\n"
+                "- execution_allowed: false\n\n"
+                "2. Bloqueio seguro\n"
+                "- Nenhum proposal_id governado foi encontrado no comando ou na thread atual.\n"
+                "- Informe uma proposta aprovada com dry_run_completed antes de preparar plano de Branch/PR.\n\n"
+                "3. Veredito\n"
+                "- NO-GO para Branch/PR plan sem proposta e dry-run concluído."
+            )
+            plan = {}
+        elif status_norm != "approved" or not dry_run_completed:
+            final_text = (
+                "ORKIO — ORION-LED GOVERNED EVOLUTION PIPELINE\n\n"
+                "1. Diagnóstico objetivo\n"
+                f"- execution_id: governed_evolution_branch_pr_plan_blocked_{new_id()[:10]}\n"
+                "- route_family: governed_evolution_pipeline\n"
+                "- stage: branch_pr_plan\n"
+                f"- proposal_id: {proposal_id}\n"
+                f"- proposal_status: {status_norm or 'unknown'}\n"
+                f"- execution_status: {execution_status or 'not_started'}\n"
+                f"- dry_run_completed: {str(dry_run_completed).lower()}\n"
+                "- can_prepare_branch_pr: false\n"
+                "- can_create_branch: false\n"
+                "- can_write_repository: false\n"
+                "- can_commit: false\n"
+                "- can_open_pr: false\n"
+                "- can_merge: false\n"
+                "- can_deploy: false\n"
+                "- can_run_migration: false\n"
+                "- execution_allowed: false\n\n"
+                "2. Bloqueio seguro\n"
+                "- Branch/PR plan exige proposta approved e dry_run_completed.\n"
+                "- Nenhuma branch foi criada, nenhum arquivo foi escrito e nenhum PR foi aberto.\n\n"
+                "3. Próxima etapa\n"
+                "- Concluir approval + dry-run governado antes de preparar contrato de Branch/PR.\n\n"
+                "4. Veredito\n"
+                "- NO-GO para Branch/PR plan antes do dry-run concluído."
+            )
+            plan = {}
+        else:
+            plan = _admin_evolution_build_branch_pr_plan(proposal)
+            final_text = (
+                "ORKIO — ORION-LED GOVERNED EVOLUTION PIPELINE\n\n"
+                "1. Diagnóstico objetivo\n"
+                f"- execution_id: governed_evolution_branch_pr_plan_{new_id()[:10]}\n"
+                "- route_family: governed_evolution_pipeline\n"
+                "- stage: branch_pr_plan\n"
+                f"- proposal_id: {proposal_id}\n"
+                f"- proposal_status: {plan.get('proposal_status')}\n"
+                f"- execution_id_ref: {plan.get('execution_id')}\n"
+                f"- execution_status: {plan.get('execution_status')}\n"
+                f"- dry_run_completed: {str(bool(plan.get('dry_run_completed'))).lower()}\n"
+                f"- can_prepare_branch_pr: {str(bool(plan.get('can_prepare_branch_pr'))).lower()}\n"
+                "- can_create_branch: false\n"
+                "- can_write_repository: false\n"
+                "- can_commit: false\n"
+                "- can_open_pr: false\n"
+                "- can_merge: false\n"
+                "- can_deploy: false\n"
+                "- can_run_migration: false\n"
+                "- execution_allowed: false\n"
+                "- can_execute_real: false\n"
+                "- write_allowed: false\n\n"
+                "2. Branch/PR plan read-only\n"
+                f"- suggested_branch: {plan.get('suggested_branch')}\n"
+                f"- suggested_pr_title: {plan.get('suggested_pr_title')}\n"
+                f"- next_required_stage: {plan.get('next_required_stage')}\n"
+                f"- message: {plan.get('message')}\n\n"
+                "3. Contrato de segurança\n"
+                "- Este estágio NÃO cria branch.\n"
+                "- Este estágio NÃO escreve repositório.\n"
+                "- Este estágio NÃO faz commit.\n"
+                "- Este estágio NÃO abre PR.\n"
+                "- Este estágio NÃO faz merge, deploy ou migration.\n"
+                "- Qualquer escrita futura exige novo approval gate explícito do Admin.\n\n"
+                "4. Required before branch write\n"
+                + "\n".join([f"- {x}" for x in list(plan.get("required_before_branch_write") or [])])
+                + "\n\n5. Blocked actions\n"
+                + "\n".join([f"- {x}" for x in list(plan.get("blocked_actions") or [])])
+                + "\n\n6. Veredito\n"
+                "- GO para revisão humana do Branch/PR plan em modo read-only.\n"
+                "- NO-GO para criar branch, escrever arquivos, abrir PR, merge, deploy ou migration neste patch."
+            )
+
+        persisted = _persist_assistant_message(
+            text=final_text,
+            thread_id=tid_seed,
+            agent_id="orkio",
+            agent_name="Orkio",
+        )
+        return {
+            **persisted,
+            "answer": final_text,
+            "message": final_text,
+            "final_text": final_text,
+            "agent_id": "orkio",
+            "agent_name": "Orkio",
+            "voice_id": None,
+            "avatar_url": None,
+            "proposal_id": proposal_id,
+            "runtime_hints": {
+                "routing": {
+                    "routing_source": "stream_ao20k_branch_pr_plan_approval_gate",
+                    "route_applied": True,
+                    "route_family": "governed_evolution_pipeline",
+                    "stage": "branch_pr_plan",
+                    "proposal_id": proposal_id,
+                    "proposal_status": status_norm,
+                    "execution_status": execution_status,
+                    "dry_run_completed": dry_run_completed,
+                    "can_prepare_branch_pr": bool((plan or {}).get("can_prepare_branch_pr")),
+                    "can_create_branch": False,
+                    "can_write_repository": False,
+                    "can_commit": False,
+                    "can_open_pr": False,
+                    "can_merge": False,
+                    "can_deploy": False,
+                    "can_run_migration": False,
+                    "write_allowed": False,
+                    "write_executed": False,
+                    "commit_executed": False,
+                    "deploy_executed": False,
+                    "migration_executed": False,
+                    "execution_allowed": False,
+                    "human_approval_required": True,
+                    "branch_pr_plan": plan,
+                }
+            },
+        }
+
+
     def _governed_evolution_pipeline_fastpath_in_isolated_session() -> Dict[str, Any]:
         stage = _ao20i_governed_evolution_stage(message)
 
@@ -31998,6 +32224,9 @@ async def chat_stream(
 
         if stage == "dry_run":
             return _ao20j_governed_dry_run_fastpath_in_isolated_session()
+
+        if stage == "branch_pr_plan":
+            return _ao20k_governed_branch_pr_plan_fastpath_in_isolated_session()
 
         final_text = _build_governed_evolution_pipeline_answer(message, stage)
         persisted = _persist_assistant_message(
@@ -32051,6 +32280,7 @@ async def chat_stream(
                             "patch_plan",
                             "proposal_only",
                             "dry_run",
+                            "branch_pr_plan",
                             "approval",
                             "execution",
                         ],
