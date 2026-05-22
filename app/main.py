@@ -29085,6 +29085,16 @@ async def chat_stream(
         if not normalized:
             return False
 
+        # AO20E-HF1 — orchestration audits must not be captured by the generic
+        # governed execution fast-path. Prompts that ask for execution_id,
+        # child_execution_graphs or dispatch_executed are still readonly
+        # orchestration audits, not requests to generate a patch artifact.
+        try:
+            if _ao20e_is_orchestration_audit_request(text):
+                return False
+        except Exception:
+            pass
+
         execution_markers = [
             "vamos ao patch",
             "vamos ao proximo patch",
@@ -31361,6 +31371,40 @@ async def chat_stream(
 
 
 
+    def _internal_warroom_governed_execution_fastpath_in_isolated_session() -> Dict[str, Any]:
+        # AO20E-HF1 — compatibility wrapper.
+        # The stream still references this legacy name for governed war-room
+        # execution requests. Keeping a small wrapper prevents NameError while
+        # preserving proposal_only / no-write behavior.
+        final_text = _build_internal_warroom_governed_execution_answer(message)
+        persisted = _persist_assistant_message(
+            text=final_text,
+            thread_id=tid_seed,
+            agent_id=None,
+            agent_name="Auditor",
+        )
+        return {
+            **persisted,
+            "answer": final_text,
+            "message": final_text,
+            "final_text": final_text,
+            "agent_id": None,
+            "agent_name": "Auditor",
+            "voice_id": None,
+            "avatar_url": None,
+            "runtime_hints": {
+                "routing": {
+                    "routing_source": "stream_internal_warroom_governed_execution_v1",
+                    "route_applied": True,
+                    "execution_lifecycle": "proposal_only_completed",
+                    "governance_mode": "proposal_only_fastpath",
+                    "write_executed": False,
+                    "human_approval_required": True,
+                }
+            },
+        }
+
+
     def _build_capabilities_baseline_answer(text: str) -> str:
         onboarding_digest = _build_stream_onboarding_context_digest()
         context_block = ""
@@ -31594,6 +31638,78 @@ async def chat_stream(
             except Exception:
                 pass
 
+        async def _emit_terminal_stream_error(
+            code: str,
+            message_text: str,
+            *,
+            routing_source: str = "stream_ao20e_hf1_terminal_guard",
+        ):
+            # AO20E-HF1 — final safety net for exceptions raised after the
+            # HTTP 200 stream is already open. The frontend must always receive
+            # event:error followed by event:done so it can release the input.
+            final_text = _sanitize_visible_stream_text(
+                message_text
+                or "Falha interna no stream de chat. A tentativa foi encerrada com segurança."
+            )
+            try:
+                persisted = await asyncio.to_thread(
+                    _persist_assistant_message,
+                    text=final_text,
+                    thread_id=tid_seed,
+                    agent_id=None,
+                    agent_name="Orkio",
+                )
+            except Exception:
+                persisted = {
+                    "thread_id": tid_seed,
+                    "assistant_persisted": False,
+                    "assistant_message_id": None,
+                }
+
+            terminal_base = {
+                **base,
+                "thread_id": persisted.get("thread_id") or tid_seed,
+                "agent_id": "orkio",
+                "agent_name": "Orkio",
+                "final_speaker": "Orkio",
+            }
+            yield _metatron_sse("error", {
+                **terminal_base,
+                "code": code or "CHAT_STREAM_AO20E_HF1_TERMINAL",
+                "message": final_text,
+                "recoverable": True,
+                "terminal": True,
+            })
+            yield _metatron_sse("chunk", {
+                **terminal_base,
+                "delta": final_text,
+                "content": final_text,
+            })
+            yield _metatron_sse("agent_done", {
+                **terminal_base,
+                "done": True,
+                "message": "Erro encerrado com segurança.",
+            })
+            yield _metatron_sse("done", {
+                **terminal_base,
+                "done": True,
+                "assistant_persisted": bool(persisted.get("assistant_persisted")),
+                "assistant_message_id": persisted.get("assistant_message_id"),
+                "final_text": final_text,
+                "runtime_hints": {
+                    "routing": {
+                        "routing_source": routing_source,
+                        "execution_lifecycle": "terminal_error",
+                        "route_applied": True,
+                        "ao20bc_route_audit": route_plan,
+                        "requested_agent": route_plan.get("requested_agent"),
+                        "resolved_agent": route_plan.get("resolved_agent"),
+                        "route_family": route_plan.get("route_family"),
+                        "blocked_routes": route_plan.get("blocked_routes") or [],
+                    }
+                },
+            })
+
         # AO20E_ORCHESTRATION_FASTPATH_GUARD
         # Explicit orchestration audits with Orion + Chris must not be intercepted by
         # INTERNAL_WARROOM_GOVERNED_SURGICAL_V2 or generic proposal/governance fast-paths.
@@ -31798,12 +31914,18 @@ async def chat_stream(
                 async for ev in _emit_result_payload(payload, routing_source="stream_internal_warroom_governed_execution_v1"):
                     yield ev
                 return
-            except Exception:
+            except Exception as exc:
                 try:
                     logger.exception("CHAT_STREAM_INTERNAL_WARROOM_GOVERNED_EXECUTION_FAILED trace_id=%s", trace_id)
                 except Exception:
                     pass
-                # Se o fast-path falhar, seguimos para os demais trilhos protegidos.
+                async for ev in _emit_terminal_stream_error(
+                    "CHAT_STREAM_INTERNAL_WARROOM_GOVERNED_EXECUTION_FAILED",
+                    "Falha controlada no trilho governado interno. O stream foi encerrado com segurança; tente novamente pelo pedido de orquestração ou revise o patch mínimo.",
+                    routing_source="stream_internal_warroom_governed_execution_v1_terminal_guard",
+                ):
+                    yield ev
+                return
 
 
 
