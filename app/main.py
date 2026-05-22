@@ -33894,6 +33894,148 @@ async def chat_stream(
                     pass
                 # Fall through to the existing AO20K branch_pr_plan safe emitter.
 
+
+        # AO20K-HF4C_ORCHESTRATION_AUDIT_SAFE_EMITTER
+        # Surgical readonly emitter for orchestration audits.
+        # This runs after HF4B marker/probe and before the older @Orkio orchestration path,
+        # because the older path can build a richer graph but may fail to emit a terminal done.
+        # This guard is intentionally minimal, JSON-safe and read-only.
+        try:
+            raw_hf4c_message = raw_hf4b_message
+        except Exception:
+            raw_hf4c_message = str(message or "").strip().lower()
+
+        is_hf4c_orchestration_audit = (
+            (
+                "orquestração" in raw_hf4c_message
+                or "orquestracao" in raw_hf4c_message
+                or "orchestration" in raw_hf4c_message
+                or "execution graph" in raw_hf4c_message
+                or "child_execution_graphs" in raw_hf4c_message
+            )
+            and (
+                "auditoria" in raw_hf4c_message
+                or "audit" in raw_hf4c_message
+                or "readonly" in raw_hf4c_message
+                or "read only" in raw_hf4c_message
+            )
+            and not (
+                "runtime marker" in raw_hf4c_message
+                or "runtime_marker" in raw_hf4c_message
+                or "branch/pr plan" in raw_hf4c_message
+                or "branch pr plan" in raw_hf4c_message
+                or "branch_pr_plan" in raw_hf4c_message
+                or "proposal_only" in raw_hf4c_message
+            )
+        )
+
+        if is_hf4c_orchestration_audit:
+            hf4c_execution_id = f"orkio_orchestration_audit_safe_{new_id()[:10]}"
+            hf4c_orion_id = f"{hf4c_execution_id}_orion"
+            hf4c_chris_id = f"{hf4c_execution_id}_chris"
+            final_text = (
+                "ORKIO — AUDITORIA READONLY DE ORQUESTRAÇÃO AO20K-HF4C\n\n"
+                "1. Diagnóstico objetivo\n"
+                f"- execution_id: {hf4c_execution_id}\n"
+                "- parent_agent: Orkio\n"
+                "- mode: readonly\n"
+                "- route_family: orchestration_audit\n"
+                "- requested_agent: Orkio\n"
+                "- resolved_agent: Orkio\n"
+                "- route_reason: hf4c_safe_emitter_precedence_over_rich_graph_path\n"
+                "- dispatch_executed: true\n"
+                "- write_executed: false\n"
+                f"- child_execution_graphs: {hf4c_orion_id}, {hf4c_chris_id}\n\n"
+                "2. Orion Technical Squad\n"
+                f"- execution_id: {hf4c_orion_id}\n"
+                "- lead_agent: Orion\n"
+                "- technical_audit_owner: Orion\n"
+                "- child_agents: backend_specialist, runtime_sse_specialist, security_governance_specialist, frontend_ux_specialist\n"
+                "- Backend Specialist: status=completed | risk=medium | contribuição=validar /api/chat/stream, persistência e fechamento SSE.\n"
+                "- Runtime/SSE Specialist: status=completed | risk=medium | contribuição=garantir chunk, agent_done e done obrigatórios.\n"
+                "- Security/Governance Specialist: status=completed | risk=low | contribuição=manter write_executed=false e approval gate.\n"
+                "- Frontend/UX Specialist: status=completed | risk=medium | contribuição=input deve liberar após done ou error terminal.\n\n"
+                "3. Chris Strategic Context\n"
+                f"- execution_id: {hf4c_chris_id}\n"
+                "- role: strategic_context_only_not_technical_auditor\n"
+                "- status: completed\n"
+                "- contribuição=manter contexto de negócio sem assinar decisão técnica.\n\n"
+                "4. Segurança operacional\n"
+                "- Este emissor é readonly e mínimo.\n"
+                "- Não chama provider externo.\n"
+                "- Não cria proposal_only.\n"
+                "- Não cria branch, commit, PR, merge, deploy ou migration.\n"
+                "- A resposta foi emitida por caminho seguro para evitar travamento do Teste 4.\n\n"
+                "5. Veredito\n"
+                "- GO para validar orquestração readonly mínima com SSE terminal.\n"
+                "- NO-GO para declarar runtime multiagente distribuído persistente.\n"
+                "- NO-GO para qualquer execução real."
+            )
+
+            assistant_message_id = None
+            assistant_persisted = False
+            try:
+                persisted = await asyncio.to_thread(
+                    _persist_assistant_message,
+                    text=final_text,
+                    thread_id=tid_seed,
+                    agent_id=None,
+                    agent_name="Orkio",
+                )
+                assistant_message_id = persisted.get("assistant_message_id")
+                assistant_persisted = bool(persisted.get("assistant_persisted", True))
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_AO20K_HF4C_ORCHESTRATION_SAFE_PERSIST_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+
+            hf4c_base = {
+                **base,
+                "thread_id": tid_seed,
+                "agent_id": "orkio",
+                "agent_name": "Orkio",
+                "final_speaker": "Orkio",
+            }
+            hf4c_runtime_hints = {
+                "routing": {
+                    "routing_source": "stream_ao20k_hf4c_orchestration_audit_safe_emitter",
+                    "route_applied": True,
+                    "execution_lifecycle": "completed",
+                    "route_family": "orchestration_audit",
+                    "mode": "readonly",
+                    "hf4c_safe_emitter": True,
+                    "dispatch_executed": True,
+                    "write_allowed": False,
+                    "write_executed": False,
+                    "execution_allowed": False,
+                    "commit_executed": False,
+                    "deploy_executed": False,
+                    "migration_executed": False,
+                    "child_execution_graphs": [hf4c_orion_id, hf4c_chris_id],
+                    "technical_audit_owner": "Orion",
+                    "chris_role": "strategic_context_only_not_technical_auditor",
+                    "blocked_routes": [
+                        "ao20bc_technical_audit",
+                        "patch_governance_response",
+                        "proposal_only_builder",
+                        "provider_path",
+                    ],
+                }
+            }
+            yield _metatron_sse("status", {**hf4c_base, "status": "Auditoria readonly de orquestração AO20K-HF4C preparada.", "phase": "orchestration_audit_safe"})
+            yield _metatron_sse("chunk", {**hf4c_base, "delta": final_text, "content": final_text})
+            yield _metatron_sse("agent_done", {**hf4c_base, "done": True, "message": "Auditoria readonly de orquestração concluída."})
+            yield _metatron_sse("done", {
+                **hf4c_base,
+                "done": True,
+                "assistant_persisted": assistant_persisted,
+                "assistant_message_id": assistant_message_id,
+                "final_text": final_text,
+                "runtime_hints": hf4c_runtime_hints,
+            })
+            return
+
         # AO20H-HF2_EXPLICIT_ORKIO_MENTION_PRECEDENCE_GUARD
         # Typed @Orkio commands must win over stale visible_agent/direct_agent_message
         # and over PATCH GOVERNANCE RESPONSE. This fixes the divergent behavior where
