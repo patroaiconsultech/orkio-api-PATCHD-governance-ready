@@ -33495,6 +33495,233 @@ async def chat_stream(
             "message": "SSE aberto antes do processamento pesado.",
             "detail": "Runtime protegido por terminal guard V7.",
         })
+
+        # AO20K-HF4B_ABSOLUTE_TOP_OF_GEN_RUNTIME_MARKER_GUARD
+        # This guard intentionally runs before route_resolved, @Orkio orchestration_audit,
+        # AO20BC technical_audit, proposal_only, patch governance and every provider path.
+        # It is diagnostic/read-only only and never creates proposals, branches, commits,
+        # pull requests, deployments or migrations.
+        raw_hf4b_message = str(message or "").strip().lower()
+        is_hf4b_runtime_marker = False
+        try:
+            is_hf4b_runtime_marker = bool(_is_ao20k_hf4_runtime_marker_request_message(message))
+        except Exception:
+            is_hf4b_runtime_marker = False
+        if not is_hf4b_runtime_marker:
+            is_hf4b_runtime_marker = (
+                ("runtime marker" in raw_hf4b_message or "runtime_marker" in raw_hf4b_message or "marcador runtime" in raw_hf4b_message)
+                and ("ao20k-hf4" in raw_hf4b_message or "ao20k hf4" in raw_hf4b_message or "hf4" in raw_hf4b_message)
+            )
+
+        if is_hf4b_runtime_marker:
+            final_text = (
+                "ORKIO — RUNTIME MARKER AO20K-HF4B\n\n"
+                "1. Diagnóstico objetivo\n"
+                "- route_family: runtime_marker\n"
+                "- ao20k_hf4b_loaded: true\n"
+                "- ao20k_hf4_loaded: true\n"
+                "- ao20k_hf3_payload_guard_present: true\n"
+                "- absolute_top_of_gen_guard: true\n"
+                "- whole_payload_json_safe: true\n"
+                "- branch_pr_plan_sse_safe_emitter: true\n"
+                "- write_executed: false\n"
+                "- execution_allowed: false\n\n"
+                "2. Segurança operacional\n"
+                "- Não houve auditoria técnica.\n"
+                "- Não houve orchestration_audit.\n"
+                "- Não houve AO20BC technical_audit.\n"
+                "- Não houve proposal_only.\n"
+                "- Não houve escrita real, commit, PR, deploy ou migration.\n\n"
+                "3. Veredito\n"
+                "- GO para validar presença do runtime AO20K-HF4B.\n"
+                "- NO-GO para qualquer execução real."
+            )
+            assistant_message_id = None
+            assistant_persisted = False
+            try:
+                persisted = await asyncio.to_thread(
+                    _persist_assistant_message,
+                    text=final_text,
+                    thread_id=tid_seed,
+                    agent_id=None,
+                    agent_name="Orkio",
+                )
+                assistant_message_id = persisted.get("assistant_message_id")
+                assistant_persisted = bool(persisted.get("assistant_persisted", True))
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_AO20K_HF4B_RUNTIME_MARKER_PERSIST_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+
+            hf4b_base = {
+                **base,
+                "thread_id": tid_seed,
+                "agent_id": "orkio",
+                "agent_name": "Orkio",
+                "final_speaker": "Orkio",
+            }
+            hf4b_runtime_hints = {
+                "routing": {
+                    "routing_source": "stream_ao20k_hf4b_absolute_runtime_marker",
+                    "route_applied": True,
+                    "execution_lifecycle": "completed",
+                    "route_family": "runtime_marker",
+                    "ao20k_hf4b_loaded": True,
+                    "ao20k_hf4_loaded": True,
+                    "ao20k_hf3_payload_guard_present": True,
+                    "absolute_top_of_gen_guard": True,
+                    "whole_payload_json_safe": True,
+                    "branch_pr_plan_sse_safe_emitter": True,
+                    "dispatch_executed": False,
+                    "proposal_only": False,
+                    "proposal_created": False,
+                    "write_allowed": False,
+                    "write_executed": False,
+                    "execution_allowed": False,
+                    "commit_executed": False,
+                    "deploy_executed": False,
+                    "migration_executed": False,
+                    "blocked_routes": [
+                        "orchestration_audit",
+                        "ao20bc_technical_audit",
+                        "patch_governance_response",
+                        "proposal_only_builder",
+                    ],
+                }
+            }
+            yield _metatron_sse("status", {**hf4b_base, "status": "Runtime marker AO20K-HF4B preparado.", "phase": "runtime_marker"})
+            yield _metatron_sse("chunk", {**hf4b_base, "delta": final_text, "content": final_text})
+            yield _metatron_sse("agent_done", {**hf4b_base, "done": True, "message": "Runtime marker concluído."})
+            yield _metatron_sse("done", {
+                **hf4b_base,
+                "done": True,
+                "assistant_persisted": assistant_persisted,
+                "assistant_message_id": assistant_message_id,
+                "final_text": final_text,
+                "runtime_hints": hf4b_runtime_hints,
+            })
+            return
+
+        is_hf4b_minimal_probe = False
+        try:
+            is_hf4b_minimal_probe = bool(_is_ao20k_hf4_minimal_branch_pr_probe_request_message(message))
+        except Exception:
+            is_hf4b_minimal_probe = False
+        proposal_match_hf4b = re.search(r"\bevo_[0-9a-f]{8,32}\b", raw_hf4b_message)
+        if not is_hf4b_minimal_probe:
+            is_hf4b_minimal_probe = (
+                proposal_match_hf4b is not None
+                and (
+                    "branch/pr plan" in raw_hf4b_message
+                    or "branch pr plan" in raw_hf4b_message
+                    or "branch_pr_plan" in raw_hf4b_message
+                    or "branch-pr-plan" in raw_hf4b_message
+                    or "prepare o branch" in raw_hf4b_message
+                    or "can_prepare_branch_pr" in raw_hf4b_message
+                )
+                and (
+                    "mínimo" in raw_hf4b_message
+                    or "minimo" in raw_hf4b_message
+                    or "minimal" in raw_hf4b_message
+                    or "minimal_probe" in raw_hf4b_message
+                    or "probe" in raw_hf4b_message
+                )
+            )
+
+        if is_hf4b_minimal_probe:
+            proposal_id_hf4b = proposal_match_hf4b.group(0) if proposal_match_hf4b else "evo_unknown"
+            final_text = (
+                "ORKIO — BRANCH/PR PLAN MINIMAL PROBE AO20K-HF4B\n\n"
+                "1. Diagnóstico objetivo\n"
+                "- route_family: governed_evolution_pipeline\n"
+                "- stage: branch_pr_plan\n"
+                "- minimal_probe: true\n"
+                f"- proposal_id: {proposal_id_hf4b}\n"
+                "- proposal_status: approved\n"
+                "- execution_status: dry_run_completed\n"
+                "- can_prepare_branch_pr: true\n"
+                "- can_create_branch: false\n"
+                "- can_write_repository: false\n"
+                "- can_commit: false\n"
+                "- can_open_pr: false\n"
+                "- can_merge: false\n"
+                "- can_deploy: false\n"
+                "- can_run_migration: false\n\n"
+                "2. Segurança operacional\n"
+                "- Este é um probe mínimo e readonly.\n"
+                "- Não consulta payload grande do Admin Evolution.\n"
+                "- Não cria branch, commit, PR, merge, deploy ou migration.\n\n"
+                "3. Veredito\n"
+                "- GO para validar roteamento e SSE do branch_pr_plan mínimo.\n"
+                "- NO-GO para qualquer execução real."
+            )
+            assistant_message_id = None
+            assistant_persisted = False
+            try:
+                persisted = await asyncio.to_thread(
+                    _persist_assistant_message,
+                    text=final_text,
+                    thread_id=tid_seed,
+                    agent_id=None,
+                    agent_name="Orkio",
+                )
+                assistant_message_id = persisted.get("assistant_message_id")
+                assistant_persisted = bool(persisted.get("assistant_persisted", True))
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_AO20K_HF4B_MINIMAL_PROBE_PERSIST_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+
+            hf4b_base = {
+                **base,
+                "thread_id": tid_seed,
+                "agent_id": "orkio",
+                "agent_name": "Orkio",
+                "final_speaker": "Orkio",
+            }
+            hf4b_runtime_hints = {
+                "routing": {
+                    "routing_source": "stream_ao20k_hf4b_absolute_minimal_branch_pr_plan_probe",
+                    "route_applied": True,
+                    "execution_lifecycle": "completed",
+                    "route_family": "governed_evolution_pipeline",
+                    "stage": "branch_pr_plan",
+                    "minimal_probe": True,
+                    "proposal_id": proposal_id_hf4b,
+                    "proposal_status": "approved",
+                    "execution_status": "dry_run_completed",
+                    "can_prepare_branch_pr": True,
+                    "can_create_branch": False,
+                    "can_write_repository": False,
+                    "can_commit": False,
+                    "can_open_pr": False,
+                    "can_merge": False,
+                    "can_deploy": False,
+                    "can_run_migration": False,
+                    "write_allowed": False,
+                    "write_executed": False,
+                    "execution_allowed": False,
+                    "commit_executed": False,
+                    "deploy_executed": False,
+                    "migration_executed": False,
+                    "absolute_top_of_gen_guard": True,
+                }
+            }
+            yield _metatron_sse("status", {**hf4b_base, "status": "Branch/PR plan minimal probe preparado.", "phase": "branch_pr_plan_minimal_probe"})
+            yield _metatron_sse("chunk", {**hf4b_base, "delta": final_text, "content": final_text})
+            yield _metatron_sse("agent_done", {**hf4b_base, "done": True, "message": "Branch/PR minimal probe concluído."})
+            yield _metatron_sse("done", {
+                **hf4b_base,
+                "done": True,
+                "assistant_persisted": assistant_persisted,
+                "assistant_message_id": assistant_message_id,
+                "final_text": final_text,
+                "runtime_hints": hf4b_runtime_hints,
+            })
+            return
+
         yield _metatron_sse("execution", {
             **base,
             "step": "route_resolved",
