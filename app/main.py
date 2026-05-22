@@ -6694,6 +6694,18 @@ def _ao20bc_norm(text: Any) -> str:
 
 
 def _ao20bc_requested_agent(text: Any, explicit: Optional[str] = None) -> Optional[str]:
+    raw = _ao20bc_norm(text)
+
+    # AO20H-HF2 — typed @mention wins over stale UI visible_agent/selected_agent.
+    # The frontend can legitimately keep Chris/Orion selected while the user types
+    # @Orkio. The textual command must be the source of truth.
+    if re.search(r"(^|\s)@orkio\b", raw):
+        return "Orkio"
+    if re.search(r"(^|\s)@orion\b", raw):
+        return "Orion"
+    if re.search(r"(^|\s)@(?:chris|cris)\b", raw):
+        return "Chris"
+
     explicit_norm = _ao20bc_norm(explicit)
     if explicit_norm:
         if "orion" in explicit_norm:
@@ -6703,13 +6715,13 @@ def _ao20bc_requested_agent(text: Any, explicit: Optional[str] = None) -> Option
         if "orkio" in explicit_norm:
             return "Orkio"
 
-    raw = _ao20bc_norm(text)
-    # Explicit @mention has absolute precedence over semantic/template routes.
-    if re.search(r"(^|\s)@?orkio\b", raw):
+    # Natural-language mentions remain useful, but they must be weaker than
+    # explicit UI target and typed @mentions.
+    if re.search(r"(^|\s)orkio\b", raw):
         return "Orkio"
-    if re.search(r"(^|\s)@?orion\b", raw):
+    if re.search(r"(^|\s)orion\b", raw):
         return "Orion"
-    if re.search(r"(^|\s)@?(chris|cris)\b", raw):
+    if re.search(r"(^|\s)(chris|cris)\b", raw):
         return "Chris"
     return None
 
@@ -6884,6 +6896,56 @@ def _ao20e_is_orchestration_audit_request(text: Any) -> bool:
     ]
     readonly_terms = ["readonly", "read only", "read-only", "auditoria", "auditar", "audit"]
     return any(t in raw for t in orchestration_terms) and any(t in raw for t in readonly_terms)
+
+
+def _ao20h_hf2_is_explicit_orkio_orchestration_request(text: Any) -> bool:
+    raw = _ao20bc_norm(text)
+    if not raw:
+        return False
+    if not re.search(r"(^|\s)@orkio\b", raw):
+        return False
+
+    readonly_terms = [
+        "readonly", "read only", "read-only",
+        "auditoria", "auditar", "audit",
+    ]
+    orchestration_terms = [
+        "orquestracao", "orquestrar", "orchestration",
+        "orion e chris", "orion + chris", "chris e orion",
+        "child_execution_graphs", "dispatch_executed", "write_executed",
+        "agentes lideres", "agentes líderes",
+        "squad", "squads", "multiagente", "multi agente",
+        "execution graph",
+    ]
+    return any(t in raw for t in readonly_terms) and any(t in raw for t in orchestration_terms)
+
+
+def _ao20h_hf2_orkio_orchestration_route(text: Any) -> Dict[str, Any]:
+    route = _ao20bc_resolve_route(text, requested_agent="Orkio", source="chat")
+    blocked = list(route.get("blocked_routes") or [])
+    blocked.extend([
+        "direct_agent_message",
+        "visible_agent_stale_override",
+        "chris_governance_response",
+        "patch_governance_response",
+        "proposal_only_builder",
+        "internal_warroom_governed_surgical_v2",
+        "chris_valuation",
+    ])
+
+    route.update({
+        "requested_agent": "Orkio",
+        "resolved_agent": "Orkio",
+        "route_family": "orchestration_audit",
+        "route_reason": "explicit_orkio_mention_precedence_over_visible_agent_and_governance",
+        "technical_scope": True,
+        "orchestration_scope": True,
+        "proposal_scope": False,
+        "valuation_scope": False,
+        "blocked_routes": list(dict.fromkeys([x for x in blocked if x])),
+        "ao20h_hf2_mention_lock": True,
+    })
+    return route
 
 
 def _ao20e_orchestration_audit_answer(text: Any, route: Dict[str, Any]) -> str:
@@ -31915,6 +31977,54 @@ async def chat_stream(
                 logger.info("CHAT_STREAM_DONE trace_id=%s thread_id=%s source=%s", trace_id, thread_id, routing_source)
             except Exception:
                 pass
+
+        # AO20H-HF2_EXPLICIT_ORKIO_MENTION_PRECEDENCE_GUARD
+        # Typed @Orkio commands must win over stale visible_agent/direct_agent_message
+        # and over PATCH GOVERNANCE RESPONSE. This fixes the divergent behavior where
+        # "Orkio, ..." worked but "@Orkio, ..." could be signed by Chris.
+        if _ao20h_hf2_is_explicit_orkio_orchestration_request(message):
+            try:
+                route_override = _ao20h_hf2_orkio_orchestration_route(message)
+                final_text = _ao20e_orchestration_audit_answer(message, route_override)
+                persisted = await asyncio.to_thread(
+                    _persist_assistant_message,
+                    text=final_text,
+                    thread_id=tid_seed,
+                    agent_id=None,
+                    agent_name="Orkio",
+                )
+                payload = {
+                    **persisted,
+                    "answer": final_text,
+                    "message": final_text,
+                    "final_text": final_text,
+                    "agent_id": None,
+                    "agent_name": "Orkio",
+                    "runtime_hints": {
+                        "routing": {
+                            "routing_source": "stream_ao20h_hf2_explicit_orkio_mention_guard",
+                            "route_applied": True,
+                            "execution_lifecycle": "completed",
+                            "ao20bc_route_audit": route_override,
+                            "route_family": "orchestration_audit",
+                            "requested_agent": "Orkio",
+                            "resolved_agent": "Orkio",
+                            "dispatch_executed": True,
+                            "write_executed": False,
+                            "child_execution_graphs": True,
+                            "blocked_routes": route_override.get("blocked_routes") or [],
+                        }
+                    },
+                }
+                async for ev in _emit_result_payload(payload, routing_source="stream_ao20h_hf2_explicit_orkio_mention_guard"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_AO20H_HF2_EXPLICIT_ORKIO_MENTION_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # Terminal SSE guard still protects the UI if this fast-path fails.
 
         # AO20E_ORCHESTRATION_FASTPATH_GUARD
         # Explicit orchestration audits with Orion + Chris must not be intercepted by
