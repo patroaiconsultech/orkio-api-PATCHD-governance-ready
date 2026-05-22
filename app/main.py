@@ -28324,7 +28324,28 @@ def governance_execute_approved_patch(
 # ================================
 
 def _metatron_sse(event: str, payload: Dict[str, Any]) -> str:
-    return f"event: {event}\ndata: {json.dumps(payload or {}, ensure_ascii=False)}\n\n"
+    """
+    AO20K-HF3 — Whole Payload JSON-Safe SSE Guard.
+
+    Never allow a non-serializable SSE payload to break the generator after
+    HTTP 200. This is intentionally generic and conservative: it preserves the
+    event name, converts nested payload values to JSON-safe primitives, and if
+    even that fails it emits a minimal terminal-safe payload instead of raising.
+    """
+    try:
+        safe_payload = _ao20k_hf2_json_safe(payload or {})
+        return f"event: {event}\ndata: {json.dumps(safe_payload or {}, ensure_ascii=False, default=str)}\n\n"
+    except Exception as exc:
+        try:
+            fallback_payload = {
+                "ok": False,
+                "sse_serialization_fallback": True,
+                "event": str(event or "message"),
+                "error": str(exc),
+            }
+            return f"event: {event}\ndata: {json.dumps(fallback_payload, ensure_ascii=False, default=str)}\n\n"
+        except Exception:
+            return f"event: {event}\ndata: {{}}\n\n"
 
 
 def _metatron_is_controlled_self_evolution_request(user_text: str) -> bool:
@@ -33214,13 +33235,43 @@ async def chat_stream(
             "label": "Router AO20BC resolvido",
             "message": "Precedência de @mention, escopo técnico e scope lock aplicada antes dos fast-paths.",
             "route_audit": route_plan,
-            "requested_agent": route_plan.get("requested_agent"),
-            "resolved_agent": route_plan.get("resolved_agent"),
-            "route_family": route_plan.get("route_family"),
-            "blocked_routes": route_plan.get("blocked_routes") or [],
+            "requested_agent": route_plan_safe.get("requested_agent"),
+            "resolved_agent": route_plan_safe.get("resolved_agent"),
+            "route_family": route_plan_safe.get("route_family"),
+            "blocked_routes": route_plan_safe.get("blocked_routes") or [],
         })
 
         async def _emit_result_payload(payload: Dict[str, Any], *, routing_source: str = "stream_runtime_v3"):
+            # AO20K-HF3 — sanitize the whole payload before any SSE event is built.
+            # HF2 only sanitized runtime_hints; route_plan/payload-level fields could still
+            # carry non-serializable values and break json.dumps inside the generator.
+            if not isinstance(payload, dict):
+                payload = {
+                    "answer": str(payload or ""),
+                    "message": str(payload or ""),
+                    "final_text": str(payload or ""),
+                    "agent_id": "orkio",
+                    "agent_name": "Orkio",
+                    "runtime_hints": {},
+                }
+            try:
+                payload = _ao20k_hf2_json_safe(payload)
+            except Exception:
+                payload = {
+                    "answer": "O runtime concluiu com fallback seguro de serialização.",
+                    "message": "O runtime concluiu com fallback seguro de serialização.",
+                    "final_text": "O runtime concluiu com fallback seguro de serialização.",
+                    "agent_id": "orkio",
+                    "agent_name": "Orkio",
+                    "runtime_hints": {
+                        "routing": {
+                            "routing_source": routing_source,
+                            "serialization_fallback": True,
+                        }
+                    },
+                }
+            route_plan_safe = _ao20k_hf2_json_safe(route_plan if isinstance(route_plan, dict) else {})
+
             final_text = str(
                 payload.get("answer")
                 or payload.get("message")
@@ -33239,14 +33290,14 @@ async def chat_stream(
                 "routing_source": routing_hints.get("routing_source") or routing_source,
                 "route_applied": True,
                 "execution_lifecycle": routing_hints.get("execution_lifecycle") or "completed",
-                "ao20bc_route_audit": route_plan,
+                "ao20bc_route_audit": route_plan_safe,
                 "requested_agent": route_plan.get("requested_agent"),
                 "resolved_agent": route_plan.get("resolved_agent"),
                 "route_family": route_plan.get("route_family"),
-                "route_reason": route_plan.get("route_reason"),
+                "route_reason": route_plan_safe.get("route_reason"),
                 "blocked_routes": route_plan.get("blocked_routes") or [],
-                "requested_patch_id": route_plan.get("requested_patch_id"),
-                "generated_patch_id": route_plan.get("generated_patch_id"),
+                "requested_patch_id": route_plan_safe.get("requested_patch_id"),
+                "generated_patch_id": route_plan_safe.get("generated_patch_id"),
             }
             runtime_hints["routing"] = routing_hints
 
@@ -33263,7 +33314,7 @@ async def chat_stream(
                         "route_applied": True,
                         "execution_lifecycle": "completed_with_serialization_fallback",
                         "ao20k_hf2_serialization_fallback": True,
-                        "ao20bc_route_audit": route_plan,
+                        "ao20bc_route_audit": route_plan_safe,
                     }
                 }
 
@@ -33458,8 +33509,9 @@ async def chat_stream(
                             }
                         },
                     }
-                payload["runtime_hints"] = _ao20k_hf2_json_safe(payload.get("runtime_hints") or {})
-                async for ev in _emit_result_payload(payload, routing_source="stream_ao20k_hf2_branch_pr_plan_sse_safe_emitter"):
+                # AO20K-HF3 — sanitize the whole payload, not only runtime_hints.
+                payload = _ao20k_hf2_json_safe(payload)
+                async for ev in _emit_result_payload(payload, routing_source="stream_ao20k_hf3_branch_pr_plan_whole_payload_safe_emitter"):
                     yield ev
                 return
             except Exception as exc:
@@ -33542,7 +33594,8 @@ async def chat_stream(
                         }
                     }),
                 }
-                async for ev in _emit_result_payload(fallback_payload, routing_source="stream_ao20k_hf2_branch_pr_plan_sse_safe_fallback"):
+                fallback_payload = _ao20k_hf2_json_safe(fallback_payload)
+                async for ev in _emit_result_payload(fallback_payload, routing_source="stream_ao20k_hf3_branch_pr_plan_sse_safe_fallback"):
                     yield ev
                 return
 
