@@ -29824,6 +29824,43 @@ async def chat_stream(
         if not normalized:
             return False
 
+        # AO20H-HF3_ORION_SPECIALIST_AUDIT_BEATS_V7_FRONTEND_GUARD:
+        # @Orion + auditoria readonly/bugs com negative constraints é uma
+        # auditoria dos especialistas, não diagnóstico frontend V7.
+        explicit_orion_mention = bool(re.search(r"@\s*orion\b", normalized)) or normalized.startswith("orion ")
+        readonly_or_negative = any(marker in normalized for marker in [
+            "readonly",
+            "read only",
+            "read-only",
+            "auditoria readonly",
+            "nao criar proposta",
+            "não criar proposta",
+            "nao gerar proposal_only",
+            "não gerar proposal_only",
+            "nao criar proposal_id",
+            "não criar proposal_id",
+            "nao criar pending_approval",
+            "não criar pending_approval",
+            "proposal_created: false",
+            "write_executed: false",
+        ])
+        audit_or_bug_scope = any(marker in normalized for marker in [
+            "auditoria",
+            "audite",
+            "bugs",
+            "bug",
+            "pontos fracos",
+            "plataforma",
+            "orquestração",
+            "orquestracao",
+            "realtime",
+            "router",
+            "sse",
+            "guard",
+        ])
+        if explicit_orion_mention and readonly_or_negative and audit_or_bug_scope:
+            return False
+
         if _is_self_evaluation_governed_readonly_request(text):
             return False
 
@@ -31051,6 +31088,30 @@ async def chat_stream(
             "sem proposal_only",
         ])
 
+        # AO20H-HF3: @Orion direto + auditoria readonly de bugs/plataforma
+        # deve acionar os especialistas mesmo sem a palavra "especialistas".
+        explicit_orion_direct = (
+            "@orion" in raw
+            or raw.startswith("orion ")
+            or " orion " in f" {raw} "
+        )
+        direct_orion_readonly_bug_audit = (
+            explicit_orion_direct
+            and has_readonly_scope
+            and has_audit_scope
+            and (
+                explicit_proposal_block
+                or "bugs" in raw
+                or "bug" in raw
+                or "pontos fracos" in raw
+                or "plataforma" in raw
+                or "write_executed: false" in raw
+                or "proposal_created: false" in raw
+            )
+        )
+        if direct_orion_readonly_bug_audit:
+            return True
+
         return bool(has_orion_or_orkio and has_specialist_scope and has_audit_scope and (has_readonly_scope or explicit_proposal_block))
 
 
@@ -31069,7 +31130,7 @@ async def chat_stream(
             "- proposal_only: false\n"
             "- write_executed: false\n"
             "- dispatch_executed: true\n"
-            "- blocked_routes: orion_proposal_builder, internal_warroom_governed_surgical_v2, chris_valuation\n"
+            "- blocked_routes: orion_proposal_builder, governed_audit_v7_frontend_readonly, internal_warroom_governed_surgical_v2, chris_valuation\n"
             "- Veredito inicial: auditoria readonly dos especialistas ativada sem proposta governada.\n\n"
             "2. Estado atual confirmado\n"
             "- Orquestração por texto funciona em trace lite quando o pedido é explicitamente orchestration_audit.\n"
