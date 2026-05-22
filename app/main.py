@@ -13591,10 +13591,105 @@ def _extract_patch_governance_target_functions(user_text: str) -> List[str]:
         found.append(str(m).strip())
     return _dedupe_nonempty_strs(found)
 
+
+def _is_ao20k_branch_pr_plan_readonly_request_message(user_text: str) -> bool:
+    """
+    AO20K-HF1 — Branch/PR Plan Beats Patch Governance Wrapper.
+
+    Branch/PR plan is a read-only governance contract after an approved dry-run.
+    It must not be clamped into generic PATCH GOVERNANCE RESPONSE / proposal_only
+    just because the text contains "branch", "PR", "commit" or "pull request".
+
+    This matcher is intentionally narrow: it requires an explicit Branch/PR plan
+    intent plus a governed proposal/dry-run context or explicit read-only blockers.
+    """
+    low = str(user_text or "").strip().lower()
+    if not low:
+        return False
+
+    branch_plan_markers = (
+        "branch/pr plan",
+        "branch pr plan",
+        "branch_pr_plan",
+        "branch-pr-plan",
+        "branch/pr runner",
+        "branch pr runner",
+        "branch_pr_runner_plan",
+        "branch_pr_runner_plan_readonly",
+        "plano de branch/pr",
+        "plano branch/pr",
+        "plano de branch",
+        "plano de pr",
+        "plano de pull request",
+        "prepare o branch/pr",
+        "preparar branch/pr",
+        "prepare o branch",
+        "prepare o pr",
+        "preparar plano de branch",
+        "preparar plano branch",
+        "contrato de branch",
+        "contrato branch",
+        "ao-17a",
+        "ao17a",
+        "can_prepare_branch_pr",
+    )
+    if not any(marker in low for marker in branch_plan_markers):
+        return False
+
+    has_proposal_id = bool(re.search(r"\bevo_[0-9a-f]{8,32}\b", low))
+    has_completed_dry_run_context = any(marker in low for marker in (
+        "dry_run_completed",
+        "dry-run concluído",
+        "dry run concluído",
+        "dry-run concluido",
+        "dry run concluido",
+        "execution_status: dry_run_completed",
+        "proposal_status: approved",
+        "status: approved",
+    ))
+    has_readonly_contract = any(marker in low for marker in (
+        "readonly",
+        "read-only",
+        "governado",
+        "governada",
+        "sem escrita",
+        "sem escrita real",
+        "sem branch",
+        "sem commit",
+        "sem pull request",
+        "sem pr",
+        "não criar branch",
+        "nao criar branch",
+        "não escrever",
+        "nao escrever",
+        "não fazer commit",
+        "nao fazer commit",
+        "não abrir pr",
+        "nao abrir pr",
+        "can_create_branch: false",
+        "can_write_repository: false",
+        "can_commit: false",
+        "can_open_pr: false",
+        "can_merge: false",
+        "can_deploy: false",
+        "can_run_migration: false",
+    ))
+
+    return bool(has_proposal_id or has_completed_dry_run_context or has_readonly_contract)
+
+
 def _is_patch_governance_request_message(user_text: str) -> bool:
     low = str(user_text or "").strip().lower()
     if not low:
         return False
+    # AO20K-HF1: Branch/PR plan readonly is a governance contract query,
+    # not a new patch/proposal request. Do not let generic patch governance
+    # capture it because of words like branch, PR, commit or pull request.
+    try:
+        if _is_ao20k_branch_pr_plan_readonly_request_message(user_text):
+            return False
+    except Exception:
+        pass
     intent_markers = (
         "patch",
         "diff",
@@ -14045,6 +14140,17 @@ def _clamp_patch_governance_response(
     governance_ctx: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     raw_text = str(text_value or "")
+    # AO20K-HF1: never wrap a successful Branch/PR plan readonly payload into
+    # PATCH GOVERNANCE RESPONSE. The payload itself is the governed contract.
+    try:
+        if _is_ao20k_branch_pr_plan_readonly_request_message(user_text):
+            return {
+                "text": raw_text,
+                "governance": dict(runtime_result or {}),
+                "applied": False,
+            }
+    except Exception:
+        pass
     if not _is_patch_governance_request_message(user_text):
         return {
             "text": raw_text,
