@@ -6867,88 +6867,6 @@ def _ao20bc_router_audit_answer(text: Any, route: Dict[str, Any]) -> str:
     )
 
 
-# AO20E — Orchestration Fast-Path Guard
-# This stays lightweight: it renders an auditable orchestration graph without
-# creating migrations or claiming distributed runtime execution.
-def _ao20e_is_orchestration_audit_request(text: Any) -> bool:
-    raw = _ao20bc_norm(text)
-    if not raw:
-        return False
-    orchestration_terms = [
-        "orquestracao", "orquestrar", "orchestration",
-        "orion e chris", "orion + chris", "chris e orion",
-        "agentes lideres", "agentes líderes",
-        "child_execution_graphs", "dispatch_executed", "write_executed",
-        "squad", "squads", "subagentes", "multiagente", "multi agente",
-        "execution graph", "merge final",
-    ]
-    readonly_terms = ["readonly", "read only", "read-only", "auditoria", "auditar", "audit"]
-    return any(t in raw for t in orchestration_terms) and any(t in raw for t in readonly_terms)
-
-
-def _ao20e_orchestration_audit_answer(text: Any, route: Dict[str, Any]) -> str:
-    execution_id = f"orkio_orchestration_audit_{new_id()[:10]}"
-    orion_execution_id = f"{execution_id}_orion"
-    chris_execution_id = f"{execution_id}_chris"
-    blocked = ", ".join(route.get("blocked_routes") or []) or "internal_warroom_governed_surgical_v2, chris_valuation_when_not_requested"
-    return (
-        "ORKIO — AUDITORIA EFETIVA DE ORQUESTRAÇÃO REAL\n\n"
-        "1. Execution graph Orkio\n"
-        f"- execution_id: {execution_id}\n"
-        "- parent_agent: Orkio\n"
-        "- mode: readonly\n"
-        "- route_family: orchestration_audit\n"
-        f"- requested_agent: {route.get('requested_agent') or 'Orkio'}\n"
-        "- resolved_agent: Orkio\n"
-        f"- route_reason: {route.get('route_reason') or 'orchestration_audit_scope'}\n"
-        f"- blocked_routes: {blocked}\n"
-        "- dispatch_executed: true\n"
-        "- write_executed: false\n"
-        f"- child_execution_graphs: {orion_execution_id}, {chris_execution_id}\n\n"
-        "2. Orion Technical Squad\n"
-        f"- execution_id: {orion_execution_id}\n"
-        "- child_agents: backend_specialist, runtime_sse_specialist, realtime_voice_specialist, security_governance_specialist, frontend_ux_specialist\n"
-        "- Backend Specialist: status=completed | risk=medium | contribuição=validar /api/chat/stream, /api/realtime/guard, /api/realtime/events:batch e persistência de mensagens.\n"
-        "- Runtime/SSE Specialist: status=completed | risk=medium | contribuição=manter eventos agent_started, agent_chunk, agent_done, orchestrator_merge e done como contrato mínimo.\n"
-        "- Realtime/Voice Specialist: status=completed | risk=high | contribuição=AO20E deve transformar resposta escrita de realtime em fala automática com state machine audível.\n"
-        "- Security/Governance Specialist: status=completed | risk=low | contribuição=write_executed=false e approval gate permanecem obrigatórios.\n"
-        "- Frontend/UX Specialist: status=completed | risk=medium | contribuição=exibir estado listening/transcribing/thinking/speaking/error sem bloquear input.\n\n"
-        "3. Chris Strategic Squad\n"
-        f"- execution_id: {chris_execution_id}\n"
-        "- child_agents: finance_strategist, growth_strategist, product_strategist, ops_manager, legal_guardian\n"
-        "- Finance Strategist: status=completed | risk=medium | contribuição=valuation deve permanecer estimativa estratégica, não laudo formal.\n"
-        "- Growth Strategist: status=completed | risk=low | contribuição=converter demos controladas em evidências de demanda e retenção.\n"
-        "- Product Strategist: status=completed | risk=medium | contribuição=priorizar confiabilidade de voz/orquestração antes de novas camadas premium.\n"
-        "- Ops Manager: status=completed | risk=medium | contribuição=padronizar smoke tests para Orkio, Orion, Chris e realtime.\n"
-        "- Legal Guardian: status=completed | risk=low | contribuição=manter disclaimers e bloqueio de escrita real sem aprovação humana.\n\n"
-        "4. Evidência de dispatch real\n"
-        "- dispatch_executed: true\n"
-        "- write_executed: false\n"
-        "- child_execution_graphs foram renderizados separadamente para Orion e Chris.\n"
-        "- Este AO20E mantém honestidade operacional: graph atual é observável/estruturado, ainda não é runtime distribuído persistente com migrations.\n\n"
-        "5. Achados técnicos\n"
-        "- Router AO20BC corrigiu parte do scope lock: AO20A não deve voltar a AO16C.\n"
-        "- Lacuna atual: voice output bridge/state machine para que respostas backend/realtime sejam faladas.\n"
-        "- Fast-path INTERNAL_WARROOM_GOVERNED_SURGICAL_V2 deve ficar bloqueado para pedidos de orchestration_audit explícitos.\n\n"
-        "6. Achados estratégicos\n"
-        "- A plataforma está apta a demos controladas quando texto, router e Chris/Orion são testados separadamente.\n"
-        "- Ainda não deve ser vendida como runtime multiagente distribuído enterprise completo sem AO20F persistente.\n\n"
-        "7. Falhas encontradas\n"
-        "- Realtime respondeu por escrito, mas não falou automaticamente.\n"
-        "- Orchestration_audit ainda precisava preceder o fast-path de war room interno.\n\n"
-        "8. Riscos\n"
-        "- Alto: voice mode sem estado audível gera percepção de produto incompleto.\n"
-        "- Médio: orquestração textual pode ser confundida com runtime distribuído real.\n"
-        "- Baixo: readonly sem escrita real preserva governança.\n\n"
-        "9. Próximos patches recomendados\n"
-        "- AO20E: Voice Mode State Machine + Orchestration Fast-Path Guard.\n"
-        "- Depois: AO20F — True Execution Graph Runtime com persistência e telemetria por nó.\n\n"
-        "10. Veredito GO/NO-GO\n"
-        "- GO para demos controladas de orquestração readonly com trace lite.\n"
-        "- NO-GO para declarar runtime distribuído enterprise completo ou realtime final antes do AO20E validado."
-    )
-
-
 def _guidance_for_action(action_type: str) -> str:
     mapping = {
         "contact_requested": "Guide the user toward a direct follow-up path and confirm the best contact channel.",
@@ -28922,14 +28840,6 @@ async def chat_stream(
         if not normalized:
             return False
 
-        # AO20E: explicit Orkio orchestration audits must not be captured by the generic
-        # internal war room surgical fast-path. They need the Orkio -> Orion/Chris graph.
-        try:
-            if _ao20e_is_orchestration_audit_request(text):
-                return False
-        except Exception:
-            pass
-
         warroom_markers = [
             "war room",
             "warroom",
@@ -29084,16 +28994,6 @@ async def chat_stream(
         normalized = _normalize_router_text(text)
         if not normalized:
             return False
-
-        # AO20E-HF1 — orchestration audits must not be captured by the generic
-        # governed execution fast-path. Prompts that ask for execution_id,
-        # child_execution_graphs or dispatch_executed are still readonly
-        # orchestration audits, not requests to generate a patch artifact.
-        try:
-            if _ao20e_is_orchestration_audit_request(text):
-                return False
-        except Exception:
-            pass
 
         execution_markers = [
             "vamos ao patch",
@@ -31371,40 +31271,6 @@ async def chat_stream(
 
 
 
-    def _internal_warroom_governed_execution_fastpath_in_isolated_session() -> Dict[str, Any]:
-        # AO20E-HF1 — compatibility wrapper.
-        # The stream still references this legacy name for governed war-room
-        # execution requests. Keeping a small wrapper prevents NameError while
-        # preserving proposal_only / no-write behavior.
-        final_text = _build_internal_warroom_governed_execution_answer(message)
-        persisted = _persist_assistant_message(
-            text=final_text,
-            thread_id=tid_seed,
-            agent_id=None,
-            agent_name="Auditor",
-        )
-        return {
-            **persisted,
-            "answer": final_text,
-            "message": final_text,
-            "final_text": final_text,
-            "agent_id": None,
-            "agent_name": "Auditor",
-            "voice_id": None,
-            "avatar_url": None,
-            "runtime_hints": {
-                "routing": {
-                    "routing_source": "stream_internal_warroom_governed_execution_v1",
-                    "route_applied": True,
-                    "execution_lifecycle": "proposal_only_completed",
-                    "governance_mode": "proposal_only_fastpath",
-                    "write_executed": False,
-                    "human_approval_required": True,
-                }
-            },
-        }
-
-
     def _build_capabilities_baseline_answer(text: str) -> str:
         onboarding_digest = _build_stream_onboarding_context_digest()
         context_block = ""
@@ -31638,128 +31504,6 @@ async def chat_stream(
             except Exception:
                 pass
 
-        async def _emit_terminal_stream_error(
-            code: str,
-            message_text: str,
-            *,
-            routing_source: str = "stream_ao20e_hf1_terminal_guard",
-        ):
-            # AO20E-HF1 — final safety net for exceptions raised after the
-            # HTTP 200 stream is already open. The frontend must always receive
-            # event:error followed by event:done so it can release the input.
-            final_text = _sanitize_visible_stream_text(
-                message_text
-                or "Falha interna no stream de chat. A tentativa foi encerrada com segurança."
-            )
-            try:
-                persisted = await asyncio.to_thread(
-                    _persist_assistant_message,
-                    text=final_text,
-                    thread_id=tid_seed,
-                    agent_id=None,
-                    agent_name="Orkio",
-                )
-            except Exception:
-                persisted = {
-                    "thread_id": tid_seed,
-                    "assistant_persisted": False,
-                    "assistant_message_id": None,
-                }
-
-            terminal_base = {
-                **base,
-                "thread_id": persisted.get("thread_id") or tid_seed,
-                "agent_id": "orkio",
-                "agent_name": "Orkio",
-                "final_speaker": "Orkio",
-            }
-            yield _metatron_sse("error", {
-                **terminal_base,
-                "code": code or "CHAT_STREAM_AO20E_HF1_TERMINAL",
-                "message": final_text,
-                "recoverable": True,
-                "terminal": True,
-            })
-            yield _metatron_sse("chunk", {
-                **terminal_base,
-                "delta": final_text,
-                "content": final_text,
-            })
-            yield _metatron_sse("agent_done", {
-                **terminal_base,
-                "done": True,
-                "message": "Erro encerrado com segurança.",
-            })
-            yield _metatron_sse("done", {
-                **terminal_base,
-                "done": True,
-                "assistant_persisted": bool(persisted.get("assistant_persisted")),
-                "assistant_message_id": persisted.get("assistant_message_id"),
-                "final_text": final_text,
-                "runtime_hints": {
-                    "routing": {
-                        "routing_source": routing_source,
-                        "execution_lifecycle": "terminal_error",
-                        "route_applied": True,
-                        "ao20bc_route_audit": route_plan,
-                        "requested_agent": route_plan.get("requested_agent"),
-                        "resolved_agent": route_plan.get("resolved_agent"),
-                        "route_family": route_plan.get("route_family"),
-                        "blocked_routes": route_plan.get("blocked_routes") or [],
-                    }
-                },
-            })
-
-        # AO20E_ORCHESTRATION_FASTPATH_GUARD
-        # Explicit orchestration audits with Orion + Chris must not be intercepted by
-        # INTERNAL_WARROOM_GOVERNED_SURGICAL_V2 or generic proposal/governance fast-paths.
-        if (
-            route_plan.get("resolved_agent") == "Orkio"
-            and _ao20e_is_orchestration_audit_request(message)
-            and not route_plan.get("proposal_scope")
-            and not _is_internal_warroom_governed_artifact_request(message)
-            and not _is_internal_warroom_governed_execution_request(message)
-        ):
-            try:
-                final_text = _ao20e_orchestration_audit_answer(message, route_plan)
-                persisted = await asyncio.to_thread(
-                    _persist_assistant_message,
-                    text=final_text,
-                    thread_id=tid_seed,
-                    agent_id=None,
-                    agent_name="Orkio",
-                )
-                payload = {
-                    **persisted,
-                    "answer": final_text,
-                    "message": final_text,
-                    "final_text": final_text,
-                    "agent_id": None,
-                    "agent_name": "Orkio",
-                    "runtime_hints": {
-                        "routing": {
-                            "routing_source": "stream_ao20e_orchestration_fastpath_guard",
-                            "route_applied": True,
-                            "execution_lifecycle": "completed",
-                            "ao20bc_route_audit": route_plan,
-                            "route_family": "orchestration_audit",
-                            "dispatch_executed": True,
-                            "write_executed": False,
-                            "child_execution_graphs": True,
-                            "blocked_routes": list(dict.fromkeys((route_plan.get("blocked_routes") or []) + ["internal_warroom_governed_surgical_v2"])),
-                        }
-                    },
-                }
-                async for ev in _emit_result_payload(payload, routing_source="stream_ao20e_orchestration_fastpath_guard"):
-                    yield ev
-                return
-            except Exception:
-                try:
-                    logger.exception("CHAT_STREAM_AO20E_ORCHESTRATION_FASTPATH_FAILED trace_id=%s", trace_id)
-                except Exception:
-                    pass
-                # If this fails, fall through to AO20BC generic router audit.
-
         # AO20BC-LITE_MASTER_ROUTER_PRECEDENCE_LOCK
         # Technical readonly/orchestration audits addressed to @Orkio must be
         # answered by Orkio before Chris valuation or stale Orion templates can run.
@@ -31914,18 +31658,12 @@ async def chat_stream(
                 async for ev in _emit_result_payload(payload, routing_source="stream_internal_warroom_governed_execution_v1"):
                     yield ev
                 return
-            except Exception as exc:
+            except Exception:
                 try:
                     logger.exception("CHAT_STREAM_INTERNAL_WARROOM_GOVERNED_EXECUTION_FAILED trace_id=%s", trace_id)
                 except Exception:
                     pass
-                async for ev in _emit_terminal_stream_error(
-                    "CHAT_STREAM_INTERNAL_WARROOM_GOVERNED_EXECUTION_FAILED",
-                    "Falha controlada no trilho governado interno. O stream foi encerrado com segurança; tente novamente pelo pedido de orquestração ou revise o patch mínimo.",
-                    routing_source="stream_internal_warroom_governed_execution_v1_terminal_guard",
-                ):
-                    yield ev
-                return
+                # Se o fast-path falhar, seguimos para os demais trilhos protegidos.
 
 
 
