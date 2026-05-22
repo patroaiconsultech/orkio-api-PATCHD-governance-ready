@@ -31301,50 +31301,115 @@ async def chat_stream(
 
     def _ao20i_governed_evolution_stage(text: str) -> str:
         """
-        AO20J_GOVERNED_PROPOSAL_DRY_RUN_GATE:
+        AO20J_HF1_PROPOSAL_STAGE_PRECEDENCE_NEGATIVE_DRY_RUN_GUARD:
         Identifica a etapa segura do pipeline:
         audit_report -> issue_map -> patch_plan -> proposal_only -> dry_run.
 
-        Observação operacional:
-        - proposal_only pode criar proposta governada no banco, mas não escreve repo.
-        - dry_run só roda se houver proposal_id aprovado; caso contrário bloqueia com orientação.
-        - execução real/commit/deploy/migration continuam fora deste hotfix.
+        Correção HF1:
+        - "crie proposal_only/proposta governada" vence menções negativas a dry-run.
+        - "não fazer dry-run ainda", "sem dry-run" e similares NÃO ativam dry_run.
+        - dry_run só ativa com intenção positiva explícita.
         """
         raw = _ao20i_normalized_evolution_text(text)
         if not raw:
             return "audit_report"
 
-        if any(x in raw for x in [
-            "dry_run",
-            "dry run",
-            "dry-run",
-            "execute um dry-run",
-            "executar um dry-run",
-            "rodar dry-run",
-            "rode dry-run",
-            "simule a execução",
-            "simular execução",
-            "execução simulada",
-            "execucao simulada",
-            "sem escrita real",
-        ]):
-            return "dry_run"
+        def _has_any(items: List[str]) -> bool:
+            return any(x in raw for x in items)
 
-        if any(x in raw for x in [
+        proposal_positive_markers = [
             "proposal_only",
             "proposal only",
             "proposta governada",
             "crie uma proposal",
             "criar uma proposal",
+            "crie uma proposal_only",
+            "criar uma proposal_only",
+            "crie proposal_only",
+            "criar proposal_only",
             "crie uma proposta",
             "criar uma proposta",
             "gere uma proposta",
             "gerar uma proposta",
+            "registrar proposta",
+            "registre proposta",
+            "registrar proposta governada",
+            "registre proposta governada",
+            "apenas registrar proposta",
+            "somente registrar proposta",
             "pending_approval",
             "proposta para aprovação",
             "proposta para aprovacao",
-        ]):
+        ]
+
+        dry_run_negative_markers = [
+            "não fazer dry-run",
+            "nao fazer dry-run",
+            "não fazer dry run",
+            "nao fazer dry run",
+            "não executar dry-run",
+            "nao executar dry-run",
+            "não executar dry run",
+            "nao executar dry run",
+            "não rodar dry-run",
+            "nao rodar dry-run",
+            "não rodar dry run",
+            "nao rodar dry run",
+            "sem dry-run",
+            "sem dry run",
+            "não faça dry-run",
+            "nao faça dry-run",
+            "nao faca dry-run",
+            "não faça dry run",
+            "nao faca dry run",
+            "não simular execução",
+            "nao simular execucao",
+            "não simule execução",
+            "nao simule execucao",
+            "não fazer simulação",
+            "nao fazer simulacao",
+            "não fazer dry-run ainda",
+            "nao fazer dry-run ainda",
+            "não fazer dry run ainda",
+            "nao fazer dry run ainda",
+        ]
+
+        # Precedência operacional:
+        # Quando o usuário pede para criar a proposta e também diz "não fazer dry-run ainda",
+        # o estágio correto é proposal_only. A menção negativa a dry-run é uma restrição,
+        # não uma intenção de execução simulada.
+        if _has_any(proposal_positive_markers):
             return "proposal_only"
+
+        dry_run_positive_markers = [
+            "execute um dry-run",
+            "executar um dry-run",
+            "execute dry-run",
+            "executar dry-run",
+            "rode dry-run",
+            "rodar dry-run",
+            "rodar um dry-run",
+            "simule a execução",
+            "simular execução",
+            "execução simulada",
+            "execucao simulada",
+            "dry-run governado da proposta",
+            "dry run governado da proposta",
+            "dry_run governado da proposta",
+            "dry-run da proposta",
+            "dry run da proposta",
+        ]
+
+        # dry_run/dry-run isolado só deve contar se não estiver negado.
+        has_dry_run_token = any(x in raw for x in ["dry_run", "dry-run", "dry run"])
+        has_positive_dry_run = _has_any(dry_run_positive_markers) or (
+            has_dry_run_token
+            and any(x in raw for x in ["execute", "executar", "rode", "rodar", "simule", "simular", "governado da proposta", "da proposta"])
+        )
+        has_negative_dry_run = _has_any(dry_run_negative_markers)
+
+        if has_positive_dry_run and not has_negative_dry_run:
+            return "dry_run"
 
         if any(x in raw for x in [
             "issue_map",
