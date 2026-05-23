@@ -34217,17 +34217,56 @@ async def chat_stream(
                 _hf4k_final_text = "Estou operacional para chat básico, auditoria readonly e testes controlados."
 
             elif _hf4k_memory:
+                # AO20K-HF4L_DB_BACKED_IMMEDIATE_MEMORY_RECALL
                 _hf4k_kind = "immediate_memory_recall"
                 _hf4k_prev_user = ""
+                _hf4k_memory_source = "none"
+
                 try:
                     for _item in reversed(history_dicts or []):
                         _role = str((_item or {}).get("role") or "").lower()
                         _content = str((_item or {}).get("content") or "").strip()
                         if _role in ("user", "human") and _content and _content != _hf4k_msg:
                             _hf4k_prev_user = _content
+                            _hf4k_memory_source = "history_dicts"
                             break
                 except Exception:
                     _hf4k_prev_user = ""
+
+                if not _hf4k_prev_user:
+                    _hf4k_db = None
+                    try:
+                        _hf4k_tid = str(tid_seed or "").strip()
+                        if _hf4k_tid:
+                            _hf4k_db = SessionLocal()
+                            _hf4k_rows = _hf4k_db.execute(
+                                select(Message)
+                                .where(
+                                    Message.org_slug == org,
+                                    Message.thread_id == _hf4k_tid,
+                                    Message.role == "user",
+                                )
+                                .order_by(Message.created_at.desc())
+                                .limit(12)
+                            ).scalars().all()
+
+                            for _m in _hf4k_rows:
+                                _content = str(getattr(_m, "content", "") or "").strip()
+                                if _content and _content != _hf4k_msg:
+                                    _hf4k_prev_user = _content
+                                    _hf4k_memory_source = "db_thread_messages"
+                                    break
+                    except Exception:
+                        try:
+                            logger.exception("CHAT_STREAM_AO20K_HF4L_MEMORY_DB_LOOKUP_FAILED trace_id=%s", trace_id)
+                        except Exception:
+                            pass
+                    finally:
+                        if _hf4k_db is not None:
+                            try:
+                                _hf4k_db.close()
+                            except Exception:
+                                pass
 
                 if _hf4k_prev_user:
                     _hf4k_final_text = 'A mensagem anterior que você me mandou foi: "' + _hf4k_prev_user + '"'
