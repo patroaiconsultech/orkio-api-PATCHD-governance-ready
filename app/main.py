@@ -33732,17 +33732,28 @@ async def chat_stream(
             })
             return
 
+        # AO20K-HF4H_ROUTE_RESOLVED_LOCAL_SAFE_ROUTE_PLAN
+        # Production hotfix: do not depend on outer-scope route_plan_safe for the
+        # first route_resolved SSE event. Logs proved this exact yield can run with
+        # route_plan_safe undefined and kill the stream after HTTP 200 OK.
+        try:
+            route_plan_safe_local = _ao20k_hf2_json_safe(
+                route_plan if isinstance(route_plan, dict) else {}
+            )
+        except Exception:
+            route_plan_safe_local = {}
+
         yield _metatron_sse("execution", {
             **base,
             "step": "route_resolved",
             "kind": "routing",
             "label": "Router AO20BC resolvido",
             "message": "Precedência de @mention, escopo técnico e scope lock aplicada antes dos fast-paths.",
-            "route_audit": route_plan_safe,
-            "requested_agent": route_plan_safe.get("requested_agent"),
-            "resolved_agent": route_plan_safe.get("resolved_agent"),
-            "route_family": route_plan_safe.get("route_family"),
-            "blocked_routes": route_plan_safe.get("blocked_routes") or [],
+            "route_audit": route_plan_safe_local,
+            "requested_agent": route_plan_safe_local.get("requested_agent"),
+            "resolved_agent": route_plan_safe_local.get("resolved_agent"),
+            "route_family": route_plan_safe_local.get("route_family"),
+            "blocked_routes": route_plan_safe_local.get("blocked_routes") or [],
         })
 
         async def _emit_result_payload(payload: Dict[str, Any], *, routing_source: str = "stream_runtime_v3"):
