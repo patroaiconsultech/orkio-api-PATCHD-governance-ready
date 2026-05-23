@@ -33732,6 +33732,7 @@ async def chat_stream(
             })
             return
 
+        # AO20K-HF4I_ROUTE_RESOLVED_REMOVE_REMAINING_ROUTE_PLAN_SAFE_GETS
         # AO20K-HF4H_ROUTE_RESOLVED_LOCAL_SAFE_ROUTE_PLAN
         # Production hotfix: do not depend on outer-scope route_plan_safe for the
         # first route_resolved SSE event. Logs proved this exact yield can run with
@@ -33809,10 +33810,10 @@ async def chat_stream(
                 "requested_agent": route_plan.get("requested_agent"),
                 "resolved_agent": route_plan.get("resolved_agent"),
                 "route_family": route_plan.get("route_family"),
-                "route_reason": route_plan_safe.get("route_reason"),
+                "route_reason": route_plan_safe_local.get("route_reason"),
                 "blocked_routes": route_plan.get("blocked_routes") or [],
-                "requested_patch_id": route_plan_safe.get("requested_patch_id"),
-                "generated_patch_id": route_plan_safe.get("generated_patch_id"),
+                "requested_patch_id": route_plan_safe_local.get("requested_patch_id"),
+                "generated_patch_id": route_plan_safe_local.get("generated_patch_id"),
             }
             runtime_hints["routing"] = routing_hints
 
