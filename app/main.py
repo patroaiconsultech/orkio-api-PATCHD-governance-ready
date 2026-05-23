@@ -34180,6 +34180,28 @@ async def chat_stream(
             _hf4k_norm = " ".join(_hf4k_msg.lower().split())
 
             _hf4k_kind = ""
+            # AO20K-HF4P_SAFE_AGENT_PING_FASTPATH
+            _hf4p_raw_msg_l = str(_hf4k_msg or "").lower()
+            _hf4p_target = ""
+
+            if "@orion" in _hf4p_raw_msg_l:
+                _hf4p_target = "Orion"
+            elif "@chris" in _hf4p_raw_msg_l:
+                _hf4p_target = "Chris"
+            elif "@team" in _hf4p_raw_msg_l:
+                _hf4p_target = "Team"
+            elif "@orkio" in _hf4p_raw_msg_l:
+                _hf4p_target = "Orkio"
+
+            _hf4p_ping_terms = (
+                "online" in _hf4k_norm
+                or "operacional" in _hf4k_norm
+                or "status" in _hf4k_norm
+                or "pronto" in _hf4k_norm
+                or "respondendo" in _hf4k_norm
+            )
+            _hf4p_agent_ping = bool(_hf4p_target and _hf4p_ping_terms and len(_hf4k_msg) <= 180)
+
             _hf4k_final_text = ""
 
             _hf4k_status = (
@@ -34215,6 +34237,17 @@ async def chat_stream(
             if _hf4k_status:
                 _hf4k_kind = "simple_status"
                 _hf4k_final_text = "Estou operacional para chat básico, auditoria readonly e testes controlados."
+
+            elif _hf4p_agent_ping:
+                _hf4k_kind = "safe_agent_ping"
+                if _hf4p_target == "Orion":
+                    _hf4k_final_text = "Orion está online para auditoria readonly, diagnóstico técnico e testes controlados. Execução real permanece bloqueada sem aprovação."
+                elif _hf4p_target == "Chris":
+                    _hf4k_final_text = "Chris está online para contexto estratégico, leitura executiva e apoio consultivo. Execução real permanece bloqueada sem aprovação."
+                elif _hf4p_target == "Team":
+                    _hf4k_final_text = "Team está online para coordenação segura, auditoria readonly e testes controlados. Execução real permanece bloqueada sem aprovação."
+                else:
+                    _hf4k_final_text = "Orkio está online para chat básico, auditoria readonly e testes controlados. Execução real permanece bloqueada sem aprovação."
 
             elif _hf4k_memory:
                 # AO20K-HF4L_DB_BACKED_IMMEDIATE_MEMORY_RECALL
