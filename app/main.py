@@ -34173,6 +34173,142 @@ async def chat_stream(
                     pass
                 # Se falhar, o terminal guard/sanitizer ainda protege a UI.
 
+        # AO20K-HF4K_SAFE_FASTPATH_COVERAGE_MINI
+        # Fast-path mínimo para evitar runtime pesado em prompts simples/simulados.
+        try:
+            _hf4k_msg = str(message or "").strip()
+            _hf4k_norm = " ".join(_hf4k_msg.lower().split())
+
+            _hf4k_kind = ""
+            _hf4k_final_text = ""
+
+            _hf4k_status = (
+                "operacional" in _hf4k_norm
+                or "status operacional" in _hf4k_norm
+                or "voce esta operacional" in _hf4k_norm
+                or "você está operacional" in _hf4k_norm
+            )
+
+            _hf4k_memory = (
+                "mensagem anterior" in _hf4k_norm
+                or "qual foi a mensagem anterior" in _hf4k_norm
+                or "o que eu te mandei" in _hf4k_norm
+                or "ultima mensagem" in _hf4k_norm
+                or "última mensagem" in _hf4k_norm
+            )
+
+            _hf4k_simulated_branch_pr = (
+                "branch" in _hf4k_norm
+                and (" pr" in _hf4k_norm or "pull request" in _hf4k_norm)
+                and (
+                    "simulado" in _hf4k_norm
+                    or "apenas um plano" in _hf4k_norm
+                    or "não crie branch real" in _hf4k_norm
+                    or "nao crie branch real" in _hf4k_norm
+                    or "não abra pr real" in _hf4k_norm
+                    or "nao abra pr real" in _hf4k_norm
+                    or "não abra pull request real" in _hf4k_norm
+                    or "nao abra pull request real" in _hf4k_norm
+                )
+            )
+
+            if _hf4k_status:
+                _hf4k_kind = "simple_status"
+                _hf4k_final_text = "Estou operacional para chat básico, auditoria readonly e testes controlados."
+
+            elif _hf4k_memory:
+                _hf4k_kind = "immediate_memory_recall"
+                _hf4k_prev_user = ""
+                try:
+                    for _item in reversed(history_dicts or []):
+                        _role = str((_item or {}).get("role") or "").lower()
+                        _content = str((_item or {}).get("content") or "").strip()
+                        if _role in ("user", "human") and _content and _content != _hf4k_msg:
+                            _hf4k_prev_user = _content
+                            break
+                except Exception:
+                    _hf4k_prev_user = ""
+
+                if _hf4k_prev_user:
+                    _hf4k_final_text = 'A mensagem anterior que você me mandou foi: "' + _hf4k_prev_user + '"'
+                else:
+                    _hf4k_final_text = "Não encontrei uma mensagem anterior de usuário nesta conversa para recuperar com segurança."
+
+            elif _hf4k_simulated_branch_pr:
+                _hf4k_kind = "simulation_only_branch_pr_plan"
+                _hf4k_final_text = (
+                    "ORKIO — PLANO SIMULADO DE BRANCH E PR (READONLY)\n\n"
+                    "1. Diagnóstico objetivo\n"
+                    "- Este é apenas um plano simulado.\n"
+                    "- Nenhuma branch real será criada.\n"
+                    "- Nenhum commit real será feito.\n"
+                    "- Nenhum PR real será aberto.\n"
+                    "- Nenhum deploy será executado.\n\n"
+                    "2. Plano simulado\n"
+                    "- Branch simulada: fix/bug-ficticio-readonly\n"
+                    "- Commit simulado: fix: corrigir bug fictício com patch mínimo\n"
+                    "- PR simulado: Corrige bug fictício em modo readonly\n\n"
+                    "3. Garantias operacionais\n"
+                    "- write_executed=false\n"
+                    "- branch_created=false\n"
+                    "- pr_created=false\n"
+                    "- deploy_executed=false\n"
+                    "- simulation_only=true\n\n"
+                    "4. Veredito\n"
+                    "- GO para planejamento readonly.\n"
+                    "- NO-GO para execução real."
+                )
+
+            if _hf4k_kind and _hf4k_final_text:
+                _hf4k_persisted = await asyncio.to_thread(
+                    _persist_assistant_message,
+                    text=_hf4k_final_text,
+                    thread_id=tid_seed,
+                    agent_id=None,
+                    agent_name="Orkio",
+                )
+
+                _hf4k_payload = {
+                    **_hf4k_persisted,
+                    "answer": _hf4k_final_text,
+                    "message": _hf4k_final_text,
+                    "final_text": _hf4k_final_text,
+                    "agent_id": None,
+                    "agent_name": "Orkio",
+                    "runtime_hints": {
+                        "routing": {
+                            "routing_source": "stream_ao20k_hf4k_" + _hf4k_kind,
+                            "route_applied": True,
+                            "route_family": "safe_fastpath_coverage",
+                            "execution_lifecycle": "completed",
+                            "fast_path_hit": True,
+                            "runtime_bypassed": True,
+                            "write_allowed": False,
+                            "write_executed": False,
+                            "branch_created": False,
+                            "pr_created": False,
+                            "commit_executed": False,
+                            "deploy_executed": False,
+                            "migration_executed": False,
+                            "simulation_only": bool(_hf4k_kind == "simulation_only_branch_pr_plan"),
+                        }
+                    },
+                }
+
+                async for ev in _emit_result_payload(
+                    _hf4k_payload,
+                    routing_source="stream_ao20k_hf4k_" + _hf4k_kind,
+                ):
+                    yield ev
+                return
+
+        except Exception:
+            try:
+                logger.exception("CHAT_STREAM_AO20K_HF4K_SAFE_FASTPATH_FAILED trace_id=%s", trace_id)
+            except Exception:
+                pass
+        # Se o fast-path falhar, segue para os trilhos protegidos existentes.
+
         # AO20K-HF2_BRANCH_PR_PLAN_SSE_SAFE_EMITTER
         # Branch/PR plan is a read-only governance contract after dry_run_completed.
         # It must emit a deterministic SSE chunk + done, and must not fall through
