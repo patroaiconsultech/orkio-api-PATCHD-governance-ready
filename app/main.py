@@ -33732,6 +33732,7 @@ async def chat_stream(
             })
             return
 
+        # AO20K-HF4J_REMOVE_STANDALONE_ROUTE_PLAN_SAFE_AUDIT_USES
         # AO20K-HF4I_ROUTE_RESOLVED_REMOVE_REMAINING_ROUTE_PLAN_SAFE_GETS
         # AO20K-HF4H_ROUTE_RESOLVED_LOCAL_SAFE_ROUTE_PLAN
         # Production hotfix: do not depend on outer-scope route_plan_safe for the
@@ -33806,7 +33807,7 @@ async def chat_stream(
                 "routing_source": routing_hints.get("routing_source") or routing_source,
                 "route_applied": True,
                 "execution_lifecycle": routing_hints.get("execution_lifecycle") or "completed",
-                "ao20bc_route_audit": route_plan_safe,
+                "ao20bc_route_audit": route_plan_safe_local,
                 "requested_agent": route_plan.get("requested_agent"),
                 "resolved_agent": route_plan.get("resolved_agent"),
                 "route_family": route_plan.get("route_family"),
@@ -33830,7 +33831,7 @@ async def chat_stream(
                         "route_applied": True,
                         "execution_lifecycle": "completed_with_serialization_fallback",
                         "ao20k_hf2_serialization_fallback": True,
-                        "ao20bc_route_audit": route_plan_safe,
+                        "ao20bc_route_audit": route_plan_safe_local,
                     }
                 }
 
