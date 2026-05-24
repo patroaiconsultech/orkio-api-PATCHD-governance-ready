@@ -34485,6 +34485,21 @@ async def chat_stream(
             _ao01_norm = str(_hf4k_norm or "")
             _ao01_short = len(_hf4k_msg) <= 360
 
+            # AO01B_LITERAL_DIAGNOSTIC_TOKEN_GUARD
+            _ao01_internal_diagnostic_token = bool(
+                _ao01_short
+                and (
+                    "chat_stream_runtime_timeout" in _ao01_norm
+                    or "_run_direct_chat_in_isolated_session" in _ao01_norm
+                    or "run_direct_chat_in_isolated_session" in _ao01_norm
+                    or "runtime pesado" in _ao01_norm
+                    or "runtime principal" in _ao01_norm
+                    or "provider pesado" in _ao01_norm
+                    or "fallback seguro" in _ao01_norm
+                    or "ao20bc" in _ao01_norm
+                )
+            )
+
             _ao01_checkpoint_ack = bool(
                 _ao01_short
                 and (
@@ -34546,7 +34561,29 @@ async def chat_stream(
                 )
             )
 
-            if _ao01_checkpoint_ack:
+            if _ao01_internal_diagnostic_token:
+                _hf4k_kind = "internal_diagnostic_token_readonly"
+                _hf4k_final_text = (
+                    "ORKIO — DIAGNÓSTICO READONLY DE TOKEN INTERNO\n\n"
+                    "1. Diagnóstico objetivo\n"
+                    "A mensagem contém um token interno de diagnóstico. Este fluxo responde de forma curta e segura, sem acionar runtime pesado, provider externo, toolchain, escrita real, branch, PR ou deploy.\n\n"
+                    "2. Classificação\n"
+                    "- camada: backend / stream / router\n"
+                    "- tipo: diagnóstico readonly\n"
+                    "- runtime pesado acionado: false\n"
+                    "- write_executed=false\n"
+                    "- branch_created=false\n"
+                    "- pr_created=false\n"
+                    "- deploy_executed=false\n\n"
+                    "3. Próximo passo seguro\n"
+                    "Para confirmar timeout real, valide os logs por ocorrências de CHAT_STREAM_RUNTIME_TIMEOUT. Se não houver ocorrência nos logs, o texto foi apenas um token digitado pelo usuário.\n\n"
+                    "4. Veredito\n"
+                    "Verde: token interno tratado por fast-path readonly.\n"
+                    "Amarelo: logs ainda são a fonte de verdade para timeout real.\n"
+                    "Vermelho: nenhuma execução real iniciada."
+                )
+
+            elif _ao01_checkpoint_ack:
                 _hf4k_kind = "checkpoint_ack_readonly"
                 _hf4k_final_text = (
                     "Checkpoint recebido e tratado em modo readonly. "
