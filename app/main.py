@@ -34491,13 +34491,25 @@ async def chat_stream(
                     "- NO-GO para execução real."
                 )
 
+            # AO20K-HF4U_AGENT_FASTPATH_DISPLAY_NAME
+            _hf4k_agent_name = "Orkio"
+            try:
+                if _hf4k_kind == "safe_agent_ping":
+                    _hf4k_agent_name = str(_hf4p_target or "Orkio").strip() or "Orkio"
+                elif _hf4k_kind == "safe_agent_greeting":
+                    _hf4k_agent_name = str(_hf4t_target or "Orkio").strip() or "Orkio"
+                elif _hf4k_kind == "controlled_evolution_readonly":
+                    _hf4k_agent_name = "Orkio"
+            except Exception:
+                _hf4k_agent_name = "Orkio"
+
             if _hf4k_kind and _hf4k_final_text:
                 _hf4k_persisted = await asyncio.to_thread(
                     _persist_assistant_message,
                     text=_hf4k_final_text,
                     thread_id=tid_seed,
                     agent_id=None,
-                    agent_name="Orkio",
+                    agent_name=_hf4k_agent_name,
                 )
 
                 _hf4k_payload = {
