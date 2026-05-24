@@ -34269,6 +34269,28 @@ async def chat_stream(
                 and len(_hf4k_msg) <= 120
             )
 
+            # AO20K-HF5A_GOVERNED_PIPELINE_INVENTORY_READONLY_FASTPATH
+            _hf5a_norm = str(_hf4k_norm or "")
+            _hf5a_governed_pipeline_inventory = bool(
+                (
+                    "inventario" in _hf5a_norm
+                    or "inventário" in _hf5a_norm
+                    or "esteira governada" in _hf5a_norm
+                    or "pipeline governado" in _hf5a_norm
+                    or "governed pipeline" in _hf5a_norm
+                    or "classifique cada etapa" in _hf5a_norm
+                )
+                and (
+                    "readonly" in _hf5a_norm
+                    or "read only" in _hf5a_norm
+                    or "sem criar" in _hf5a_norm
+                    or "não crie" in _hf5a_norm
+                    or "nao crie" in _hf5a_norm
+                    or "não execute" in _hf5a_norm
+                    or "nao execute" in _hf5a_norm
+                )
+            )
+
             # AO20K-HF4Q_CONTROLLED_EVOLUTION_FASTPATH
             _hf4q_norm = str(_hf4k_norm or "")
             _hf4q_platform_scope = (
@@ -34361,6 +34383,54 @@ async def chat_stream(
                     _hf4k_final_text = "Olá. Team está online para coordenação segura, auditoria readonly e testes controlados. Execução real permanece bloqueada sem aprovação."
                 else:
                     _hf4k_final_text = "Olá. Orkio está online para chat básico, auditoria readonly e testes controlados. Execução real permanece bloqueada sem aprovação."
+
+            elif _hf5a_governed_pipeline_inventory:
+                _hf4k_kind = "governed_pipeline_inventory_readonly"
+                _hf4k_final_text = (
+                    "ORKIO — INVENTÁRIO READONLY DA ESTEIRA GOVERNADA\\n\\n"
+                    "1. Diagnóstico objetivo\\n"
+                    "A plataforma já possui várias peças da esteira governada implementadas no backend. Este fluxo é somente leitura: não cria proposta, branch, PR, patch ou deploy.\\n\\n"
+                    "2. Tabela das etapas\\n"
+                    "| Etapa | Status operacional | Evidência | Risco |\\n"
+                    "|---|---|---|---|\\n"
+                    "| issue_map | parcialmente implementada | existe como conceito/capability; precisa padronização como artefato de chat | amarelo |\\n"
+                    "| patch_plan | parcialmente implementada | safe_patch_plan e funções de governança existem | amarelo |\\n"
+                    "| proposal_only | implementada e conectada | propostas admin/evolution e proposal_only existem | verde |\\n"
+                    "| approval gate | implementada e conectada | approve/reject e approval state existem | verde |\\n"
+                    "| dry_run | implementada e conectada | endpoint dry-run e ledger existem | verde |\\n"
+                    "| branch_pr_plan | implementada e conectada | endpoint branch-pr-plan existe | verde |\\n"
+                    "| create_branch | implementada, protegida | endpoint create-branch existe; exige aprovação/admin | amarelo |\\n"
+                    "| apply_branch_patch | implementada, protegida | endpoint apply-branch-patch existe; exige aprovação/admin | amarelo |\\n"
+                    "| revert_branch_patch | implementada | endpoint revert-branch-patch existe | verde |\\n"
+                    "| execute_approved_patch | implementada, protegida | endpoint execute-approved-patch existe | amarelo |\\n"
+                    "| execution_receipts | implementada | receipts de execução/GitHub existem | verde |\\n"
+                    "| rollback | parcialmente implementado | revert branch patch + validadores de rollback existem; falta UX única | amarelo |\\n\\n"
+                    "3. Rotas/endpoints conhecidos\\n"
+                    "- /api/admin/evolution/proposals\\n"
+                    "- /api/admin/evolution/proposals/{proposal_id}/approve\\n"
+                    "- /api/admin/evolution/proposals/{proposal_id}/reject\\n"
+                    "- /api/admin/evolution/proposals/{proposal_id}/execution-plan\\n"
+                    "- /api/admin/evolution/proposals/{proposal_id}/branch-pr-plan\\n"
+                    "- /api/admin/evolution/proposals/{proposal_id}/create-branch\\n"
+                    "- /api/admin/evolution/proposals/{proposal_id}/apply-branch-patch\\n"
+                    "- /api/admin/evolution/proposals/{proposal_id}/revert-branch-patch\\n"
+                    "- /api/admin/evolution/proposals/{proposal_id}/dry-run\\n"
+                    "- /api/governance/approve-patch\\n"
+                    "- /api/governance/execute-approved-patch\\n\\n"
+                    "4. Garantias deste fluxo\\n"
+                    "- proposal_created=false\\n"
+                    "- write_executed=false\\n"
+                    "- branch_created=false\\n"
+                    "- pr_created=false\\n"
+                    "- deploy_executed=false\\n"
+                    "- approval_required=true para qualquer etapa mutável futura\\n\\n"
+                    "5. Próximo menor patch recomendado\\n"
+                    "Padronizar issue_map e patch_plan como artefatos readonly antes de qualquer transição para execução limitada.\\n\\n"
+                    "6. Veredito\\n"
+                    "Verde: proposal_only, approval, dry_run, branch_pr_plan, receipts e revert existem.\\n"
+                    "Amarelo: issue_map, patch_plan e rollback precisam padronização de UX/contrato.\\n"
+                    "Vermelho: nenhuma execução real deve iniciar neste modo."
+                )
 
             elif _hf4q_controlled_evolution:
                 _hf4k_kind = "controlled_evolution_readonly"
