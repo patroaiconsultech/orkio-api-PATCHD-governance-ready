@@ -34271,8 +34271,41 @@ async def chat_stream(
 
             # AO20K-HF5B_ISSUE_MAP_PATCH_PLAN_READONLY_ARTIFACTS
             _hf5b_norm = str(_hf4k_norm or "")
+            # AO20K-HF5B1_GUARD_CHECKPOINT_FROM_ISSUE_PATCH_FASTPATH
+            _hf5b_checkpoint_like = bool(
+                _hf5b_norm.startswith("safe prod green")
+                or _hf5b_norm.startswith("checkpoint")
+                or _hf5b_norm.startswith("check point")
+                or _hf5b_norm.startswith("validado")
+                or _hf5b_norm.startswith("validated")
+                or _hf5b_norm.startswith("prod green")
+                or "checkpoint:" in _hf5b_norm
+                or "safe prod green" in _hf5b_norm
+            )
+            _hf5b_active_request = bool(
+                "gere" in _hf5b_norm
+                or "gerar" in _hf5b_norm
+                or "faça" in _hf5b_norm
+                or "faca" in _hf5b_norm
+                or "fazer" in _hf5b_norm
+                or "crie" in _hf5b_norm
+                or "criar" in _hf5b_norm
+                or "monte" in _hf5b_norm
+                or "montar" in _hf5b_norm
+                or "produza" in _hf5b_norm
+                or "produzir" in _hf5b_norm
+                or "classifique" in _hf5b_norm
+                or "classificar" in _hf5b_norm
+                or "padronize" in _hf5b_norm
+                or "padronizar" in _hf5b_norm
+                or "elabore" in _hf5b_norm
+                or "elaborar" in _hf5b_norm
+            )
+
             _hf5b_issue_patch_plan_readonly = bool(
-                (
+                _hf5b_active_request
+                and not _hf5b_checkpoint_like
+                and (
                     "issue_map" in _hf5b_norm
                     or "issue map" in _hf5b_norm
                     or "mapa de issues" in _hf5b_norm
