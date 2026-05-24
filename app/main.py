@@ -34481,7 +34481,145 @@ async def chat_stream(
                 )
             )
 
-            if _hf4k_status:
+            # AO01_SAFE_ROUTER_FASTPATH_GUARD
+            _ao01_norm = str(_hf4k_norm or "")
+            _ao01_short = len(_hf4k_msg) <= 360
+
+            _ao01_checkpoint_ack = bool(
+                _ao01_short
+                and (
+                    _ao01_norm.startswith("safe prod green")
+                    or _ao01_norm.startswith("checkpoint")
+                    or _ao01_norm.startswith("check point")
+                    or _ao01_norm.startswith("validado")
+                    or _ao01_norm.startswith("validated")
+                    or _ao01_norm.startswith("prod green")
+                    or "safe prod green" in _ao01_norm
+                )
+            )
+
+            _ao01_simple_greeting_no_target = bool(
+                len(_hf4k_msg) <= 80
+                and not _hf4p_target
+                and _hf4t_clean in (
+                    "oi",
+                    "ola",
+                    "olá",
+                    "hello",
+                    "hi",
+                    "hey",
+                    "bom dia",
+                    "boa tarde",
+                    "boa noite",
+                )
+            )
+
+            _ao01_system_status = bool(
+                _ao01_short
+                and (
+                    "status do sistema" in _ao01_norm
+                    or "sistema está online" in _ao01_norm
+                    or "sistema esta online" in _ao01_norm
+                    or "plataforma está online" in _ao01_norm
+                    or "plataforma esta online" in _ao01_norm
+                )
+            )
+
+            _ao01_readonly_audit = bool(
+                _ao01_short
+                and (
+                    "auditoria readonly" in _ao01_norm
+                    or "auditoria read only" in _ao01_norm
+                    or "diagnostico readonly" in _ao01_norm
+                    or "diagnóstico readonly" in _ao01_norm
+                    or "diagnóstico read only" in _ao01_norm
+                    or "diagnostico read only" in _ao01_norm
+                )
+                and not (
+                    "execute" in _ao01_norm
+                    or "executar" in _ao01_norm
+                    or "aplique" in _ao01_norm
+                    or "aplicar" in _ao01_norm
+                    or "commit" in _ao01_norm
+                    or "push" in _ao01_norm
+                    or "deploy" in _ao01_norm
+                )
+            )
+
+            if _ao01_checkpoint_ack:
+                _hf4k_kind = "checkpoint_ack_readonly"
+                _hf4k_final_text = (
+                    "Checkpoint recebido e tratado em modo readonly. "
+                    "Sem escrita, sem branch/PR, sem deploy e sem execução real. "
+                    "Para gerar um artefato governado, envie um pedido ativo como: "
+                    "gere um issue_map e patch_plan readonly."
+                )
+
+            elif _ao01_simple_greeting_no_target:
+                _hf4k_kind = "simple_greeting"
+                _hf4k_final_text = (
+                    "Olá. Orkio está online para chat básico, auditoria readonly "
+                    "e testes controlados. Execução real permanece bloqueada sem aprovação."
+                )
+
+            elif _ao01_system_status:
+                _hf4k_kind = "system_status_readonly"
+                _hf4k_final_text = (
+                    "Sistema online para chat básico, auditoria readonly, fast-paths governados "
+                    "e testes controlados. Escrita real, branch, PR e deploy permanecem bloqueados "
+                    "sem aprovação humana explícita."
+                )
+
+            elif _ao01_readonly_audit:
+                _hf4k_kind = "readonly_audit_light"
+                _hf4k_final_text = (
+                    "ORKIO — AUDITORIA READONLY LEVE\n\n"
+                    "1. Diagnóstico objetivo\n"
+                    "Pedido classificado como auditoria readonly leve. Não será acionado runtime pesado, provider externo, escrita real, branch, PR ou deploy.\n\n"
+                    "2. Camadas consideradas\n"
+                    "- frontend: não alterado\n"
+                    "- backend: somente diagnóstico\n"
+                    "- auth: não alterado\n"
+                    "- stream/SSE: resposta por fast-path\n"
+                    "- storage/contexto: sem mutação\n"
+                    "- voz/avatar: não alterado\n"
+                    "- UX/jornada: sem patch\n"
+                    "- deploy/configuração: sem ação\n\n"
+                    "3. Garantias\n"
+                    "- write_executed=false\n"
+                    "- branch_created=false\n"
+                    "- pr_created=false\n"
+                    "- deploy_executed=false\n"
+                    "- approval_required=true para qualquer etapa mutável futura\n\n"
+                    "4. Veredito\n"
+                    "Verde: auditoria leve encerrada com segurança.\n"
+                    "Amarelo: para análise profunda, solicite escopo específico.\n"
+                    "Vermelho: nenhuma execução real iniciada."
+                )
+
+            elif _hf4k_simulated_branch_pr:
+                _hf4k_kind = "branch_pr_plan_simulated_readonly"
+                _hf4k_final_text = (
+                    "ORKIO — BRANCH/PR PLAN SIMULADO READONLY\n\n"
+                    "1. Diagnóstico objetivo\n"
+                    "Este é apenas um plano simulado de branch/PR. Nenhuma branch real será criada e nenhum PR será aberto.\n\n"
+                    "2. Plano seguro\n"
+                    "- definir escopo mínimo\n"
+                    "- listar arquivos prováveis\n"
+                    "- gerar diff esperado em dry-run textual\n"
+                    "- exigir aprovação humana antes de qualquer execução real\n\n"
+                    "3. Garantias\n"
+                    "- write_executed=false\n"
+                    "- branch_created=false\n"
+                    "- pr_created=false\n"
+                    "- deploy_executed=false\n\n"
+                    "4. Veredito\n"
+                    "Verde: plano simulado entregue.\n"
+                    "Amarelo: execução real exige aprovação explícita.\n"
+                    "Vermelho: nenhum branch/PR real foi criado."
+                )
+
+            elif _hf4k_status:
                 _hf4k_kind = "simple_status"
                 _hf4k_final_text = "Estou operacional para chat básico, auditoria readonly e testes controlados."
 
