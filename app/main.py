@@ -34269,6 +34269,32 @@ async def chat_stream(
                 and len(_hf4k_msg) <= 120
             )
 
+            # AO20K-HF5B_ISSUE_MAP_PATCH_PLAN_READONLY_ARTIFACTS
+            _hf5b_norm = str(_hf4k_norm or "")
+            _hf5b_issue_patch_plan_readonly = bool(
+                (
+                    "issue_map" in _hf5b_norm
+                    or "issue map" in _hf5b_norm
+                    or "mapa de issues" in _hf5b_norm
+                    or "mapa de problemas" in _hf5b_norm
+                    or "patch_plan" in _hf5b_norm
+                    or "patch plan" in _hf5b_norm
+                    or "plano de patch" in _hf5b_norm
+                    or "artefatos readonly" in _hf5b_norm
+                    or "artefatos read only" in _hf5b_norm
+                )
+                and (
+                    "readonly" in _hf5b_norm
+                    or "read only" in _hf5b_norm
+                    or "sem criar" in _hf5b_norm
+                    or "não crie" in _hf5b_norm
+                    or "nao crie" in _hf5b_norm
+                    or "não execute" in _hf5b_norm
+                    or "nao execute" in _hf5b_norm
+                    or "sem executar" in _hf5b_norm
+                )
+            )
+
             # AO20K-HF5A_GOVERNED_PIPELINE_INVENTORY_READONLY_FASTPATH
             _hf5a_norm = str(_hf4k_norm or "")
             _hf5a_governed_pipeline_inventory = bool(
@@ -34383,6 +34409,57 @@ async def chat_stream(
                     _hf4k_final_text = "Olá. Team está online para coordenação segura, auditoria readonly e testes controlados. Execução real permanece bloqueada sem aprovação."
                 else:
                     _hf4k_final_text = "Olá. Orkio está online para chat básico, auditoria readonly e testes controlados. Execução real permanece bloqueada sem aprovação."
+
+            elif _hf5b_issue_patch_plan_readonly:
+                _hf4k_kind = "issue_map_patch_plan_readonly"
+                _hf4k_final_text = (
+                    "ORKIO — ISSUE_MAP + PATCH_PLAN READONLY\n\n"
+                    "1. Diagnóstico objetivo\n"
+                    "Este fluxo padroniza issue_map e patch_plan como artefatos readonly de chat. Ele não cria proposal_id, não cria branch, não abre PR, não executa patch e não faz deploy.\n\n"
+                    "2. Issue map readonly\n"
+                    "| Issue ID | Camada | Sintoma | Causa provável | Risco | Status |\n"
+                    "|---|---|---|---|---|---|\n"
+                    "| HF5B-001 | UX/jornada | issue_map ainda aparece como conceito, não como artefato padronizado | falta contrato fixo de saída para issue_map | amarelo | readonly |\n"
+                    "| HF5B-002 | governança | patch_plan existe como capacidade, mas pode não aparecer como plano estruturado no chat | falta template único para plano seguro | amarelo | readonly |\n"
+                    "| HF5B-003 | rollback | rollback existe em partes, mas ainda não há roteiro único no chat | UX/contrato de rollback incompleto | amarelo | readonly |\n"
+                    "| HF5B-004 | execução governada | create/apply/execute existem e são sensíveis | risco se acionados fora de aprovação explícita | amarelo | protegido |\n\n"
+                    "3. Patch plan readonly\n"
+                    "Patch ID sugerido: HF5B_PADRONIZAR_ISSUE_MAP_PATCH_PLAN_READONLY\n"
+                    "Objetivo: transformar issue_map e patch_plan em artefatos claros, reutilizáveis e auditáveis dentro do chat.\n"
+                    "Escopo permitido: resposta readonly, template, checklist e classificação de risco.\n"
+                    "Escopo proibido: escrita real, branch, PR, merge, deploy, dry-run real ou execução aprovada.\n\n"
+                    "4. Arquivos/componentes prováveis\n"
+                    "- app/main.py\n"
+                    "- /api/chat/stream\n"
+                    "- fast-paths de governança\n"
+                    "- Ver execução\n\n"
+                    "5. Ordem segura de implementação\n"
+                    "1. Validar issue_map readonly no chat.\n"
+                    "2. Validar patch_plan readonly no chat.\n"
+                    "3. Confirmar proposal_created=false.\n"
+                    "4. Confirmar write_executed=false.\n"
+                    "5. Só depois considerar proposal_only real, com aprovação humana explícita.\n\n"
+                    "6. Checklist de validação\n"
+                    "- issue_map aparece como tabela.\n"
+                    "- patch_plan aparece como plano.\n"
+                    "- proposal_created=false.\n"
+                    "- write_executed=false.\n"
+                    "- branch_created=false.\n"
+                    "- pr_created=false.\n"
+                    "- deploy_executed=false.\n"
+                    "- Ver execução mostra Fast-path / Sem escrita / Sem branch/PR.\n\n"
+                    "7. Garantias operacionais\n"
+                    "- proposal_created=false\n"
+                    "- write_executed=false\n"
+                    "- branch_created=false\n"
+                    "- pr_created=false\n"
+                    "- deploy_executed=false\n"
+                    "- approval_required=true para qualquer etapa mutável futura\n\n"
+                    "8. Veredito\n"
+                    "Verde: issue_map e patch_plan agora possuem formato readonly padronizado.\n"
+                    "Amarelo: integração com proposal_only real deve permanecer separada e aprovada.\n"
+                    "Vermelho: nenhuma execução real deve iniciar neste modo."
+                )
 
             elif _hf5a_governed_pipeline_inventory:
                 # AO20K-HF5A1_FIX_LITERAL_NEWLINES
