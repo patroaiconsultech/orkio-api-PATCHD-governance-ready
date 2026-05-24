@@ -27,7 +27,7 @@ class CapabilityPlanner:
             "views": required_views,
         }
 
-        logger.warning(
+        logger.info(
             "CAPABILITY_REGISTERED %s",
             name,
         )

@@ -1293,10 +1293,10 @@ def _send_resend_email(to_email: Any, subject: str, text_body: str, *, html_body
     from_email = _clean_env(RESEND_FROM, default="Orkio <no-reply@orkio.ai>")
     recipients = _parse_email_recipients(to_email)
     if not api_key:
-        logger.error("RESEND_SEND_SKIPPED missing_api_key subject=%s recipients=%s", subject, recipients)
+        logger.warning("RESEND_SEND_SKIPPED missing_api_key subject=%s recipients=%s", subject, recipients)
         return False
     if not recipients:
-        logger.error("RESEND_SEND_SKIPPED empty_recipients subject=%s", subject)
+        logger.warning("RESEND_SEND_SKIPPED empty_recipients subject=%s", subject)
         return False
     try:
         data = {
@@ -6310,7 +6310,7 @@ def login(inp: LoginIn, x_org_slug: Optional[str] = Header(default=None), db: Se
     if not u or not verify_password(inp.password, u.salt, u.pw_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
 
-    logger.warning(
+    logger.info(
         "LOGIN_PASSWORD_OK email=%s org=%s elapsed_ms=%s",
         email,
         org,
@@ -6423,7 +6423,7 @@ def login(inp: LoginIn, x_org_slug: Optional[str] = Header(default=None), db: Se
     # Create user session for presence tracking
     _create_user_session(db, u.id, org, ip, getattr(u, "signup_code_label", None), usage_tier)
 
-    logger.warning(
+    logger.info(
         "LOGIN_SUCCESS_RETURN email=%s org=%s total_login_ms=%s",
         email,
         org,
