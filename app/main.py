@@ -34202,6 +34202,41 @@ async def chat_stream(
             )
             _hf4p_agent_ping = bool(_hf4p_target and _hf4p_ping_terms and len(_hf4k_msg) <= 180)
 
+            # AO20K-HF4Q_CONTROLLED_EVOLUTION_FASTPATH
+            _hf4q_norm = str(_hf4k_norm or "")
+            _hf4q_platform_scope = (
+                "plataforma" in _hf4q_norm
+                or "orkio" in _hf4q_norm
+                or "@orion" in _hf4q_norm
+                or "auto evolução" in _hf4q_norm
+                or "autoevolução" in _hf4q_norm
+                or "auto evolucao" in _hf4q_norm
+                or "autoevolucao" in _hf4q_norm
+            )
+            _hf4q_evolution_action = (
+                "evoluir" in _hf4q_norm
+                or "evolucao" in _hf4q_norm
+                or "evolução" in _hf4q_norm
+                or "melhorar" in _hf4q_norm
+                or "melhora" in _hf4q_norm
+                or "melhorá" in _hf4q_norm
+                or "analisar" in _hf4q_norm
+                or "resolver isso" in _hf4q_norm
+                or "o que precisamos fazer" in _hf4q_norm
+                or "autorizo" in _hf4q_norm
+                or "autorizado" in _hf4q_norm
+            )
+            _hf4q_exact_followup = _hf4q_norm in (
+                "eu autorizo",
+                "autorizo",
+                "o que precisamos fazer para resolver isso?",
+                "o que precisamos fazer para resolver isso",
+            )
+            _hf4q_controlled_evolution = bool(
+                len(_hf4k_msg) <= 320
+                and ((_hf4q_platform_scope and _hf4q_evolution_action) or _hf4q_exact_followup)
+            )
+
             _hf4k_final_text = ""
 
             _hf4k_status = (
@@ -34248,6 +34283,53 @@ async def chat_stream(
                     _hf4k_final_text = "Team está online para coordenação segura, auditoria readonly e testes controlados. Execução real permanece bloqueada sem aprovação."
                 else:
                     _hf4k_final_text = "Orkio está online para chat básico, auditoria readonly e testes controlados. Execução real permanece bloqueada sem aprovação."
+
+            elif _hf4q_controlled_evolution:
+                _hf4k_kind = "controlled_evolution_readonly"
+                if "autorizo" in _hf4q_norm or _hf4q_norm == "autorizo":
+                    _hf4k_final_text = (
+                        "ORKIO — AUTORIZAÇÃO RECEBIDA EM MODO GOVERNADO\n\n"
+                        "1. Diagnóstico objetivo\n"
+                        "- A autorização foi recebida como intenção humana.\n"
+                        "- Nenhuma execução real foi iniciada.\n"
+                        "- Não existe proposta aprovada ativa neste fast-path.\n"
+                        "- write_executed=false\n"
+                        "- branch_created=false\n"
+                        "- pr_created=false\n"
+                        "- deploy_executed=false\n\n"
+                        "2. Próxima etapa segura\n"
+                        "Solicitar ou gerar um issue_map readonly da plataforma, depois patch_plan mínimo, depois proposal_only com diff auditável.\n\n"
+                        "3. Veredito\n"
+                        "GO para autoevolução assistida em modo readonly/controlado.\n"
+                        "NO-GO para escrita real, branch, commit, PR, merge ou deploy sem aprovação explícita por etapa."
+                    )
+                else:
+                    _hf4k_final_text = (
+                        "ORKIO — AUTOEVOLUÇÃO CONTROLADA READONLY\n\n"
+                        "1. Diagnóstico objetivo\n"
+                        "A plataforma pode evoluir de forma assistida e governada, mas não deve executar escrita real automaticamente.\n\n"
+                        "2. Issue map inicial\n"
+                        "- Prompts simples de presença já podem entrar em fast-path seguro.\n"
+                        "- Prompts genéricos de evolução ainda precisam ser roteados para fluxo governado.\n"
+                        "- Runtime pesado permanece NO-GO para decisões operacionais comuns quando houver risco de timeout.\n"
+                        "- Execução real, branch, PR, merge e deploy exigem aprovação humana explícita por etapa.\n\n"
+                        "3. Pipeline correto\n"
+                        "audit_report → issue_map → patch_plan → proposal_only → dry_run → branch_pr_plan → aprovação humana → execução limitada.\n\n"
+                        "4. Patch mínimo recomendado\n"
+                        "Criar ou usar fast-path de controlled_evolution_readonly para responder pedidos como:\n"
+                        "- precisamos analisar a plataforma e melhorá-la\n"
+                        "- a plataforma precisa evoluir\n"
+                        "- auto evolução controlada\n"
+                        "- o que precisamos fazer para resolver isso?\n\n"
+                        "5. Garantias operacionais\n"
+                        "- write_executed=false\n"
+                        "- branch_created=false\n"
+                        "- pr_created=false\n"
+                        "- deploy_executed=false\n"
+                        "- approval_required=true\n\n"
+                        "6. Próximo passo\n"
+                        "Gerar issue_map readonly dos problemas atuais e escolher um patch mínimo por vez."
+                    )
 
             elif _hf4k_memory:
                 # AO20K-HF4L_DB_BACKED_IMMEDIATE_MEMORY_RECALL
