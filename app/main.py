@@ -33951,6 +33951,83 @@ async def chat_stream(
                 pass
 
         # AO20K-HF4_RUNTIME_MARKER_AND_MINIMAL_BRANCH_PLAN_PROBE
+        # AO01C_PRE_AO20BC_INTERNAL_TOKEN_GUARD
+        # Must run before diagnostic probes / AO20BC technical audit.
+        try:
+            _ao01c_msg = str(message or "").strip()
+            _ao01c_norm = " ".join(_ao01c_msg.lower().split())
+            _ao01c_internal_diagnostic_token = bool(
+                len(_ao01c_msg) <= 360
+                and (
+                    "chat_stream_runtime_timeout" in _ao01c_norm
+                    or "_run_direct_chat_in_isolated_session" in _ao01c_norm
+                    or "run_direct_chat_in_isolated_session" in _ao01c_norm
+                    or "runtime pesado" in _ao01c_norm
+                    or "runtime principal" in _ao01c_norm
+                    or "provider pesado" in _ao01c_norm
+                    or "fallback seguro" in _ao01c_norm
+                    or "ao20bc" in _ao01c_norm
+                )
+            )
+
+            if _ao01c_internal_diagnostic_token:
+                final_text = (
+                    "ORKIO — DIAGNÓSTICO READONLY DE TOKEN INTERNO\\n\\n"
+                    "1. Diagnóstico objetivo\\n"
+                    "A mensagem contém um token interno de diagnóstico. Este fluxo foi capturado antes do AO20BC/Router Precedence para evitar auditoria técnica longa, runtime pesado, provider externo, toolchain, escrita real, branch, PR ou deploy.\\n\\n"
+                    "2. Classificação\\n"
+                    "- camada: backend / stream / router\\n"
+                    "- tipo: diagnóstico readonly pré-AO20BC\\n"
+                    "- runtime pesado acionado: false\\n"
+                    "- write_executed=false\\n"
+                    "- branch_created=false\\n"
+                    "- pr_created=false\\n"
+                    "- deploy_executed=false\\n\\n"
+                    "3. Próximo passo seguro\\n"
+                    "Para confirmar timeout real, valide os logs por ocorrências de CHAT_STREAM_RUNTIME_TIMEOUT. Se não houver ocorrência nos logs, o texto foi apenas um token digitado pelo usuário.\\n\\n"
+                    "4. Veredito\\n"
+                    "Verde: token interno tratado por fast-path readonly antes do AO20BC.\\n"
+                    "Amarelo: logs continuam sendo a fonte de verdade para timeout real.\\n"
+                    "Vermelho: nenhuma execução real iniciada."
+                )
+
+                persisted = await asyncio.to_thread(
+                    _persist_assistant_message,
+                    text=final_text,
+                    thread_id=tid_seed,
+                    agent_id=None,
+                    agent_name="Orkio",
+                )
+                payload = {
+                    **persisted,
+                    "answer": final_text,
+                    "message": final_text,
+                    "final_text": final_text,
+                    "agent_id": None,
+                    "agent_name": "Orkio",
+                    "runtime_hints": {
+                        "routing": {
+                            "routing_source": "stream_ao01c_pre_ao20bc_internal_token_guard",
+                            "route_applied": True,
+                            "execution_lifecycle": "completed",
+                            "route_family": "internal_diagnostic_token_readonly",
+                            "dispatch_executed": True,
+                            "write_executed": False,
+                            "branch_created": False,
+                            "pr_created": False,
+                            "deploy_executed": False,
+                        }
+                    },
+                }
+                async for ev in _emit_result_payload(payload, routing_source="stream_ao01c_pre_ao20bc_internal_token_guard"):
+                    yield ev
+                return
+        except Exception:
+            try:
+                logger.exception("CHAT_STREAM_AO01C_INTERNAL_TOKEN_GUARD_FAILED trace_id=%s", trace_id)
+            except Exception:
+                pass
+
         # These diagnostic probes must run before @Orkio orchestration_audit/AO20BC.
         # They never create proposals, branches, commits, PRs, deploys or migrations.
         if _is_ao20k_hf4_runtime_marker_request_message(message):
