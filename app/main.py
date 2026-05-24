@@ -34006,6 +34006,7 @@ async def chat_stream(
                     "final_text": final_text,
                     "agent_id": None,
                     "agent_name": "Orkio",
+                    "final_speaker": "Orkio",
                     "runtime_hints": {
                         "routing": {
                             "routing_source": "stream_ao01c_pre_ao20bc_internal_token_guard",
@@ -35137,6 +35138,43 @@ async def chat_stream(
             except Exception:
                 _hf4k_agent_name = "Orkio"
 
+            # HF6R1_NORMALIZE_FASTPATH_ROUTE_METADATA
+            _hf6r1_route_family = {
+                "multi_intent_readonly_splitter": "multi_intent_readonly",
+                "internal_diagnostic_token_readonly": "internal_diagnostic_token_readonly",
+                "checkpoint_ack_readonly": "checkpoint_readonly",
+                "simple_greeting": "simple_greeting",
+                "system_status_readonly": "system_status_readonly",
+                "readonly_audit_light": "readonly_audit_light",
+                "branch_pr_plan_simulated_readonly": "branch_pr_plan_simulated_readonly",
+                "simulation_only_branch_pr_plan": "branch_pr_plan_simulated_readonly",
+                "safe_agent_ping": "agent_ping",
+                "safe_agent_greeting": "agent_greeting",
+                "simple_status": "system_status_readonly",
+                "controlled_evolution_readonly": "controlled_evolution_readonly",
+                "governed_pipeline_inventory_readonly": "governed_pipeline_inventory_readonly",
+                "issue_map_patch_plan_readonly": "issue_map_patch_plan_readonly",
+                "memory_lookup_readonly": "memory_lookup_readonly",
+            }.get(str(_hf4k_kind or ""), "safe_fastpath_coverage")
+
+            _hf6r1_route_priority = {
+                "internal_diagnostic_token_readonly": 10,
+                "multi_intent_readonly_splitter": 20,
+                "checkpoint_ack_readonly": 30,
+                "safe_agent_ping": 40,
+                "safe_agent_greeting": 45,
+                "simple_greeting": 50,
+                "system_status_readonly": 60,
+                "readonly_audit_light": 70,
+                "branch_pr_plan_simulated_readonly": 80,
+                "simulation_only_branch_pr_plan": 80,
+                "issue_map_patch_plan_readonly": 90,
+                "governed_pipeline_inventory_readonly": 95,
+                "controlled_evolution_readonly": 100,
+                "memory_lookup_readonly": 110,
+                "simple_status": 120,
+            }.get(str(_hf4k_kind or ""), 999)
+
             if _hf4k_kind and _hf4k_final_text:
                 _hf4k_persisted = await asyncio.to_thread(
                     _persist_assistant_message,
@@ -35146,18 +35184,24 @@ async def chat_stream(
                     agent_name=_hf4k_agent_name,
                 )
 
+                # HF6R1A_FIX_AGENT_NAME_ANCHOR_SCOPE
                 _hf4k_payload = {
                     **_hf4k_persisted,
                     "answer": _hf4k_final_text,
                     "message": _hf4k_final_text,
                     "final_text": _hf4k_final_text,
                     "agent_id": None,
-                    "agent_name": "Orkio",
+                    "agent_name": _hf4k_agent_name,
+                    "final_speaker": _hf4k_agent_name,
                     "runtime_hints": {
                         "routing": {
                             "routing_source": "stream_ao20k_hf4k_" + _hf4k_kind,
                             "route_applied": True,
-                            "route_family": "safe_fastpath_coverage",
+                            "route_family": _hf6r1_route_family,
+                            "route_kind": _hf4k_kind,
+                            "route_priority": _hf6r1_route_priority,
+                            "route_matrix_version": "HF6R1",
+                            "metadata_normalized": True,
                             "execution_lifecycle": "completed",
                             "fast_path_hit": True,
                             "runtime_bypassed": True,
