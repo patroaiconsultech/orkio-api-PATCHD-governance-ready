@@ -34639,7 +34639,143 @@ async def chat_stream(
                 )
             )
 
-            if _ao01_internal_diagnostic_token:
+            # AO01D_MULTI_INTENT_READONLY_SPLITTER
+            _ao01d_multi_intent_readonly = False
+            _ao01d_parts = []
+            try:
+                _ao01d_lines = [
+                    str(_line or "").strip()
+                    for _line in str(_hf4k_msg or "").splitlines()
+                    if str(_line or "").strip()
+                ]
+
+                def _ao01d_norm_line(_value):
+                    return " ".join(str(_value or "").strip().lower().split())
+
+                _ao01d_line_norms = [_ao01d_norm_line(_line) for _line in _ao01d_lines]
+                _ao01d_mutating = any(
+                    _term in _ao01_norm
+                    for _term in (
+                        "execute",
+                        "executar",
+                        "aplique",
+                        "aplicar",
+                        "commit",
+                        "push",
+                        "deploy",
+                        "crie branch real",
+                        "abra pr real",
+                        "abrir pr real",
+                    )
+                )
+
+                _ao01d_has_readonly_audit = any(
+                    "auditoria readonly" in _line_norm
+                    or "auditoria read only" in _line_norm
+                    or "diagnostico readonly" in _line_norm
+                    or "diagnóstico readonly" in _line_norm
+                    or "diagnostico read only" in _line_norm
+                    or "diagnóstico read only" in _line_norm
+                    for _line_norm in _ao01d_line_norms
+                )
+
+                _ao01d_has_checkpoint = any(
+                    _line_norm.startswith("safe prod green")
+                    or _line_norm.startswith("checkpoint")
+                    or _line_norm.startswith("check point")
+                    or _line_norm.startswith("validado")
+                    or _line_norm.startswith("validated")
+                    or _line_norm.startswith("prod green")
+                    or "safe prod green" in _line_norm
+                    for _line_norm in _ao01d_line_norms
+                )
+
+                _ao01d_has_system_status = any(
+                    "status do sistema" in _line_norm
+                    or "sistema está online" in _line_norm
+                    or "sistema esta online" in _line_norm
+                    or "plataforma está online" in _line_norm
+                    or "plataforma esta online" in _line_norm
+                    for _line_norm in _ao01d_line_norms
+                )
+
+                _ao01d_agent_targets = []
+                for _line_norm in _ao01d_line_norms:
+                    if "@orion" in _line_norm and "Orion" not in _ao01d_agent_targets:
+                        _ao01d_agent_targets.append("Orion")
+                    if "@chris" in _line_norm and "Chris" not in _ao01d_agent_targets:
+                        _ao01d_agent_targets.append("Chris")
+                    if "@team" in _line_norm and "Team" not in _ao01d_agent_targets:
+                        _ao01d_agent_targets.append("Team")
+                    if "@orkio" in _line_norm and "Orkio" not in _ao01d_agent_targets:
+                        _ao01d_agent_targets.append("Orkio")
+
+                _ao01d_signal_count = (
+                    int(_ao01d_has_readonly_audit)
+                    + int(_ao01d_has_checkpoint)
+                    + int(_ao01d_has_system_status)
+                    + int(bool(_ao01d_agent_targets))
+                )
+
+                _ao01d_multi_intent_readonly = bool(
+                    len(_ao01d_lines) >= 2
+                    and len(str(_hf4k_msg or "")) <= 1200
+                    and _ao01d_signal_count >= 2
+                    and not _ao01d_mutating
+                )
+
+                if _ao01d_multi_intent_readonly:
+                    _ao01d_parts = [
+                        "ORKIO — MULTI-INTENT READONLY",
+                        "",
+                        "1. Diagnóstico objetivo",
+                        "Mensagem multi-intenção readonly detectada. O router decompôs os sinais em blocos seguros, sem acionar runtime pesado, provider externo, escrita real, branch, PR ou deploy.",
+                        "",
+                        "2. Blocos resolvidos",
+                    ]
+
+                    if _ao01d_has_readonly_audit:
+                        _ao01d_parts.append("- Auditoria readonly: pedido classificado como diagnóstico leve, sem mutação e sem execução real.")
+
+                    if _ao01d_has_checkpoint:
+                        _ao01d_parts.append("- Checkpoint: recebido e tratado em modo readonly. Sem escrita, sem branch/PR e sem deploy.")
+
+                    if _ao01d_has_system_status:
+                        _ao01d_parts.append("- Status do sistema: online para chat básico, auditoria readonly, fast-paths governados e testes controlados.")
+
+                    for _target in _ao01d_agent_targets:
+                        if _target == "Orion":
+                            _ao01d_parts.append("- Orion: online para auditoria readonly, diagnóstico técnico e testes controlados.")
+                        elif _target == "Chris":
+                            _ao01d_parts.append("- Chris: online para contexto estratégico, leitura executiva e apoio consultivo.")
+                        elif _target == "Team":
+                            _ao01d_parts.append("- Team: online para coordenação segura, auditoria readonly e testes controlados.")
+                        else:
+                            _ao01d_parts.append("- Orkio: online para chat básico, auditoria readonly e governança segura.")
+
+                    _ao01d_parts.extend([
+                        "",
+                        "3. Garantias operacionais",
+                        "- write_executed=false",
+                        "- branch_created=false",
+                        "- pr_created=false",
+                        "- deploy_executed=false",
+                        "- approval_required=true para qualquer etapa mutável futura",
+                        "",
+                        "4. Veredito",
+                        "Verde: multi-intenção readonly resolvida por fast-path.",
+                        "Amarelo: pedidos mutáveis continuam exigindo aprovação explícita.",
+                        "Vermelho: nenhuma execução real iniciada.",
+                    ])
+            except Exception:
+                _ao01d_multi_intent_readonly = False
+                _ao01d_parts = []
+
+            if _ao01d_multi_intent_readonly:
+                _hf4k_kind = "multi_intent_readonly_splitter"
+                _hf4k_final_text = "\n".join(_ao01d_parts)
+
+            elif _ao01_internal_diagnostic_token:
                 _hf4k_kind = "internal_diagnostic_token_readonly"
                 _hf4k_final_text = (
                     "ORKIO — DIAGNÓSTICO READONLY DE TOKEN INTERNO\n\n"
