@@ -33952,6 +33952,7 @@ async def chat_stream(
 
         # AO20K-HF4_RUNTIME_MARKER_AND_MINIMAL_BRANCH_PLAN_PROBE
         # AO01C_PRE_AO20BC_INTERNAL_TOKEN_GUARD
+        # AO01C1_FIX_LITERAL_NEWLINES
         # Must run before diagnostic probes / AO20BC technical audit.
         try:
             _ao01c_msg = str(message or "").strip()
@@ -33972,22 +33973,22 @@ async def chat_stream(
 
             if _ao01c_internal_diagnostic_token:
                 final_text = (
-                    "ORKIO — DIAGNÓSTICO READONLY DE TOKEN INTERNO\\n\\n"
-                    "1. Diagnóstico objetivo\\n"
-                    "A mensagem contém um token interno de diagnóstico. Este fluxo foi capturado antes do AO20BC/Router Precedence para evitar auditoria técnica longa, runtime pesado, provider externo, toolchain, escrita real, branch, PR ou deploy.\\n\\n"
-                    "2. Classificação\\n"
-                    "- camada: backend / stream / router\\n"
-                    "- tipo: diagnóstico readonly pré-AO20BC\\n"
-                    "- runtime pesado acionado: false\\n"
-                    "- write_executed=false\\n"
-                    "- branch_created=false\\n"
-                    "- pr_created=false\\n"
-                    "- deploy_executed=false\\n\\n"
-                    "3. Próximo passo seguro\\n"
-                    "Para confirmar timeout real, valide os logs por ocorrências de CHAT_STREAM_RUNTIME_TIMEOUT. Se não houver ocorrência nos logs, o texto foi apenas um token digitado pelo usuário.\\n\\n"
-                    "4. Veredito\\n"
-                    "Verde: token interno tratado por fast-path readonly antes do AO20BC.\\n"
-                    "Amarelo: logs continuam sendo a fonte de verdade para timeout real.\\n"
+                    "ORKIO — DIAGNÓSTICO READONLY DE TOKEN INTERNO\n\n"
+                    "1. Diagnóstico objetivo\n"
+                    "A mensagem contém um token interno de diagnóstico. Este fluxo foi capturado antes do AO20BC/Router Precedence para evitar auditoria técnica longa, runtime pesado, provider externo, toolchain, escrita real, branch, PR ou deploy.\n\n"
+                    "2. Classificação\n"
+                    "- camada: backend / stream / router\n"
+                    "- tipo: diagnóstico readonly pré-AO20BC\n"
+                    "- runtime pesado acionado: false\n"
+                    "- write_executed=false\n"
+                    "- branch_created=false\n"
+                    "- pr_created=false\n"
+                    "- deploy_executed=false\n\n"
+                    "3. Próximo passo seguro\n"
+                    "Para confirmar timeout real, valide os logs por ocorrências de CHAT_STREAM_RUNTIME_TIMEOUT. Se não houver ocorrência nos logs, o texto foi apenas um token digitado pelo usuário.\n\n"
+                    "4. Veredito\n"
+                    "Verde: token interno tratado por fast-path readonly antes do AO20BC.\n"
+                    "Amarelo: logs continuam sendo a fonte de verdade para timeout real.\n"
                     "Vermelho: nenhuma execução real iniciada."
                 )
 
