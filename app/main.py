@@ -34202,6 +34202,73 @@ async def chat_stream(
             )
             _hf4p_agent_ping = bool(_hf4p_target and _hf4p_ping_terms and len(_hf4k_msg) <= 180)
 
+            # AO20K-HF4T_SAFE_AGENT_GREETING_FASTPATH
+            _hf4t_raw_l = str(_hf4k_msg or "").lower().strip()
+            _hf4t_clean = _hf4t_raw_l
+
+            for _hf4t_marker in ("@orion", "@chris", "@team", "@orkio"):
+                _hf4t_clean = _hf4t_clean.replace(_hf4t_marker, " ")
+
+            _hf4t_clean = " ".join(_hf4t_clean.split()).strip()
+            while _hf4t_clean and (_hf4t_clean[0].isdigit() or _hf4t_clean[0] in ".-) "):
+                _hf4t_clean = _hf4t_clean[1:].strip()
+            _hf4t_clean = _hf4t_clean.strip(" .!?,;:-").lower()
+
+            _hf4t_simple_greeting = _hf4t_clean in (
+                "oi",
+                "ola",
+                "olá",
+                "hello",
+                "hi",
+                "hey",
+                "bom dia",
+                "boa tarde",
+                "boa noite",
+            )
+
+            _hf4t_ctx_l = ""
+            for _hf4t_key in (
+                "agent",
+                "agent_name",
+                "agent_slug",
+                "selected_agent",
+                "selected_agent_name",
+                "target_agent",
+                "target_agent_name",
+                "destination",
+                "recipient",
+                "persona",
+                "active_agent",
+            ):
+                try:
+                    _hf4t_val = locals().get(_hf4t_key)
+                    if isinstance(_hf4t_val, str):
+                        _hf4t_ctx_l += " " + _hf4t_val.lower()
+                    elif isinstance(_hf4t_val, dict):
+                        _hf4t_ctx_l += " " + " ".join(str(v).lower() for v in _hf4t_val.values())
+                    elif _hf4t_val is not None:
+                        _hf4t_ctx_l += " " + str(getattr(_hf4t_val, "name", "")).lower()
+                        _hf4t_ctx_l += " " + str(getattr(_hf4t_val, "slug", "")).lower()
+                except Exception:
+                    pass
+
+            _hf4t_target = _hf4p_target
+            if not _hf4t_target:
+                if "orion" in _hf4t_ctx_l:
+                    _hf4t_target = "Orion"
+                elif "chris" in _hf4t_ctx_l:
+                    _hf4t_target = "Chris"
+                elif "team" in _hf4t_ctx_l:
+                    _hf4t_target = "Team"
+                elif "orkio" in _hf4t_ctx_l:
+                    _hf4t_target = "Orkio"
+
+            _hf4t_agent_greeting = bool(
+                _hf4t_simple_greeting
+                and _hf4t_target
+                and len(_hf4k_msg) <= 120
+            )
+
             # AO20K-HF4Q_CONTROLLED_EVOLUTION_FASTPATH
             _hf4q_norm = str(_hf4k_norm or "")
             _hf4q_platform_scope = (
@@ -34283,6 +34350,17 @@ async def chat_stream(
                     _hf4k_final_text = "Team está online para coordenação segura, auditoria readonly e testes controlados. Execução real permanece bloqueada sem aprovação."
                 else:
                     _hf4k_final_text = "Orkio está online para chat básico, auditoria readonly e testes controlados. Execução real permanece bloqueada sem aprovação."
+
+            elif _hf4t_agent_greeting:
+                _hf4k_kind = "safe_agent_greeting"
+                if _hf4t_target == "Orion":
+                    _hf4k_final_text = "Olá. Orion está online para auditoria readonly, diagnóstico técnico e testes controlados. Execução real permanece bloqueada sem aprovação."
+                elif _hf4t_target == "Chris":
+                    _hf4k_final_text = "Olá. Chris está online para contexto estratégico, leitura executiva e apoio consultivo. Execução real permanece bloqueada sem aprovação."
+                elif _hf4t_target == "Team":
+                    _hf4k_final_text = "Olá. Team está online para coordenação segura, auditoria readonly e testes controlados. Execução real permanece bloqueada sem aprovação."
+                else:
+                    _hf4k_final_text = "Olá. Orkio está online para chat básico, auditoria readonly e testes controlados. Execução real permanece bloqueada sem aprovação."
 
             elif _hf4q_controlled_evolution:
                 _hf4k_kind = "controlled_evolution_readonly"
