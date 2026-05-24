@@ -6090,6 +6090,34 @@ def _is_summit_auto_approved_code(raw_access_code: Optional[str], signup_code_la
         return True
     return False
 
+# AO20K-HF6A_TESTER_BILLING_BYPASS
+def _tester_billing_bypass_plan_codes() -> set:
+    raw = _clean_env(os.getenv("TESTER_BILLING_BYPASS_PLAN_CODES", "founder_access"), default="founder_access")
+    return {part.strip().lower() for part in raw.split(",") if part.strip()}
+
+
+def _tester_billing_bypass_emails() -> set:
+    raw = _clean_env(os.getenv("TESTER_BILLING_BYPASS_EMAILS", ""), default="")
+    return {part.strip().lower() for part in raw.split(",") if part.strip()}
+
+
+def _tester_billing_bypass_env_enabled() -> bool:
+    raw = _clean_env(os.getenv("TESTER_BILLING_BYPASS_ENABLED", ""), default="")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _tester_billing_bypass_allowed_for_user(u: Optional[User], item_code: Optional[str]) -> bool:
+    code = str(item_code or "").strip().lower()
+    if code not in _tester_billing_bypass_plan_codes():
+        return False
+    if not u:
+        return False
+    if _is_summit_auto_approved_code(None, getattr(u, "signup_code_label", None), getattr(u, "signup_source", None)):
+        return True
+    email = str(getattr(u, "email", "") or "").strip().lower()
+    return bool(_tester_billing_bypass_env_enabled() and email in _tester_billing_bypass_emails())
+
+
 @app.post("/api/auth/register", response_model=TokenOut)
 def register(inp: RegisterIn, request: Request = None, x_org_slug: Optional[str] = Header(default=None), db: Session = Depends(get_db)):
     ip = (request.client.host if request and request.client else "unknown")
@@ -6168,7 +6196,12 @@ def register(inp: RegisterIn, request: Request = None, x_org_slug: Optional[str]
     if existing:
         raise HTTPException(status_code=409, detail="Email already registered")
 
-    approved_at_value = now_ts() if (is_admin_email or (SUMMIT_MODE and not is_admin_email)) else None
+    tester_billing_bypass_access = _is_summit_auto_approved_code(inp.access_code, signup_code_label, signup_source)
+    if tester_billing_bypass_access and not is_admin_email:
+        usage_tier = usage_tier or "summit_investor"
+        product_scope = "full"
+
+    approved_at_value = now_ts() if (is_admin_email or (SUMMIT_MODE and not is_admin_email) or tester_billing_bypass_access) else None
 
     salt = new_salt()
     pw_hash = pbkdf2_hash(inp.password, salt)
@@ -23487,6 +23520,37 @@ def billing_public_checkout(inp: BillingCheckoutIn, request: Request = None, x_o
                 "status": "already_active",
                 "already_active": True,
                 "item": {"code": ent.plan_code, "name": ent.plan_name},
+                "wallet_preview": _wallet_to_dict(wallet),
+            }
+
+    if checkout_kind == "plan":
+        bypass_user = db.execute(select(User).where(User.org_slug == org, User.email == email)).scalar_one_or_none()
+        if _tester_billing_bypass_allowed_for_user(bypass_user, item_code):
+            wallet = _get_or_create_wallet(db, org, email, full_name=full_name)
+            db.commit()
+            checkout_id = f"tester_bypass_{getattr(bypass_user, 'id', '') or new_id()}"
+            try:
+                logger.warning("TESTER_BILLING_BYPASS_GRANTED org=%s email=%s item_code=%s", org, email, item_code)
+                audit(
+                    db,
+                    org,
+                    getattr(bypass_user, "id", None),
+                    "billing.checkout_bypassed",
+                    request_id="billing",
+                    path="/api/billing/public/checkout",
+                    status_code=200,
+                    latency_ms=0,
+                    meta={"checkout_id": checkout_id, "item_code": item_code, "email": email, "reason": "tester_bypass"},
+                )
+            except Exception:
+                pass
+            return {
+                "ok": True,
+                "checkout_id": checkout_id,
+                "status": "tester_bypass",
+                "checkout_url": None,
+                "already_active": True,
+                "item": item,
                 "wallet_preview": _wallet_to_dict(wallet),
             }
 
