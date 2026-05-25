@@ -24178,6 +24178,57 @@ def admin_evolution_executions(
 # AO-17A — Branch/PR Runner Governado: contrato read-only
 # ================================
 
+def _admin_evolution_is_frontend_publication_stage(proposal: Dict[str, Any]) -> bool:
+    """
+    AO-23 detector.
+
+    Must run before AO-22 merge-plan detection because AO-23 may mention
+    frontend, main, previous PR/merge context and deployment governance,
+    but its next contract is publication/push review, not PR merge.
+    """
+    p = proposal if isinstance(proposal, dict) else {}
+    haystack_parts: List[str] = [
+        str(p.get("title") or ""),
+        str(p.get("summary") or ""),
+        str(p.get("rollback_plan") or ""),
+        str(p.get("source_message") or ""),
+        str(p.get("diff_preview") or ""),
+    ]
+
+    checklist = p.get("checklist") or p.get("validation_checklist") or []
+    if isinstance(checklist, list):
+        haystack_parts.extend(str(x or "") for x in checklist)
+
+    target_files = p.get("target_files") or []
+    if isinstance(target_files, list):
+        haystack_parts.extend(str(x or "") for x in target_files)
+
+    haystack = "\n".join(haystack_parts).lower()
+
+    has_ao23_intent = (
+        "ao-23" in haystack
+        or "ao23" in haystack
+        or "publicação governada do frontend" in haystack
+        or "publicacao governada do frontend" in haystack
+        or "deploy governado do frontend" in haystack
+        or "push governado" in haystack
+        or "push futuro" in haystack
+        or "commit 6ea230c" in haystack
+        or "pin frontend runtime to node 20" in haystack
+    )
+
+    has_frontend_publication_contract = (
+        ".nvmrc" in haystack
+        or "package.json" in haystack
+        or "node 20" in haystack
+        or "build:verify" in haystack
+        or "build_verify_ok" in haystack
+        or "verify_exit=0" in haystack
+    )
+
+    return bool(has_ao23_intent and has_frontend_publication_contract)
+
+
 def _admin_evolution_is_governed_merge_stage(proposal: Dict[str, Any]) -> bool:
     """
     AO-22 stage detector.
@@ -24203,6 +24254,9 @@ def _admin_evolution_is_governed_merge_stage(proposal: Dict[str, Any]) -> bool:
         haystack_parts.extend(str(x or "") for x in target_files)
 
     haystack = "\n".join(haystack_parts).lower()
+
+    if _admin_evolution_is_frontend_publication_stage(p):
+        return False
 
     return (
         "ao-22" in haystack
@@ -24410,6 +24464,117 @@ def _admin_evolution_build_branch_pr_plan(proposal: Dict[str, Any]) -> Dict[str,
     title = str(p.get("title") or "Proposta de evolução controlada").strip()
     risk = str(p.get("risk") or "baixo_medio").strip()
     rollback_plan = str(p.get("rollback_plan") or "").strip()
+
+    # AO-23_FRONTEND_PUBLICATION_PLAN_READONLY_PAYLOAD
+    if _admin_evolution_is_frontend_publication_stage(p):
+        ao23_pid = str(p.get("proposal_id") or "").strip()
+        ao23_status = str(p.get("status") or "pending_approval").strip() or "pending_approval"
+        ao23_execution_id = str(p.get("execution_id") or "").strip()
+        ao23_execution_status = str(p.get("execution_status") or "not_started").strip() or "not_started"
+        ao23_dry_run_completed = ao23_execution_status == "dry_run_completed"
+
+        ao23_target_files = p.get("target_files") or [".nvmrc", "package.json"]
+        if not isinstance(ao23_target_files, list):
+            ao23_target_files = [".nvmrc", "package.json"]
+        ao23_target_files = [str(x or "").strip() for x in ao23_target_files if str(x or "").strip()]
+        if not ao23_target_files:
+            ao23_target_files = [".nvmrc", "package.json"]
+
+        return {
+            "ok": True,
+            "stage": "AO-23",
+            "mode": "governed_frontend_publication_plan_readonly",
+            "proposal_id": ao23_pid,
+            "proposal_status": ao23_status,
+            "execution_id": ao23_execution_id,
+            "execution_status": ao23_execution_status,
+            "dry_run_completed": ao23_dry_run_completed,
+            "repo_target": "frontend",
+            "target_branch": "main",
+            "base_branch": "main",
+            "local_commit": "6ea230c",
+            "local_commit_title": "Pin frontend runtime to Node 20",
+            "target_files": ao23_target_files,
+            "can_prepare_branch_pr": False,
+            "can_prepare_branch_patch": False,
+            "can_apply_branch_patch": False,
+            "can_revert_branch_patch": False,
+            "can_create_branch": False,
+            "can_open_pr": False,
+            "can_create_pr": False,
+            "can_prepare_merge": False,
+            "can_merge": False,
+            "can_prepare_push": bool(ao23_status == "approved" and ao23_dry_run_completed),
+            "can_push": False,
+            "can_deploy": False,
+            "can_run_migration": False,
+            "execution_enabled": False,
+            "can_execute_real": False,
+            "write_allowed": False,
+            "file_write_allowed": False,
+            "commit_allowed": False,
+            "create_pr_allowed": False,
+            "merge_allowed": False,
+            "push_allowed": False,
+            "deploy_allowed": False,
+            "migration_allowed": False,
+            "main_branch_write_allowed": False,
+            "main_direct_write_allowed": False,
+            "api_changes_allowed": False,
+            "suggested_publication_title": "AO-23 — Publicação Governada do Frontend",
+            "risk": str(p.get("risk") or "baixo"),
+            "publication_contract": {
+                "repo_target": "frontend",
+                "target_branch": "main",
+                "local_commit": "6ea230c",
+                "local_commit_title": "Pin frontend runtime to Node 20",
+                "target_files": ao23_target_files,
+                "push_allowed": False,
+                "push_now": False,
+                "deploy_allowed": False,
+                "deploy_now": False,
+                "migration_allowed": False,
+                "main_direct_write_allowed": False,
+                "requires_admin_approval_before_push": True,
+                "requires_build_verify_before_push": True,
+                "requires_deploy_observation_if_auto_deploy_triggers": True,
+            },
+            "rollback_contract": {
+                "rollback_plan_required": True,
+                "rollback_without_admin_approval": False,
+                "rollback_plan": str(p.get("rollback_plan") or ""),
+                "rollback_if_push_not_executed": "Nenhuma ação técnica necessária.",
+                "rollback_if_push_or_deploy_fails": "Revert do commit 6ea230c ou novo commit corretivo, sem migration.",
+            },
+            "smoke_contract": {
+                "build_required": True,
+                "build_verify_required": True,
+                "admin_review_required": True,
+                "minimum_checks": [
+                    ".nvmrc contém 20.",
+                    "package.json contém engines.node >=20 <23.",
+                    "package.json contém engines.npm >=10 <11.",
+                    "npm run build passou com Node 20.",
+                    "npm run build:verify passou com VERIFY_EXIT=0 e BUILD_VERIFY_OK.",
+                    "Frontend permanece ahead 1 até push governado.",
+                    "Deploy permanece bloqueado neste plano read-only.",
+                    "Migration permanece bloqueada.",
+                ],
+            },
+            "blocked_actions": [
+                "write_repository_now",
+                "write_main_branch",
+                "commit_now",
+                "open_pr_now",
+                "merge_now",
+                "push_now",
+                "deploy",
+                "migration",
+                "api_change",
+            ],
+            "next_required_stage": "AO-23B governed frontend push/publication only after explicit Admin approval and publication preflight validation",
+            "message": "AO-23 pronto para revisão: próxima etapa poderá preparar push governado do commit 6ea230c, ainda sem executar push ou deploy.",
+        }
 
     # AO-22_MERGE_PLAN_READONLY_PAYLOAD
     if _admin_evolution_is_governed_merge_stage(p):
