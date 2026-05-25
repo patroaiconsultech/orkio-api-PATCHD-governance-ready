@@ -24405,6 +24405,33 @@ def _admin_evolution_build_branch_pr_plan(proposal: Dict[str, Any]) -> Dict[str,
 
     branch_slug = re.sub(r"[^a-z0-9._-]+", "-", proposal_id.lower()).strip("-") or "proposal"
     suggested_branch = f"ao-17/{branch_slug}"
+    # AO-17B_BRANCH_TARGET_FROM_BASE_PROPOSAL
+    # Patch mínimo: propostas AO-17B podem referenciar uma proposal base.
+    # Quando o prompt/summary/rollback trouxer suggested_branch explícita,
+    # o plano deve respeitar essa branch em vez de derivar do proposal_id AO-17B.
+    try:
+        ao17b_text = " ".join(str(proposal.get(k) or "") for k in (
+            "source_message",
+            "summary",
+            "rollback_plan",
+            "title",
+        ))
+        ao17b_norm = ao17b_text.lower()
+        if (
+            "ao-17b" in ao17b_norm
+            or "criação governada de branch" in ao17b_norm
+            or "branch temporária" in ao17b_norm
+        ):
+            match = (
+                re.search(r"suggested_branch\s*[:=]\s*(ao-17/evo_[A-Za-z0-9]{8,40})", ao17b_text, flags=re.I)
+                or re.search(r"branch sugerida\s*:\s*(ao-17/evo_[A-Za-z0-9]{8,40})", ao17b_text, flags=re.I)
+                or re.search(r"branch temporária\s+(ao-17/evo_[A-Za-z0-9]{8,40})", ao17b_text, flags=re.I)
+            )
+            if match:
+                suggested_branch = str(match.group(1)).strip()
+    except Exception:
+        pass
+
 
     return {
         "ok": True,
