@@ -33514,6 +33514,108 @@ async def chat_stream(
         Converte o patch_plan do pipeline governado em uma proposal_only auditável.
         Este spec não escreve repositório, não comita e não faz deploy.
         """
+        # AO-23_SPECIFIC_FRONTEND_PUBLICATION_PROPOSAL_PAYLOAD
+        # Publicação governada do frontend deve vencer AO-22 quando o objetivo for push/deploy do commit local.
+        ao23_text = str(message or "")
+        ao23_norm = ao23_text.lower()
+        ao23_publication_intent = (
+            "ao-23" in ao23_norm
+            or "ao23" in ao23_norm
+            or "publicação governada do frontend" in ao23_norm
+            or "publicacao governada do frontend" in ao23_norm
+            or "deploy governado do frontend" in ao23_norm
+            or "push governado" in ao23_norm
+            or "commit 6ea230c" in ao23_norm
+            or "pin frontend runtime to node 20" in ao23_norm
+            or ".nvmrc" in ao23_norm
+            or "package.json" in ao23_norm
+            or "build_verify_ok" in ao23_norm
+            or "build:verify" in ao23_norm
+        )
+        ao23_frontend_context = (
+            "repo_target=frontend" in ao23_norm
+            or "repo frontend" in ao23_norm
+            or "frontend" in ao23_norm
+            or "orkio-web-patchd-patroai-integrated" in ao23_norm
+        )
+        if ao23_publication_intent and ao23_frontend_context:
+            return {
+                "title": "AO-23 — Publicação Governada do Frontend",
+                "summary": (
+                    "Criar proposta governada para publicar futuramente o commit local 6ea230c "
+                    "no repositório frontend orkio-web-PATCHD-patroai-integrated. "
+                    "O commit fixa o runtime do frontend em Node 20 após validação de build local "
+                    "e build:verify Nixpacks. Esta etapa é somente proposal_only: não executa push, "
+                    "não executa deploy, não executa migration e não altera API."
+                ),
+                "risk": "baixo",
+                "target_files": [
+                    ".nvmrc",
+                    "package.json",
+                ],
+                "rollback_plan": (
+                    "Se o push ainda não tiver sido executado, nenhuma ação técnica é necessária. "
+                    "Se o push for executado e causar falha de build/deploy, o rollback seguro será "
+                    "revert do commit 6ea230c ou novo commit corretivo, sem migration."
+                ),
+                "checklist": [
+                    "proposal_only nasce como AO-23, não como AO-22.",
+                    "repo_target=frontend.",
+                    "target_branch=main.",
+                    "local_commit=6ea230c.",
+                    "local_commit_title=Pin frontend runtime to Node 20.",
+                    "target_files contém apenas .nvmrc e package.json.",
+                    ".nvmrc contém 20.",
+                    "package.json contém engines.node >=20 <23.",
+                    "package.json contém engines.npm >=10 <11.",
+                    "npm run build passou com Node 20.",
+                    "npm run build:verify passou com VERIFY_EXIT=0 e BUILD_VERIFY_OK.",
+                    "push_allowed=false na criação da proposal.",
+                    "deploy_allowed=false.",
+                    "migration_allowed=false.",
+                    "main_direct_write=false.",
+                    "api_changes_allowed=false.",
+                    "human_approval_required=true permanece obrigatório.",
+                    "execution_enabled=false permanece até approval gate.",
+                    "Não executar push durante proposal_only.",
+                    "Não executar deploy durante proposal_only.",
+                ],
+                "diff_preview": (
+                    "AO-23 FRONTEND PUBLICATION GOVERNANCE PREVIEW\n\n"
+                    "Repository:\n"
+                    "- patroaiconsultech/orkio-web-PATCHD-patroai-integrated\n\n"
+                    "Pending local commit:\n"
+                    "- 6ea230c Pin frontend runtime to Node 20\n\n"
+                    "Target branch:\n"
+                    "- main\n\n"
+                    "Target files:\n"
+                    "- .nvmrc\n"
+                    "- package.json\n\n"
+                    "Validated evidence:\n"
+                    "- npm run build OK with Node 20\n"
+                    "- npm run build:verify OK\n"
+                    "- VERIFY_EXIT=0\n"
+                    "- BUILD_VERIFY_OK\n\n"
+                    "Conceptual change:\n"
+                    "+ Registrar proposta governada para push futuro do commit 6ea230c e observação de deploy automático, se houver.\n\n"
+                    "Blocked real actions:\n"
+                    "- push=false\n"
+                    "- deploy=false\n"
+                    "- migration=false\n"
+                    "- api_change=false\n"
+                    "- main_direct_write=false"
+                ),
+                "smoke_plan": [
+                    "AdminEvolutionCenter lista a proposta AO-23.",
+                    "Admin aprova ou rejeita a proposta AO-23.",
+                    "Dry-run AO-23 gera execution_id sem executar push.",
+                    "Repositório frontend permanece ahead 1 até gate explícito.",
+                    "Nenhum deploy é executado durante proposal_only.",
+                    "Nenhuma migration é executada.",
+                    "Rollback plan está presente.",
+                ],
+            }
+
         # AO-22_SPECIFIC_GOVERNED_MERGE_PROPOSAL_PAYLOAD
         # Merge governado deve vencer criação de PR quando o PR já existe.
         ao22_text = str(message or "")
