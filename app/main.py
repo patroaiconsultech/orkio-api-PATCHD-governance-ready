@@ -34545,9 +34545,23 @@ async def chat_stream(
                 or "última mensagem" in _hf4k_norm
             )
 
-            _hf4k_simulated_branch_pr = (
+            # HF6R3A_SIMULATED_BRANCH_PR_SLASH_MATCHER
+            _hf4k_branch_pr_pair = bool(
                 "branch" in _hf4k_norm
-                and (" pr" in _hf4k_norm or "pull request" in _hf4k_norm)
+                and (
+                    " pr" in _hf4k_norm
+                    or "branch/pr" in _hf4k_norm
+                    or "branch / pr" in _hf4k_norm
+                    or "branch-pr" in _hf4k_norm
+                    or "branch_pr" in _hf4k_norm
+                    or "branch e pr" in _hf4k_norm
+                    or "branch com pr" in _hf4k_norm
+                    or "pull request" in _hf4k_norm
+                )
+            )
+
+            _hf4k_simulated_branch_pr = (
+                _hf4k_branch_pr_pair
                 and (
                     "simulado" in _hf4k_norm
                     or "apenas um plano" in _hf4k_norm
