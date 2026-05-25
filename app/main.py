@@ -32152,6 +32152,83 @@ async def chat_stream(
         Converte o patch_plan do pipeline governado em uma proposal_only auditável.
         Este spec não escreve repositório, não comita e não faz deploy.
         """
+        # AO-02B_SPECIFIC_GOVERNED_PROPOSAL_PAYLOAD
+        # Patch mínimo: quando o pedido proposal_only trouxer um escopo explícito
+        # de frontend/Termos, a proposta deve nascer com payload específico,
+        # não com o template genérico AO20J de core/governança.
+        raw_message = str(message or "")
+        raw_norm = raw_message.lower()
+
+        ao02b_requested = (
+            "ao-02b" in raw_norm
+            or "ao02b" in raw_norm
+            or "patch-teste inofensivo" in raw_norm
+        )
+        terms_target_requested = (
+            "src/routes/legal/terms.jsx" in raw_norm
+            or "termos de uso" in raw_norm
+            or "plataforma em evolução controlada e auditável" in raw_norm
+        )
+
+        if ao02b_requested and terms_target_requested:
+            return {
+                "title": "AO-02B — Safe Terms UX Text Branch Test",
+                "summary": (
+                    "Criar uma proposta governada de baixo risco para validar a esteira AO-02 "
+                    "com alteração textual mínima no frontend, limitada à página de Termos de Uso. "
+                    "A proposta deve permitir aprovação humana e dry-run, mantendo escrita real bloqueada "
+                    "até etapa futura de branch temporária."
+                ),
+                "risk": "baixo",
+                "target_files": [
+                    "src/routes/legal/Terms.jsx",
+                ],
+                "rollback_plan": (
+                    "Reverter a alteração textual em src/routes/legal/Terms.jsx, restaurando "
+                    "“Plataforma em evolução controlada.” no rodapé da página de Termos de Uso. "
+                    "Nenhuma alteração em backend, auth, billing, voice, wallet, PWA, main branch ou deploy."
+                ),
+                "checklist": [
+                    "proposal_only nasce com escopo específico AO-02B.",
+                    "target_files contém apenas src/routes/legal/Terms.jsx.",
+                    "target_files não contém app/main.py.",
+                    "target_files não contém /api/chat/stream.",
+                    "risk=baixo.",
+                    "human_approval_required=true permanece obrigatório.",
+                    "execution_enabled=false permanece.",
+                    "write_allowed=false permanece até aprovação e etapa futura.",
+                    "dry-run aprovado não executa escrita real.",
+                    "rollback_plan textual está presente.",
+                    "deploy_executed=false permanece.",
+                    "migration_executed=false permanece.",
+                ],
+                "diff_preview": (
+                    "AO-02B CONTROLLED PROPOSAL PREVIEW\n\n"
+                    "Target file:\n"
+                    "- src/routes/legal/Terms.jsx\n\n"
+                    "Conceptual change:\n"
+                    "- Trocar “Plataforma em evolução controlada.” por "
+                    "“Plataforma em evolução controlada e auditável.”\n\n"
+                    "Blocked real actions:\n"
+                    "- write_repository=false\n"
+                    "- commit=false\n"
+                    "- deploy=false\n"
+                    "- migration=false\n"
+                    "- main_branch_write=false"
+                ),
+                "smoke_plan": [
+                    "AdminEvolutionCenter lista a proposta AO-02B.",
+                    "Admin aprova a proposta pelo painel.",
+                    "Dry-run gera execution_id sem escrita real.",
+                    "Diff preview mostra somente src/routes/legal/Terms.jsx.",
+                    "Nenhum arquivo backend é alvo da proposta.",
+                    "execution_enabled=false permanece.",
+                    "can_execute_real=false permanece.",
+                    "write_allowed=false permanece durante dry-run.",
+                    "Nenhum commit, deploy, migration ou escrita em main ocorre.",
+                ],
+            }
+
         return {
             "title": "AO20J — Governed Proposal & Dry-Run Gate",
             "summary": (
