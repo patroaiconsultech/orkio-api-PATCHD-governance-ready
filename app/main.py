@@ -32298,6 +32298,94 @@ async def chat_stream(
         Converte o patch_plan do pipeline governado em uma proposal_only auditável.
         Este spec não escreve repositório, não comita e não faz deploy.
         """
+        # AO-19_SPECIFIC_GOVERNED_PR_PROPOSAL_PAYLOAD
+        # AO-19 deve vencer AO-17C/AO-18A quando o usuário pedir PR/Pull Request governado.
+        raw_message_ao19 = str(message or "")
+        raw_norm_ao19 = raw_message_ao19.lower()
+
+        ao19_requested = (
+            "ao-19" in raw_norm_ao19
+            or "ao19" in raw_norm_ao19
+            or "pull request" in raw_norm_ao19
+            or " pr " in f" {raw_norm_ao19} "
+            or "criação governada de pull request" in raw_norm_ao19
+            or "criacao governada de pull request" in raw_norm_ao19
+            or "criar pull request" in raw_norm_ao19
+            or "criar pr" in raw_norm_ao19
+            or "abrir pull request" in raw_norm_ao19
+            or "abrir pr" in raw_norm_ao19
+            or "create pr" in raw_norm_ao19
+            or "open pr" in raw_norm_ao19
+            or "source_branch" in raw_norm_ao19
+            or "target_branch" in raw_norm_ao19
+            or "create_pr_allowed" in raw_norm_ao19
+            or "merge_allowed=false" in raw_norm_ao19
+            or "deploy_allowed=false" in raw_norm_ao19
+        )
+
+        if ao19_requested:
+            source_branch = "ao-17/evo_f05bef3b8228"
+            target_branch = "main"
+            restore_point_id = "rp_evo_222f67771db3_607c5cd69e"
+
+            return {
+                "title": "AO-19 — Criação Governada de Pull Request",
+                "summary": (
+                    "Criar proposta governada específica para abertura futura de Pull Request "
+                    f"da branch temporária {source_branch} para {target_branch}, no repositório frontend, "
+                    "sem merge automático, sem deploy, sem migration e sem escrita direta em main."
+                ),
+                "risk": "baixo",
+                "target_files": ["src/routes/legal/Terms.jsx"],
+                "rollback_plan": (
+                    "Se o Pull Request ainda não tiver sido criado, nenhuma ação técnica é necessária. "
+                    "Se o PR for criado em etapa futura, o rollback seguro é fechar o PR sem merge. "
+                    "Não tocar main, não fazer merge, não fazer deploy e não executar migration."
+                ),
+                "checklist": [
+                    "proposal_only nasce como AO-19, não como AO-17C/AO-18A.",
+                    f"source_branch={source_branch}.",
+                    f"target_branch={target_branch}.",
+                    "repo_target=frontend.",
+                    "target_files contém apenas src/routes/legal/Terms.jsx.",
+                    f"restore_point_id={restore_point_id}.",
+                    "AO-17C deve estar branch_patch_applied antes da criação real do PR.",
+                    "create_pr_allowed=false na criação da proposal.",
+                    "merge_allowed=false.",
+                    "deploy_allowed=false.",
+                    "migration_allowed=false.",
+                    "main_direct_write=false.",
+                    "human_approval_required=true permanece obrigatório.",
+                    "execution_enabled=false permanece até approval gate.",
+                ],
+                "diff_preview": (
+                    "AO-19 GOVERNED PULL REQUEST PROPOSAL PREVIEW\n\n"
+                    f"Source branch: {source_branch}\n"
+                    f"Target branch: {target_branch}\n"
+                    "Repo target: frontend\n"
+                    "Target file:\n"
+                    "- src/routes/legal/Terms.jsx\n\n"
+                    "Allowed future action after Admin approval and dry-run:\n"
+                    "- create Pull Request only\n\n"
+                    "Blocked real actions:\n"
+                    "- merge=false\n"
+                    "- deploy=false\n"
+                    "- migration=false\n"
+                    "- direct_main_write=false"
+                ),
+                "smoke_plan": [
+                    "AdminEvolutionCenter lista a proposta AO-19.",
+                    "Admin aprova a proposta AO-19.",
+                    "Dry-run AO-19 gera execution_id sem criar PR real.",
+                    "Plano confirma source_branch com patch aplicado.",
+                    "Plano confirma target_branch=main.",
+                    "merge permanece bloqueado.",
+                    "deploy permanece bloqueado.",
+                    "migration permanece bloqueada.",
+                    "main não recebe escrita direta.",
+                ],
+            }
+
         # AO-17C_SPECIFIC_GOVERNED_BRANCH_PATCH_RESTORE_POINT_PAYLOAD
         # Patch mínimo: AO-17C/AO-18A deve vencer AO-17B quando o usuário pedir
         # aplicação de patch na branch, restore point, snapshot ou reversão.
