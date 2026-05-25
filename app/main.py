@@ -25721,6 +25721,488 @@ def admin_evolution_proposal_create_pr(
 
 
 
+
+
+# ================================
+# AO-22B — Execução governada de merge do Pull Request
+# ================================
+
+class AdminEvolutionMergePullRequestRequest(BaseModel):
+    pr_number: Optional[int] = 6
+    source_branch: Optional[str] = "ao-17/evo_f05bef3b8228"
+    target_branch: Optional[str] = "main"
+    repo_target: Optional[str] = "frontend"
+    merge_method: Optional[str] = "merge"
+    commit_title: Optional[str] = None
+    commit_message: Optional[str] = None
+    confirm_merge_pr: Optional[bool] = False
+
+
+def _admin_evolution_validate_ao22_merge_preflight(
+    *,
+    repo_target: str,
+    pr_number: int,
+    source_branch: str,
+    target_branch: str,
+    expected_files: List[str],
+) -> Dict[str, Any]:
+    """Valida PR #6 antes de qualquer merge governado AO-22B."""
+    from urllib.parse import quote
+
+    repo, _, token, _repo_kind = _github_resolve_repo_branch(
+        repo_target=repo_target,
+        user_text="AO-22B governed merge preflight",
+    )
+    if not token or not repo:
+        raise HTTPException(status_code=503, detail="github_capability_unavailable")
+
+    prn = int(pr_number or 0)
+    if prn != 6:
+        raise HTTPException(status_code=400, detail="ao22b_only_pr_6_supported")
+
+    source = re.sub(r"^refs/heads/", "", str(source_branch or "").strip())
+    target = re.sub(r"^refs/heads/", "", str(target_branch or "").strip())
+    if source != "ao-17/evo_f05bef3b8228":
+        raise HTTPException(status_code=400, detail="ao22b_source_branch_mismatch")
+    if target != "main":
+        raise HTTPException(status_code=400, detail="ao22b_target_branch_must_be_main")
+
+    expected = [str(x or "").strip() for x in (expected_files or []) if str(x or "").strip()]
+    if expected != ["src/routes/legal/Terms.jsx"]:
+        raise HTTPException(status_code=409, detail={
+            "error": "ao22b_unexpected_target_files",
+            "expected_contract": ["src/routes/legal/Terms.jsx"],
+            "actual_target_files": expected,
+        })
+
+    status_pr, pr_body = _github_api_json(
+        "GET",
+        f"https://api.github.com/repos/{repo}/pulls/{prn}",
+        None,
+    )
+    if status_pr != 200 or not isinstance(pr_body, dict):
+        raise HTTPException(status_code=409, detail={
+            "error": "github_pr_lookup_failed",
+            "status": status_pr,
+            "message": (pr_body.get("message") if isinstance(pr_body, dict) else None) or "Falha ao consultar PR no GitHub.",
+        })
+
+    if str(pr_body.get("state") or "").strip().lower() != "open":
+        raise HTTPException(status_code=409, detail={
+            "error": "pr_not_open",
+            "state": pr_body.get("state"),
+        })
+
+    if bool(pr_body.get("draft")):
+        raise HTTPException(status_code=409, detail="pr_is_draft")
+
+    head_ref = str(((pr_body.get("head") or {}).get("ref")) or "").strip()
+    base_ref = str(((pr_body.get("base") or {}).get("ref")) or "").strip()
+    if head_ref != source or base_ref != target:
+        raise HTTPException(status_code=409, detail={
+            "error": "pr_branch_contract_mismatch",
+            "expected_head": source,
+            "actual_head": head_ref,
+            "expected_base": target,
+            "actual_base": base_ref,
+        })
+
+    status_files, files_body = _github_api_json(
+        "GET",
+        f"https://api.github.com/repos/{repo}/pulls/{prn}/files",
+        None,
+    )
+    if status_files != 200 or not isinstance(files_body, list):
+        raise HTTPException(status_code=409, detail={
+            "error": "github_pr_files_lookup_failed",
+            "status": status_files,
+        })
+
+    changed_files: List[str] = []
+    for item in files_body:
+        if isinstance(item, dict) and item.get("filename"):
+            changed_files.append(str(item.get("filename") or "").strip())
+    changed_files = [x for x in changed_files if x]
+
+    if sorted(changed_files) != sorted(expected):
+        raise HTTPException(status_code=409, detail={
+            "error": "unexpected_pr_files_before_merge",
+            "expected_files": expected,
+            "changed_files": changed_files,
+        })
+
+    compare_receipt = _admin_evolution_validate_ao20_pr_diff(
+        repo_target=repo_target,
+        source_branch=source,
+        target_branch=target,
+        expected_files=expected,
+    )
+
+    mergeable = pr_body.get("mergeable")
+    mergeable_state = str(pr_body.get("mergeable_state") or "").strip()
+    if mergeable is False or mergeable_state.lower() in {"dirty", "blocked"}:
+        raise HTTPException(status_code=409, detail={
+            "error": "pr_not_mergeable",
+            "mergeable": mergeable,
+            "mergeable_state": mergeable_state,
+        })
+
+    return {
+        "ok": True,
+        "repo": repo,
+        "repo_target": repo_target,
+        "pr_number": prn,
+        "pr_url": str(pr_body.get("html_url") or "").strip(),
+        "source_branch": source,
+        "target_branch": target,
+        "head_ref": head_ref,
+        "base_ref": base_ref,
+        "state": str(pr_body.get("state") or "").strip(),
+        "draft": bool(pr_body.get("draft")),
+        "mergeable": mergeable,
+        "mergeable_state": mergeable_state,
+        "changed_files": changed_files,
+        "compare": compare_receipt,
+    }
+
+
+def _github_merge_pull_request_capability(
+    *,
+    repo_target: str,
+    pr_number: int,
+    merge_method: str,
+    commit_title: str,
+    commit_message: str,
+    trace_id: str,
+    governance: Dict[str, Any],
+) -> Dict[str, Any]:
+    """Executa merge governado de PR via GitHub, sem deploy/migration."""
+    repo, _, token, _repo_kind = _github_resolve_repo_branch(
+        repo_target=repo_target,
+        user_text="AO-22B governed merge pull request",
+    )
+    blocked = _github_enforce_governed_write(
+        action="merge_pr",
+        governance=governance,
+        repo=repo,
+        branch="main",
+    )
+    if blocked:
+        return blocked
+
+    if not token or not repo:
+        return {"handled": True, "success": False, "provider": "github", "message": "GitHub capability não está habilitada no ambiente."}
+
+    prn = int(pr_number or 0)
+    method = str(merge_method or "merge").strip().lower()
+    if method not in {"merge", "squash", "rebase"}:
+        method = "merge"
+
+    cache_key = _github_action_cache_key(
+        "merge_pr",
+        repo,
+        str(prn),
+        method,
+        commit_title,
+        commit_message,
+        trace_id,
+    )
+    cached = _github_action_cache_get(cache_key)
+    if cached:
+        return cached
+
+    payload = {
+        "merge_method": method,
+        "commit_title": commit_title or f"AO-22B governed merge PR #{prn}",
+        "commit_message": commit_message or f"Governed merge executed by Orkio AO-22B. trace_id={trace_id}",
+    }
+
+    _github_log("GITHUB_PR_MERGE_ATTEMPT", repo=repo, number=prn, method=method, trace_id=trace_id or "")
+    status, body = _github_api_json(
+        "PUT",
+        f"https://api.github.com/repos/{repo}/pulls/{prn}/merge",
+        payload,
+    )
+
+    if status != 200 or not isinstance(body, dict) or not bool(body.get("merged")):
+        msg = (body.get("message") if isinstance(body, dict) else None) or "Falha ao executar merge do Pull Request no GitHub."
+        _github_log("GITHUB_PR_MERGE_FAILED", repo=repo, number=prn, status=status, trace_id=trace_id or "")
+        return {
+            "handled": True,
+            "success": False,
+            "provider": "github",
+            "repo": repo,
+            "pull_request_number": prn,
+            "status": status,
+            "message": msg,
+            "body": body if isinstance(body, dict) else {},
+        }
+
+    sha = str(body.get("sha") or "").strip()
+    result = {
+        "handled": True,
+        "success": True,
+        "provider": "github",
+        "repo": repo,
+        "pull_request_number": prn,
+        "merged": True,
+        "merge_commit_sha": sha,
+        "message": str(body.get("message") or "Pull Request mergeado com confirmação operacional."),
+    }
+    _github_log("GITHUB_PR_MERGE_OK", repo=repo, number=prn, sha=sha, trace_id=trace_id or "")
+    return _github_action_cache_put(cache_key, result, ttl_seconds=30)
+
+
+def _admin_evolution_record_merge_execution(
+    *,
+    proposal: Dict[str, Any],
+    receipt: Dict[str, Any],
+    actor: str,
+    org_slug: str,
+) -> Dict[str, Any]:
+    """Registra receipt auditável do merge governado AO-22B."""
+    pid = str(proposal.get("proposal_id") or "").strip()
+    execution_id = str(receipt.get("execution_id") or "").strip() or ("exec_" + uuid.uuid4().hex[:12])
+    receipt["execution_id"] = execution_id
+
+    if not _admin_evolution_bootstrap_db_schema():
+        receipt["audit_recorded"] = False
+        receipt["audit_record_error"] = "evolution_schema_unavailable"
+        return receipt
+
+    now = _admin_evolution_now()
+    status = "merge_completed" if bool(receipt.get("ok")) else "merge_failed"
+    smoke_plan = [
+        "PR #6 foi validado antes do merge.",
+        "Files changed continha apenas src/routes/legal/Terms.jsx.",
+        "Merge foi executado apenas se confirm_merge_pr=true.",
+        "Nenhum deploy foi executado.",
+        "Nenhuma migration foi executada.",
+        "Rollback plan está presente.",
+    ]
+
+    db = SessionLocal()
+    try:
+        db.execute(text("""
+            INSERT INTO admin_evolution_executions (
+                execution_id, proposal_id, org_slug, status, mode, created_by, approved_by,
+                risk, rollback_plan, smoke_checklist_json, result_json,
+                created_at, updated_at, started_at, finished_at
+            ) VALUES (
+                :execution_id, :proposal_id, :org_slug, :status, :mode, :created_by, :approved_by,
+                :risk, :rollback_plan, :smoke_checklist_json, :result_json,
+                :created_at, :updated_at, :started_at, :finished_at
+            )
+        """), {
+            "execution_id": execution_id,
+            "proposal_id": pid,
+            "org_slug": org_slug,
+            "status": status,
+            "mode": "ao22b_governed_merge_pull_request",
+            "created_by": str(actor or ""),
+            "approved_by": str(proposal.get("approved_by") or ""),
+            "risk": str(proposal.get("risk") or "baixo"),
+            "rollback_plan": str(receipt.get("rollback_plan") or proposal.get("rollback_plan") or ""),
+            "smoke_checklist_json": _admin_evolution_json_dump(smoke_plan),
+            "result_json": _admin_evolution_json_dump(receipt),
+            "created_at": now,
+            "updated_at": now,
+            "started_at": now,
+            "finished_at": now,
+        })
+        db.execute(text("""
+            UPDATE admin_evolution_proposals
+            SET updated_at = :updated_at
+            WHERE proposal_id = :proposal_id
+        """), {"proposal_id": pid, "updated_at": now})
+        db.commit()
+        receipt["audit_recorded"] = True
+        receipt["audit_execution_status"] = status
+        return receipt
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        try:
+            logger.exception(
+                "ADMIN_EVOLUTION_AO22B_MERGE_RECEIPT_RECORD_FAILED proposal_id=%s execution_id=%s error=%s",
+                pid,
+                execution_id,
+                str(e)[:240],
+            )
+        except Exception:
+            pass
+        receipt["audit_recorded"] = False
+        receipt["audit_record_error"] = str(e)[:240]
+        return receipt
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+# AO-22B_GOVERNED_MERGE_PR_ROUTE
+@app.post("/api/admin/evolution/proposals/{proposal_id}/merge-pr")
+def admin_evolution_proposal_merge_pr(
+    proposal_id: str,
+    body: Optional[AdminEvolutionMergePullRequestRequest] = None,
+    x_org_slug: Optional[str] = Header(default=None),
+    _admin=Depends(require_admin_access),
+):
+    """
+    AO-22B: executa somente merge governado do PR #6.
+
+    Não faz deploy, migration nem escrita direta em main fora do merge do PR.
+    """
+    actor = ""
+    if isinstance(_admin, dict):
+        actor = str(_admin.get("email") or _admin.get("sub") or "")
+
+    org = get_org(x_org_slug)
+    pid = str(proposal_id or "").strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="proposal_id_required")
+
+    proposal = _admin_evolution_get_proposal(pid)
+    if not proposal:
+        raise HTTPException(status_code=404, detail="proposal_not_found")
+
+    if str(proposal.get("status") or "").strip().lower() != "approved":
+        raise HTTPException(status_code=409, detail="proposal_must_be_approved_before_merge")
+
+    if str(proposal.get("execution_status") or "").strip() != "dry_run_completed":
+        raise HTTPException(status_code=409, detail="dry_run_must_be_completed_before_merge")
+
+    plan = _admin_evolution_build_branch_pr_plan(proposal)
+    if str(plan.get("stage") or "").strip() != "AO-22":
+        raise HTTPException(status_code=409, detail={
+            "error": "proposal_is_not_ao22_merge_stage",
+            "stage": plan.get("stage"),
+            "mode": plan.get("mode"),
+        })
+
+    body_obj = body if isinstance(body, AdminEvolutionMergePullRequestRequest) else AdminEvolutionMergePullRequestRequest()
+    if not bool(body_obj.confirm_merge_pr):
+        raise HTTPException(status_code=409, detail="confirm_merge_pr_required")
+
+    pr_number = int(body_obj.pr_number or plan.get("pr_number") or 0)
+    source_branch = str(body_obj.source_branch or plan.get("source_branch") or plan.get("head_branch") or "").strip()
+    target_branch = str(body_obj.target_branch or plan.get("target_branch") or plan.get("base_branch") or "main").strip() or "main"
+    repo_target = str(body_obj.repo_target or plan.get("repo_target") or "frontend").strip().lower() or "frontend"
+    if repo_target not in {"frontend", "web", "ui"}:
+        raise HTTPException(status_code=400, detail="ao22b_only_frontend_repo_supported")
+    repo_target = "frontend"
+
+    expected_files = plan.get("target_files") or proposal.get("target_files") or []
+    expected_files = [str(x or "").strip() for x in expected_files if str(x or "").strip()]
+
+    preflight = _admin_evolution_validate_ao22_merge_preflight(
+        repo_target=repo_target,
+        pr_number=pr_number,
+        source_branch=source_branch,
+        target_branch=target_branch,
+        expected_files=expected_files,
+    )
+
+    trace_id = f"ao22b_{pid}_{uuid.uuid4().hex[:8]}"
+    approval_ref = str(proposal.get("approved_by") or actor or pid or "").strip()
+    governance = {
+        "source": "admin_evolution_ao22b",
+        "proposal_id": pid,
+        "patch_mode": "approved_apply",
+        "write_allowed": True,
+        "human_approval_required": True,
+        "human_approved": True,
+        "human_approval_observed": True,
+        "approved_by": approval_ref,
+        "approval_id": f"ao22b_merge_pr:{pid}",
+        "audit_receipt_id": f"ao22b_merge_pr:{pid}",
+        "risk_level": str(proposal.get("risk") or "baixo"),
+        "allowed_write_actions": ["merge_pr"],
+        "merge_pr_allowed": True,
+        "merge_allowed": True,
+        "deploy_allowed": False,
+        "migration_allowed": False,
+        "main_direct_write_allowed": False,
+        "main_branch_write_allowed": False,
+    }
+
+    title = str(body_obj.commit_title or "AO-22B — Merge Governado do Pull Request #6").strip()
+    message = str(body_obj.commit_message or (
+        "Merge governado executado pelo Orkio AO-22B.\n\n"
+        f"- proposal_id: {pid}\n"
+        f"- pr_number: {pr_number}\n"
+        "- deploy: bloqueado\n"
+        "- migration: bloqueada\n"
+        "- rollback: revert do merge commit ou PR corretivo\n"
+    )).strip()
+
+    merge_result = _github_merge_pull_request_capability(
+        repo_target=repo_target,
+        pr_number=pr_number,
+        merge_method=str(body_obj.merge_method or "merge"),
+        commit_title=title,
+        commit_message=message,
+        trace_id=trace_id,
+        governance=governance,
+    )
+
+    ok = bool(isinstance(merge_result, dict) and merge_result.get("success"))
+    receipt = {
+        "ok": ok,
+        "stage": "AO-22B",
+        "mode": "governed_merge_pull_request",
+        "proposal_id": pid,
+        "execution_id": "exec_" + uuid.uuid4().hex[:12],
+        "pr_number": pr_number,
+        "pr_url": preflight.get("pr_url"),
+        "source_branch": preflight.get("source_branch"),
+        "target_branch": preflight.get("target_branch"),
+        "repo_target": repo_target,
+        "target_files": expected_files,
+        "preflight": preflight,
+        "merge": merge_result,
+        "merge_executed": ok,
+        "merge_commit_sha": merge_result.get("merge_commit_sha") if isinstance(merge_result, dict) else "",
+        "deploy_allowed": False,
+        "migration_allowed": False,
+        "main_direct_write_allowed": False,
+        "rollback_plan": str(proposal.get("rollback_plan") or "Rollback: revert do merge commit ou novo PR corretivo, sem deploy automático."),
+        "message": (
+            "AO-22B executou merge governado do PR #6. Deploy e migration permanecem bloqueados."
+            if ok
+            else "AO-22B não conseguiu executar merge governado. Nenhum deploy ou migration foi executado."
+        ),
+    }
+
+    recorded = _admin_evolution_record_merge_execution(
+        proposal=proposal,
+        receipt=receipt,
+        actor=actor,
+        org_slug=org,
+    )
+
+    return {
+        "ok": ok,
+        "stage": "AO-22B",
+        "proposal_id": pid,
+        "execution_enabled": False,
+        "can_execute_real": False,
+        "merge_executed": ok,
+        "merge_commit_sha": recorded.get("merge_commit_sha"),
+        "pr_number": pr_number,
+        "pr_url": preflight.get("pr_url"),
+        "deploy_allowed": False,
+        "migration_allowed": False,
+        "main_direct_write_allowed": False,
+        "receipt": recorded,
+    }
+
+
+
+
 @app.post("/api/admin/evolution/proposals/{proposal_id}/create-branch")
 def admin_evolution_proposal_create_branch(
     proposal_id: str,
