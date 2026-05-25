@@ -25210,6 +25210,362 @@ def _admin_evolution_create_governed_branch(
     )
 
 
+
+
+# ================================
+# AO-20 — Criação governada de Pull Request
+# ================================
+
+class AdminEvolutionCreatePullRequestRequest(BaseModel):
+    source_branch: Optional[str] = None
+    target_branch: Optional[str] = "main"
+    repo_target: Optional[str] = "frontend"
+    title: Optional[str] = None
+    body: Optional[str] = None
+    confirm_create_pr: Optional[bool] = False
+
+
+def _admin_evolution_record_pr_create_execution(
+    *,
+    proposal: Dict[str, Any],
+    receipt: Dict[str, Any],
+    actor: str,
+    org_slug: str,
+) -> Dict[str, Any]:
+    """Registra receipt auditável da criação governada de PR sem merge/deploy."""
+    pid = str(proposal.get("proposal_id") or "").strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="proposal_id_required")
+
+    execution_id = str(receipt.get("execution_id") or "").strip() or ("exec_" + uuid.uuid4().hex[:12])
+    receipt["execution_id"] = execution_id
+
+    if not _admin_evolution_bootstrap_db_schema():
+        receipt["audit_recorded"] = False
+        receipt["audit_record_error"] = "evolution_schema_unavailable"
+        return receipt
+
+    now = _admin_evolution_now()
+    status = "pull_request_created" if bool(receipt.get("ok")) else "pull_request_failed"
+    smoke_plan = [
+        "Pull Request criado ou confirmado sem merge.",
+        "Branch origem temporária foi validada.",
+        "Branch destino main foi validada.",
+        "Diff foi validado antes da criação do PR.",
+        "Nenhum merge foi executado.",
+        "Nenhum deploy foi executado.",
+        "Nenhuma migration foi executada.",
+        "main permaneceu sem escrita direta.",
+    ]
+
+    db = SessionLocal()
+    try:
+        db.execute(text("""
+            INSERT INTO admin_evolution_executions (
+                execution_id, proposal_id, org_slug, status, mode, created_by, approved_by,
+                risk, rollback_plan, smoke_checklist_json, result_json,
+                created_at, updated_at, started_at, finished_at
+            ) VALUES (
+                :execution_id, :proposal_id, :org_slug, :status, :mode, :created_by, :approved_by,
+                :risk, :rollback_plan, :smoke_checklist_json, :result_json,
+                :created_at, :updated_at, :started_at, :finished_at
+            )
+        """), {
+            "execution_id": execution_id,
+            "proposal_id": pid,
+            "org_slug": org_slug,
+            "status": status,
+            "mode": "ao20_governed_create_pull_request_only",
+            "created_by": str(actor or ""),
+            "approved_by": str(proposal.get("approved_by") or ""),
+            "risk": str(proposal.get("risk") or "baixo"),
+            "rollback_plan": str(receipt.get("rollback_plan") or proposal.get("rollback_plan") or ""),
+            "smoke_checklist_json": _admin_evolution_json_dump(smoke_plan),
+            "result_json": _admin_evolution_json_dump(receipt),
+            "created_at": now,
+            "updated_at": now,
+            "started_at": now,
+            "finished_at": now,
+        })
+        db.execute(text("""
+            UPDATE admin_evolution_proposals
+            SET updated_at = :updated_at
+            WHERE proposal_id = :proposal_id
+        """), {"proposal_id": pid, "updated_at": now})
+        db.commit()
+        receipt["audit_recorded"] = True
+        receipt["audit_execution_status"] = status
+        return receipt
+    except Exception as e:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        try:
+            logger.exception(
+                "ADMIN_EVOLUTION_AO20_PR_RECEIPT_RECORD_FAILED proposal_id=%s execution_id=%s error=%s",
+                pid,
+                execution_id,
+                str(e)[:240],
+            )
+        except Exception:
+            pass
+        receipt["audit_recorded"] = False
+        receipt["audit_record_error"] = str(e)[:240]
+        return receipt
+    finally:
+        try:
+            db.close()
+        except Exception:
+            pass
+
+
+def _admin_evolution_validate_ao20_pr_diff(
+    *,
+    repo_target: str,
+    source_branch: str,
+    target_branch: str,
+    expected_files: List[str],
+) -> Dict[str, Any]:
+    """Valida diff líquido antes de criar PR governado AO-20."""
+    from urllib.parse import quote
+
+    repo, _, token, _repo_kind = _github_resolve_repo_branch(
+        repo_target=repo_target,
+        user_text="AO-20 create governed pull request diff validation",
+    )
+    if not token or not repo:
+        raise HTTPException(status_code=503, detail="github_capability_unavailable")
+
+    source = re.sub(r"^refs/heads/", "", str(source_branch or "").strip())
+    target = re.sub(r"^refs/heads/", "", str(target_branch or "").strip())
+    if not source or not target:
+        raise HTTPException(status_code=400, detail="source_and_target_branch_required")
+
+    status, body = _github_api_json(
+        "GET",
+        f"https://api.github.com/repos/{repo}/compare/{quote(target, safe='')}...{quote(source, safe='')}",
+        None,
+    )
+    if status != 200 or not isinstance(body, dict):
+        raise HTTPException(status_code=409, detail={
+            "error": "github_compare_failed",
+            "status": status,
+            "message": (body.get("message") if isinstance(body, dict) else None) or "Falha ao comparar branches no GitHub.",
+        })
+
+    changed_files = []
+    files = body.get("files") or []
+    if isinstance(files, list):
+        for item in files:
+            if isinstance(item, dict) and item.get("filename"):
+                changed_files.append(str(item.get("filename") or "").strip())
+
+    changed_files = [x for x in changed_files if x]
+    expected = [str(x or "").strip() for x in (expected_files or []) if str(x or "").strip()]
+    if not expected:
+        raise HTTPException(status_code=400, detail="expected_files_required")
+
+    if sorted(changed_files) != sorted(expected):
+        raise HTTPException(status_code=409, detail={
+            "error": "unexpected_pr_diff_files",
+            "expected_files": expected,
+            "changed_files": changed_files,
+        })
+
+    ahead_by = int(body.get("ahead_by") or 0)
+    if ahead_by <= 0:
+        raise HTTPException(status_code=409, detail="source_branch_has_no_commits_ahead")
+
+    return {
+        "ok": True,
+        "repo": repo,
+        "repo_target": repo_target,
+        "source_branch": source,
+        "target_branch": target,
+        "changed_files": changed_files,
+        "ahead_by": ahead_by,
+        "behind_by": int(body.get("behind_by") or 0),
+        "total_commits": int(body.get("total_commits") or 0),
+    }
+
+
+# AO-20_GOVERNED_CREATE_PR_ROUTE
+@app.post("/api/admin/evolution/proposals/{proposal_id}/create-pr")
+def admin_evolution_proposal_create_pr(
+    proposal_id: str,
+    body: Optional[AdminEvolutionCreatePullRequestRequest] = None,
+    x_org_slug: Optional[str] = Header(default=None),
+    _admin=Depends(require_admin_access),
+):
+    """
+    AO-20: cria somente Pull Request governado.
+
+    Não faz merge, deploy, migration nem escrita direta em main.
+    """
+    actor = ""
+    if isinstance(_admin, dict):
+        actor = str(_admin.get("email") or _admin.get("sub") or "")
+
+    org = get_org(x_org_slug)
+    pid = str(proposal_id or "").strip()
+    if not pid:
+        raise HTTPException(status_code=400, detail="proposal_id_required")
+
+    proposal = _admin_evolution_get_proposal(pid)
+    if not proposal:
+        raise HTTPException(status_code=404, detail="proposal_not_found")
+
+    if str(proposal.get("status") or "").strip().lower() != "approved":
+        raise HTTPException(status_code=409, detail="proposal_must_be_approved_before_create_pr")
+
+    if str(proposal.get("execution_status") or "").strip() != "dry_run_completed":
+        raise HTTPException(status_code=409, detail="dry_run_must_be_completed_before_create_pr")
+
+    body_obj = body if isinstance(body, AdminEvolutionCreatePullRequestRequest) else AdminEvolutionCreatePullRequestRequest()
+    if not bool(body_obj.confirm_create_pr):
+        raise HTTPException(status_code=409, detail="confirm_create_pr_required")
+
+    plan = _admin_evolution_build_branch_pr_plan(proposal)
+    if str(plan.get("stage") or "").strip() != "AO-19":
+        raise HTTPException(status_code=409, detail={
+            "error": "proposal_is_not_ao19_pr_stage",
+            "stage": plan.get("stage"),
+        })
+
+    source_branch = str(body_obj.source_branch or plan.get("source_branch") or plan.get("head_branch") or "").strip()
+    target_branch = str(body_obj.target_branch or plan.get("target_branch") or plan.get("base_branch") or "main").strip() or "main"
+    repo_target = str(body_obj.repo_target or plan.get("repo_target") or "frontend").strip().lower() or "frontend"
+
+    source_branch = re.sub(r"^refs/heads/", "", source_branch)
+    target_branch = re.sub(r"^refs/heads/", "", target_branch)
+
+    if repo_target not in {"frontend", "web", "ui"}:
+        raise HTTPException(status_code=400, detail="ao20_only_frontend_repo_supported")
+    repo_target = "frontend"
+
+    if not source_branch.startswith("ao-17/"):
+        raise HTTPException(status_code=400, detail="source_branch_must_be_ao17_temporary_branch")
+
+    if target_branch != "main":
+        raise HTTPException(status_code=400, detail="ao20_target_branch_must_be_main")
+
+    expected_files = plan.get("target_files") or proposal.get("target_files") or []
+    expected_files = [str(x or "").strip() for x in expected_files if str(x or "").strip()]
+    if expected_files != ["src/routes/legal/Terms.jsx"]:
+        raise HTTPException(status_code=409, detail={
+            "error": "ao20_unexpected_target_files",
+            "expected_contract": ["src/routes/legal/Terms.jsx"],
+            "actual_target_files": expected_files,
+        })
+
+    diff_receipt = _admin_evolution_validate_ao20_pr_diff(
+        repo_target=repo_target,
+        source_branch=source_branch,
+        target_branch=target_branch,
+        expected_files=expected_files,
+    )
+
+    trace_id = f"ao20_{pid}_{uuid.uuid4().hex[:8]}"
+    title = str(body_obj.title or plan.get("suggested_pr_title") or "AO-19 — Criação Governada de Pull Request").strip()
+    if title.startswith("AO-19: AO-19"):
+        title = "AO-19 — Criação Governada de Pull Request"
+
+    pr_body = str(body_obj.body or "").strip() or (
+        "PR governado criado pelo Orkio AO-20.\n\n"
+        f"- proposal_id: {pid}\n"
+        f"- source_branch: {source_branch}\n"
+        f"- target_branch: {target_branch}\n"
+        "- merge: bloqueado\n"
+        "- deploy: bloqueado\n"
+        "- migration: bloqueada\n"
+        "- main_direct_write: bloqueada\n"
+    )
+
+    governance = {
+        "source": "admin_evolution_ao20",
+        "proposal_id": pid,
+        "human_approval_required": True,
+        "human_approval_observed": True,
+        "approved_by": str(proposal.get("approved_by") or actor or ""),
+        "allowed_write_actions": ["open_pr"],
+        "open_pr": True,
+        "allow_pr": True,
+        "pr_allowed": True,
+        "write_allowed": False,
+        "main_branch_write_allowed": False,
+        "merge_allowed": False,
+        "deploy_allowed": False,
+        "migration_allowed": False,
+    }
+
+    pr_result = _github_create_pull_request_capability(
+        head=source_branch,
+        base=target_branch,
+        title=title,
+        repo_target=repo_target,
+        user_text="AO-20 create governed Pull Request from AdminEvolutionCenter",
+        body=pr_body,
+        trace_id=trace_id,
+        governance=governance,
+    )
+
+    ok = bool(isinstance(pr_result, dict) and pr_result.get("success"))
+    receipt = {
+        "ok": ok,
+        "stage": "AO-20",
+        "mode": "governed_create_pull_request_only",
+        "proposal_id": pid,
+        "execution_id": "exec_" + uuid.uuid4().hex[:12],
+        "source_branch": source_branch,
+        "target_branch": target_branch,
+        "repo_target": repo_target,
+        "target_files": expected_files,
+        "diff_validation": diff_receipt,
+        "pull_request": pr_result,
+        "pull_request_number": pr_result.get("pull_request_number") if isinstance(pr_result, dict) else None,
+        "pull_request_url": pr_result.get("pull_request_url") if isinstance(pr_result, dict) else None,
+        "merge_allowed": False,
+        "deploy_allowed": False,
+        "migration_allowed": False,
+        "main_branch_write_allowed": False,
+        "rollback_plan": str(proposal.get("rollback_plan") or "Rollback seguro: fechar o Pull Request sem merge."),
+        "message": (
+            "AO-20 criou Pull Request governado. Merge, deploy e migration permanecem bloqueados."
+            if ok
+            else "AO-20 não conseguiu criar Pull Request governado. Nenhum merge, deploy ou migration foi executado."
+        ),
+    }
+
+    recorded = _admin_evolution_record_pr_create_execution(
+        proposal=proposal,
+        receipt=receipt,
+        actor=actor,
+        org_slug=org,
+    )
+
+    return {
+        "ok": ok,
+        "stage": "AO-20",
+        "proposal_id": pid,
+        "execution_enabled": False,
+        "can_execute_real": False,
+        "pull_request_created": ok,
+        "pull_request_number": recorded.get("pull_request_number"),
+        "pull_request_url": recorded.get("pull_request_url"),
+        "source_branch": source_branch,
+        "target_branch": target_branch,
+        "repo_target": repo_target,
+        "merge_allowed": False,
+        "deploy_allowed": False,
+        "migration_allowed": False,
+        "main_branch_write_allowed": False,
+        "receipt": recorded,
+    }
+
+
+
+
 @app.post("/api/admin/evolution/proposals/{proposal_id}/create-branch")
 def admin_evolution_proposal_create_branch(
     proposal_id: str,
