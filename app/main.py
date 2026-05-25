@@ -32179,6 +32179,120 @@ async def chat_stream(
         Converte o patch_plan do pipeline governado em uma proposal_only auditável.
         Este spec não escreve repositório, não comita e não faz deploy.
         """
+        # AO-17C_SPECIFIC_GOVERNED_BRANCH_PATCH_RESTORE_POINT_PAYLOAD
+        # Patch mínimo: AO-17C/AO-18A deve vencer AO-17B quando o usuário pedir
+        # aplicação de patch na branch, restore point, snapshot ou reversão.
+        # Prompts AO-17C citam AO-17B apenas como contexto histórico.
+        raw_message_ao17c = str(message or "")
+        raw_norm_ao17c = raw_message_ao17c.lower()
+
+        ao17c_requested = (
+            "ao-17c" in raw_norm_ao17c
+            or "ao17c" in raw_norm_ao17c
+            or "ao-18a" in raw_norm_ao17c
+            or "ao18a" in raw_norm_ao17c
+            or "ao-17c/ao-18a" in raw_norm_ao17c
+            or "patch na branch" in raw_norm_ao17c
+            or "aplicar patch" in raw_norm_ao17c
+            or "aplicação governada de patch" in raw_norm_ao17c
+            or "aplicacao governada de patch" in raw_norm_ao17c
+            or "restore point" in raw_norm_ao17c
+            or "restore_point" in raw_norm_ao17c
+            or "snapshot anterior" in raw_norm_ao17c
+            or "restore point obrigatório" in raw_norm_ao17c
+            or "restore_point_required" in raw_norm_ao17c
+            or "reverter patch" in raw_norm_ao17c
+            or "can_revert_branch_patch" in raw_norm_ao17c
+        )
+
+        if ao17c_requested:
+            target_branch = ""
+            try:
+                branch_match = (
+                    re.search(r"target_branch\s*[:=]\s*(ao-17/evo_[A-Za-z0-9]{8,40})", raw_message_ao17c, flags=re.I)
+                    or re.search(r"branch criada\s*:\s*(ao-17/evo_[A-Za-z0-9]{8,40})", raw_message_ao17c, flags=re.I)
+                    or re.search(r"branch\s*[:=]\s*(ao-17/evo_[A-Za-z0-9]{8,40})", raw_message_ao17c, flags=re.I)
+                    or re.search(r"(ao-17/evo_[A-Za-z0-9]{8,40})", raw_message_ao17c, flags=re.I)
+                )
+                if branch_match:
+                    target_branch = str(branch_match.group(1)).strip()
+            except Exception:
+                target_branch = ""
+
+            if not target_branch:
+                target_branch = "ao-17/<branch_already_created>"
+
+            return {
+                "title": "AO-17C/AO-18A — Patch Governado na Branch com Restore Point Permanente",
+                "summary": (
+                    "Criar proposta governada específica para aplicar patch textual mínimo somente na branch temporária "
+                    f"{target_branch}, com restore point obrigatório antes de qualquer escrita, snapshot anterior dos arquivos, "
+                    "diff preview, receipt por arquivo alterado e reversão disponível. "
+                    "Esta etapa não escreve em main, não abre PR, não faz merge, não faz deploy e não executa migration."
+                ),
+                "risk": "baixo",
+                "target_files": [
+                    "src/routes/legal/Terms.jsx",
+                ],
+                "rollback_plan": (
+                    f"Antes da escrita, capturar snapshot anterior de src/routes/legal/Terms.jsx na branch {target_branch} "
+                    "e registrar restore_point_id. Se necessário, AO-18A deve restaurar o snapshot anterior somente nessa branch, "
+                    "sem tocar main, sem PR, sem merge, sem deploy e sem migration."
+                ),
+                "checklist": [
+                    "proposal_only nasce como AO-17C/AO-18A, não como AO-17B.",
+                    f"target_branch={target_branch}.",
+                    "target_files contém apenas src/routes/legal/Terms.jsx.",
+                    "restore_point_required=true.",
+                    "snapshot_required=true.",
+                    "diff_preview_required=true.",
+                    "file_receipts_required=true.",
+                    "branch já deve existir antes de qualquer escrita.",
+                    "patch futuro deve escrever somente na branch temporária.",
+                    "main_branch_write=false.",
+                    "commit em main=false.",
+                    "open_pr=false.",
+                    "merge=false.",
+                    "deploy=false.",
+                    "migration=false.",
+                    "can_revert_branch_patch=true somente após patch aplicado.",
+                    "human_approval_required=true permanece obrigatório.",
+                    "execution_enabled=false permanece até approval gate.",
+                ],
+                "diff_preview": (
+                    "AO-17C/AO-18A GOVERNED BRANCH PATCH PROPOSAL PREVIEW\n\n"
+                    f"Target branch: {target_branch}\n"
+                    "Target file:\n"
+                    "- src/routes/legal/Terms.jsx\n\n"
+                    "Conceptual change:\n"
+                    "- Trocar “Plataforma em evolução controlada.” por "
+                    "“Plataforma em evolução controlada e auditável.”\n\n"
+                    "Required before write:\n"
+                    "- restore_point_id\n"
+                    "- previous snapshot\n"
+                    "- diff preview\n"
+                    "- file receipts\n\n"
+                    "Blocked real actions:\n"
+                    "- write_main_branch=false\n"
+                    "- open_pr=false\n"
+                    "- merge=false\n"
+                    "- deploy=false\n"
+                    "- migration=false"
+                ),
+                "smoke_plan": [
+                    "AdminEvolutionCenter lista a proposta AO-17C/AO-18A.",
+                    "Admin aprova a proposta pelo painel.",
+                    "Dry-run AO-17C/AO-18A gera execution_id sem escrita real.",
+                    "Plano confirma target_branch existente.",
+                    "Plano exige restore_point_required=true.",
+                    "Aplicação futura cria restore_point_id antes da escrita.",
+                    "Patch futuro altera somente src/routes/legal/Terms.jsx.",
+                    "Nenhuma escrita em main ocorre.",
+                    "Nenhum PR, merge, deploy ou migration ocorre.",
+                    "Reversão AO-18A fica disponível após aplicação.",
+                ],
+            }
+
         # AO-17B_SPECIFIC_GOVERNED_BRANCH_PROPOSAL_PAYLOAD
         # Patch mínimo: AO-17B deve vencer AO-02B quando o usuário pedir
         # criação governada de branch temporária. O prompt pode citar AO-02B
