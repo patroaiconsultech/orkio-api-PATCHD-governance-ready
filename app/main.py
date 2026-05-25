@@ -24178,6 +24178,101 @@ def admin_evolution_executions(
 # AO-17A — Branch/PR Runner Governado: contrato read-only
 # ================================
 
+def _admin_evolution_is_governed_pr_stage(proposal: Dict[str, Any]) -> bool:
+    """
+    AO-19 stage detector.
+
+    Must run before AO-17C/AO-18A restore point detection because AO-19
+    intentionally mentions restore_point_id/AO-17C as historical prerequisites.
+    """
+    p = proposal if isinstance(proposal, dict) else {}
+    haystack_parts: List[str] = [
+        str(p.get("title") or ""),
+        str(p.get("summary") or ""),
+        str(p.get("rollback_plan") or ""),
+        str(p.get("source_message") or ""),
+    ]
+
+    checklist = p.get("checklist") or []
+    if isinstance(checklist, list):
+        haystack_parts.extend(str(x or "") for x in checklist)
+
+    target_files = p.get("target_files") or []
+    if isinstance(target_files, list):
+        haystack_parts.extend(str(x or "") for x in target_files)
+
+    haystack = "\n".join(haystack_parts).lower()
+
+    return (
+        "ao-19" in haystack
+        or "ao19" in haystack
+        or "criação governada de pull request" in haystack
+        or "criacao governada de pull request" in haystack
+        or "pull request governado" in haystack
+        or "source_branch=" in haystack
+        or "create_pr_allowed=false" in haystack
+        or (
+            "pull request" in haystack
+            and (
+                "merge_allowed=false" in haystack
+                or "deploy_allowed=false" in haystack
+                or "main_direct_write=false" in haystack
+            )
+        )
+    )
+
+
+def _admin_evolution_extract_governed_pr_branches(
+    proposal: Dict[str, Any],
+    *,
+    fallback_proposal_id: str,
+) -> Tuple[str, str]:
+    """
+    Resolve AO-19 PR source/target branches without creating PR.
+    """
+    p = proposal if isinstance(proposal, dict) else {}
+    candidates: List[str] = []
+
+    for key in ("source_branch", "target_branch", "source_message", "summary", "rollback_plan", "title"):
+        raw = p.get(key)
+        if raw:
+            candidates.append(str(raw))
+
+    checklist = p.get("checklist") or []
+    if isinstance(checklist, list):
+        candidates.extend(str(x or "") for x in checklist)
+
+    joined = "\n".join(candidates)
+
+    source_branch = ""
+    target_branch = "main"
+
+    m = (
+        re.search(r"\bsource_branch\s*[:=]\s*([A-Za-z0-9._/\-]{1,160})", joined, flags=re.I)
+        or re.search(r"\bbranch\s+(?:tempor[aá]ria|frontend|origem)\s+([A-Za-z0-9._/\-]{1,160})", joined, flags=re.I)
+    )
+    if m:
+        source_branch = str(m.group(1) or "").strip()
+
+    if not source_branch:
+        m2 = re.search(r"\bao-17/evo_[a-z0-9]+\b", joined, flags=re.I)
+        if m2:
+            source_branch = str(m2.group(0) or "").strip()
+
+    m3 = re.search(r"\btarget_branch\s*[:=]\s*([A-Za-z0-9._/\-]{1,120})", joined, flags=re.I)
+    if m3:
+        target_branch = str(m3.group(1) or "").strip() or "main"
+    else:
+        m4 = re.search(r"\bpara\s+(main|master|develop|dev)\b", joined, flags=re.I)
+        if m4:
+            target_branch = str(m4.group(1) or "").strip() or "main"
+
+    if not source_branch:
+        source_branch = _admin_evolution_extract_target_branch(proposal, fallback_proposal_id=fallback_proposal_id)
+
+    return source_branch, target_branch
+
+
 def _admin_evolution_is_restore_point_stage(proposal: Dict[str, Any]) -> bool:
     """
     AO-17C/AO-18A stage detector.
@@ -24276,6 +24371,134 @@ def _admin_evolution_build_branch_pr_plan(proposal: Dict[str, Any]) -> Dict[str,
     title = str(p.get("title") or "Proposta de evolução controlada").strip()
     risk = str(p.get("risk") or "baixo_medio").strip()
     rollback_plan = str(p.get("rollback_plan") or "").strip()
+
+    # AO-19_BRANCH_PR_PLAN_READONLY_PAYLOAD
+    # AO-19 must win before AO-17C/AO-18A restore point detection.
+    if _admin_evolution_is_governed_pr_stage(p):
+        source_branch, target_branch = _admin_evolution_extract_governed_pr_branches(
+            p,
+            fallback_proposal_id=proposal_id,
+        )
+
+        return {
+            "ok": True,
+            "stage": "AO-19",
+            "mode": "governed_pull_request_plan_readonly",
+            "proposal_id": proposal_id,
+            "proposal_status": status,
+            "execution_id": execution_id,
+            "execution_status": execution_status,
+            "dry_run_completed": dry_run_completed,
+            "can_prepare_branch_pr": dry_run_completed,
+            "can_prepare_branch_patch": False,
+            "can_apply_branch_patch": False,
+            "can_revert_branch_patch": False,
+            "can_restore_previous_version": False,
+            "can_create_branch": False,
+            "branch_already_created": True,
+            "source_branch": source_branch,
+            "head_branch": source_branch,
+            "target_branch": target_branch,
+            "base_branch": target_branch,
+            "suggested_branch": source_branch,
+            "branch_name": source_branch,
+            "repo_target": "frontend",
+            "target_files": p.get("target_files") or ["src/routes/legal/Terms.jsx"],
+            "can_write_repository": False,
+            "can_write_branch": False,
+            "can_write_main": False,
+            "can_commit": False,
+            "can_open_pr": False,
+            "can_create_pr": False,
+            "can_merge": False,
+            "can_deploy": False,
+            "can_run_migration": False,
+            "execution_enabled": False,
+            "can_execute_real": False,
+            "write_allowed": False,
+            "file_write_allowed": False,
+            "commit_allowed": False,
+            "create_pr_allowed": False,
+            "deploy_allowed": False,
+            "migration_allowed": False,
+            "main_branch_write_allowed": False,
+            "suggested_pr_title": f"AO-19: {title}",
+            "risk": risk,
+            "restore_point_required": True,
+            "branch_pr_plan_required": True,
+            "diff_preview_required": True,
+            "rollback_plan_required": True,
+            "required_before_create_pr": [
+                "Admin confirma que AO-17C aplicou o patch na branch temporária.",
+                "Branch origem existe e contém o patch aprovado.",
+                "Branch destino é main.",
+                "Diff entre source_branch e target_branch deve ser validado antes de qualquer PR real.",
+                "create_pr_allowed permanece false neste plano read-only.",
+                "Nenhum PR real é criado nesta etapa.",
+                "Merge permanece bloqueado.",
+                "Deploy permanece bloqueado.",
+                "Migration permanece bloqueada.",
+                "Main permanece sem escrita direta.",
+            ],
+            "pr_contract": {
+                "source_branch": source_branch,
+                "target_branch": target_branch,
+                "repo_target": "frontend",
+                "create_pr_allowed": False,
+                "open_pr_now": False,
+                "merge_allowed": False,
+                "deploy_allowed": False,
+                "migration_allowed": False,
+                "main_branch_write_allowed": False,
+                "requires_admin_approval_before_pr": True,
+                "requires_diff_preflight_before_pr": True,
+                "requires_admin_approval_before_merge": True,
+                "requires_admin_approval_before_deploy": True,
+            },
+            "rollback_contract": {
+                "rollback_plan_required": True,
+                "rollback_without_admin_approval": False,
+                "rollback_plan": rollback_plan,
+                "source_branch": source_branch,
+                "target_branch": target_branch,
+                "rollback_if_pr_created": "Fechar o Pull Request sem merge.",
+            },
+            "smoke_contract": {
+                "build_required": True,
+                "smoke_required": True,
+                "admin_review_required": True,
+                "minimum_checks": [
+                    "Admin Evolution abre.",
+                    "Proposal/dry-run/executions permanecem funcionais.",
+                    "Plano reconhece AO-19.",
+                    "Plano usa source_branch temporária existente.",
+                    "Plano usa target_branch=main.",
+                    "Plano não sugere aplicar patch na branch.",
+                    "Nenhum PR, merge, deploy ou migration ocorre.",
+                    "Main permanece intacta.",
+                ],
+            },
+            "blocked_actions": [
+                "create_new_branch",
+                "write_repository_now",
+                "write_main_branch",
+                "commit_now",
+                "open_pr_now",
+                "merge",
+                "deploy",
+                "migration",
+            ],
+            "next_required_stage": (
+                "AO-19 create governed Pull Request only after explicit Admin approval and PR preflight validation"
+                if dry_run_completed
+                else "AO-16 dry-run must be completed before AO-19 PR planning"
+            ),
+            "message": (
+                "AO-19 pronto para revisão: próxima etapa poderá preparar criação governada de Pull Request, ainda sem criar PR real."
+                if dry_run_completed
+                else "AO-19 aguardando dry-run concluído antes de preparar plano governado de Pull Request."
+            ),
+        }
 
     is_restore_point_stage = _admin_evolution_is_restore_point_stage(p)
 
