@@ -32887,6 +32887,95 @@ async def chat_stream(
         Converte o patch_plan do pipeline governado em uma proposal_only auditável.
         Este spec não escreve repositório, não comita e não faz deploy.
         """
+        # AO-22_SPECIFIC_GOVERNED_MERGE_PROPOSAL_PAYLOAD
+        # Merge governado deve vencer criação de PR quando o PR já existe.
+        ao22_text = str(message or "")
+        ao22_norm = ao22_text.lower()
+        ao22_merge_intent = (
+            "ao-22" in ao22_norm
+            or "ao22" in ao22_norm
+            or "merge governado" in ao22_norm
+            or "merge do pr" in ao22_norm
+            or "merge do pull request" in ao22_norm
+            or "merge governado do pr" in ao22_norm
+            or "merge governado do pull request" in ao22_norm
+        )
+        ao22_pr6_context = (
+            "pr #6" in ao22_norm
+            or "pull request #6" in ao22_norm
+            or "/pull/6" in ao22_norm
+            or "pull/6" in ao22_norm
+            or "pr_number=6" in ao22_norm
+            or "pr number 6" in ao22_norm
+        )
+        if ao22_merge_intent and ao22_pr6_context:
+            return {
+                "title": "AO-22 — Merge Governado do Pull Request #6",
+                "summary": (
+                    "Criar uma proposta governada para avaliar futuramente o merge do Pull Request #6 "
+                    "no repositório frontend orkio-web-PATCHD-patroai-integrated, mantendo merge, deploy, "
+                    "migration e escrita direta em main bloqueados na criação da proposal. "
+                    "O PR já foi criado e validado no AO-20/AO-21; esta etapa registra somente o próximo gate."
+                ),
+                "risk": "baixo",
+                "target_files": [
+                    "src/routes/legal/Terms.jsx",
+                ],
+                "rollback_plan": (
+                    "Se o merge ainda não tiver sido executado, nenhuma ação técnica é necessária. "
+                    "Se o merge for executado futuramente e precisar reversão, o rollback seguro será "
+                    "revert do merge commit ou novo PR corretivo, sem deploy automático e sem migration."
+                ),
+                "checklist": [
+                    "proposal_only nasce como AO-22, não como AO-19/AO-20.",
+                    "pr_number=6.",
+                    "pr_url=https://github.com/patroaiconsultech/orkio-web-PATCHD-patroai-integrated/pull/6.",
+                    "repo_target=frontend.",
+                    "source_branch=ao-17/evo_f05bef3b8228.",
+                    "target_branch=main.",
+                    "target_files contém apenas src/routes/legal/Terms.jsx.",
+                    "PR #6 foi validado visualmente em Files changed.",
+                    "PR #6 contém apenas src/routes/legal/Terms.jsx.",
+                    "merge_allowed=false na criação da proposal.",
+                    "deploy_allowed=false.",
+                    "migration_allowed=false.",
+                    "main_direct_write=false.",
+                    "human_approval_required=true permanece obrigatório.",
+                    "execution_enabled=false permanece até approval gate.",
+                    "Não executar merge durante proposal_only.",
+                    "Não executar deploy durante proposal_only.",
+                ],
+                "diff_preview": (
+                    "AO-22 GOVERNED MERGE PROPOSAL PREVIEW\n\n"
+                    "Pull Request:\n"
+                    "- PR #6\n"
+                    "- https://github.com/patroaiconsultech/orkio-web-PATCHD-patroai-integrated/pull/6\n\n"
+                    "Source branch:\n"
+                    "- ao-17/evo_f05bef3b8228\n\n"
+                    "Target branch:\n"
+                    "- main\n\n"
+                    "Target files:\n"
+                    "- src/routes/legal/Terms.jsx\n\n"
+                    "Conceptual change:\n"
+                    "+ Registrar proposta governada para merge futuro do PR #6, sem executar merge agora.\n\n"
+                    "Blocked real actions:\n"
+                    "- merge=false\n"
+                    "- deploy=false\n"
+                    "- migration=false\n"
+                    "- main_direct_write=false"
+                ),
+                "smoke_plan": [
+                    "AdminEvolutionCenter lista a proposta AO-22.",
+                    "Admin aprova ou rejeita a proposta AO-22.",
+                    "Dry-run AO-22 gera execution_id sem executar merge.",
+                    "PR #6 permanece aberto até gate explícito de merge.",
+                    "main não recebe escrita direta.",
+                    "Nenhum deploy é executado.",
+                    "Nenhuma migration é executada.",
+                    "Rollback plan está presente.",
+                ],
+            }
+
         # AO-19_SPECIFIC_GOVERNED_PR_PROPOSAL_PAYLOAD
         # AO-19 deve vencer AO-17C/AO-18A quando o usuário pedir PR/Pull Request governado.
         raw_message_ao19 = str(message or "")
