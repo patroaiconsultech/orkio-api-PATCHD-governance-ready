@@ -34786,7 +34786,89 @@ async def chat_stream(
                 _ao01d_multi_intent_readonly = False
                 _ao01d_parts = []
 
-            if _ao01d_multi_intent_readonly:
+
+            # HF6R3B_BLOCK_MUTATION_WITHOUT_APPROVAL_BEFORE_HEAVY_RUNTIME
+            _hf6r3b_mutation_terms = (
+                "execute o patch",
+                "executar o patch",
+                "execute patch",
+                "aplique o patch",
+                "aplicar o patch",
+                "apply patch",
+                "faça o patch",
+                "faca o patch",
+                "rode o patch",
+                "rodar o patch",
+                "faça commit",
+                "faca commit",
+                "commit agora",
+                "commita",
+                "commitar",
+                "git commit",
+                "faça push",
+                "faca push",
+                "push agora",
+                "git push",
+                "faça o deploy",
+                "faca o deploy",
+                "deploy agora",
+                "rode em produção",
+                "rode em producao",
+                "suba para produção",
+                "suba para producao",
+                "publique em produção",
+                "publique em producao",
+                "crie a branch",
+                "criar branch",
+                "crie branch",
+                "abra o pr",
+                "abrir pr",
+                "abra pull request",
+                "abrir pull request",
+                "merge agora",
+                "faça merge",
+                "faca merge",
+            )
+
+            _hf6r3b_approval_terms = (
+                "proposal_id=",
+                "approval_token=",
+                "approval_state=approved",
+                "state=approved",
+                "aprovacao_id=",
+                "aprovação_id=",
+            )
+
+            _hf6r3b_mutation_without_approval = bool(
+                _ao01_short
+                and any(_term in _ao01_norm for _term in _hf6r3b_mutation_terms)
+                and not any(_term in _ao01_norm for _term in _hf6r3b_approval_terms)
+            )
+
+            if _hf6r3b_mutation_without_approval:
+                _hf4k_kind = "mutation_without_approval_blocked"
+                _hf4k_final_text = (
+                    "ORKIO — EXECUÇÃO BLOQUEADA SEM APROVAÇÃO\n\n"
+                    "1. Diagnóstico objetivo\n"
+                    "Pedido mutável detectado. Execução real não será iniciada sem aprovação explícita, proposal_id válido e gate governado.\n\n"
+                    "2. Classificação\n"
+                    "- camada: backend / governança / execução\n"
+                    "- tipo: mutation_without_approval_blocked\n"
+                    "- runtime pesado acionado: false\n"
+                    "- write_executed=false\n"
+                    "- branch_created=false\n"
+                    "- pr_created=false\n"
+                    "- deploy_executed=false\n"
+                    "- approval_required=true\n\n"
+                    "3. Próximo passo seguro\n"
+                    "Para avançar, gere primeiro uma proposta governada ou solicite um patch_plan readonly. Execução real exige aprovação humana explícita.\n\n"
+                    "4. Veredito\n"
+                    "Verde: execução bloqueada com segurança.\n"
+                    "Amarelo: falta proposal_id/approval gate para execução real.\n"
+                    "Vermelho: nenhuma escrita, branch, PR ou deploy foi iniciado."
+                )
+
+            elif _ao01d_multi_intent_readonly:
                 _hf4k_kind = "multi_intent_readonly_splitter"
                 _hf4k_final_text = "\n".join(_ao01d_parts)
 
@@ -35157,6 +35239,7 @@ async def chat_stream(
                 "multi_intent_readonly_splitter": "multi_intent_readonly",
                 "internal_diagnostic_token_readonly": "internal_diagnostic_token_readonly",
                 "checkpoint_ack_readonly": "checkpoint_readonly",
+                "mutation_without_approval_blocked": "mutation_without_approval_blocked",
                 "simple_greeting": "simple_greeting",
                 "system_status_readonly": "system_status_readonly",
                 "readonly_audit_light": "readonly_audit_light",
@@ -35172,6 +35255,7 @@ async def chat_stream(
             }.get(str(_hf4k_kind or ""), "safe_fastpath_coverage")
 
             _hf6r1_route_priority = {
+                "mutation_without_approval_blocked": 5,
                 "internal_diagnostic_token_readonly": 10,
                 "multi_intent_readonly_splitter": 20,
                 "checkpoint_ack_readonly": 30,
