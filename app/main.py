@@ -32152,6 +32152,101 @@ async def chat_stream(
         Converte o patch_plan do pipeline governado em uma proposal_only auditável.
         Este spec não escreve repositório, não comita e não faz deploy.
         """
+        # AO-17B_SPECIFIC_GOVERNED_BRANCH_PROPOSAL_PAYLOAD
+        # Patch mínimo: AO-17B deve vencer AO-02B quando o usuário pedir
+        # criação governada de branch temporária. O prompt pode citar AO-02B
+        # apenas como proposta base/contexto.
+        raw_message_ao17b = str(message or "")
+        raw_norm_ao17b = raw_message_ao17b.lower()
+
+        ao17b_requested = (
+            "ao-17b" in raw_norm_ao17b
+            or "ao17b" in raw_norm_ao17b
+            or "branch temporária" in raw_norm_ao17b
+            or "criar branch temporária" in raw_norm_ao17b
+            or "criação governada de branch" in raw_norm_ao17b
+            or "branch creation" in raw_norm_ao17b
+            or "create-branch" in raw_norm_ao17b
+        )
+
+        if ao17b_requested:
+            base_proposal_id = ""
+            try:
+                m = re.search(r"evo_[A-Za-z0-9]{8,40}", raw_message_ao17b)
+                if m:
+                    base_proposal_id = str(m.group(0))
+            except Exception:
+                base_proposal_id = ""
+
+            suggested_branch = f"ao-17/{base_proposal_id}" if base_proposal_id else "ao-17/<proposal_id_base>"
+            return {
+                "title": "AO-17B — Criação Governada de Branch Temporária",
+                "summary": (
+                    "Criar uma proposta governada específica para autorizar somente a criação de branch temporária "
+                    "no ciclo AO-17B, partindo da proposta base com dry-run concluído. "
+                    f"Proposta base: {base_proposal_id or 'não informada no prompt'}. "
+                    f"Branch sugerida: {suggested_branch}. "
+                    "Esta etapa não escreve arquivos, não cria commit, não abre PR, não faz merge, não faz deploy "
+                    "e não executa migration."
+                ),
+                "risk": "baixo",
+                "target_files": [
+                    "src/routes/legal/Terms.jsx",
+                ],
+                "rollback_plan": (
+                    "Se a proposta AO-17B for rejeitada antes da criação da branch, nenhuma ação técnica é necessária. "
+                    f"Se a branch temporária {suggested_branch} vier a ser criada, o cleanup seguro é deletar somente "
+                    "essa branch temporária no repositório frontend, sem tocar main, arquivos, commits, PRs, deploys ou migrations."
+                ),
+                "checklist": [
+                    "proposal_only nasce como AO-17B, não como AO-02B.",
+                    f"base_proposal_id={base_proposal_id or 'pending_manual_review'}.",
+                    f"suggested_branch={suggested_branch}.",
+                    "repo_target=frontend.",
+                    "target_files contém src/routes/legal/Terms.jsx apenas como contexto do ciclo.",
+                    "Admin confirma que a proposta base está approved.",
+                    "Admin confirma que o dry-run da proposta base está dry_run_completed.",
+                    "AO-17A branch_pr_runner_plan_readonly foi revisado.",
+                    "Criação futura deve criar somente branch temporária.",
+                    "write_files=false.",
+                    "commit=false.",
+                    "open_pr=false.",
+                    "merge=false.",
+                    "deploy=false.",
+                    "migration=false.",
+                    "main_branch_write=false.",
+                    "human_approval_required=true permanece obrigatório.",
+                    "execution_enabled=false permanece até approval gate.",
+                ],
+                "diff_preview": (
+                    "AO-17B GOVERNED BRANCH CREATION PROPOSAL PREVIEW\n\n"
+                    f"Base proposal: {base_proposal_id or 'pending_manual_review'}\n"
+                    f"Suggested branch: {suggested_branch}\n"
+                    "Repo target: frontend\n\n"
+                    "Allowed future action after Admin approval and dry-run:\n"
+                    "- create temporary branch only\n\n"
+                    "Blocked real actions:\n"
+                    "- write_files=false\n"
+                    "- commit=false\n"
+                    "- open_pr=false\n"
+                    "- merge=false\n"
+                    "- deploy=false\n"
+                    "- migration=false\n"
+                    "- main_branch_write=false"
+                ),
+                "smoke_plan": [
+                    "AdminEvolutionCenter lista a proposta AO-17B.",
+                    "Admin aprova a proposta AO-17B.",
+                    "Dry-run AO-17B gera execution_id sem escrita real.",
+                    "Após dry-run, botão Criar branch temporária fica disponível para a proposal AO-17B.",
+                    "create-branch cria/confirmar somente branch temporária.",
+                    "Nenhum arquivo é escrito.",
+                    "Nenhum commit é criado.",
+                    "Nenhum PR é aberto.",
+                    "Nenhum deploy ou migration ocorre.",
+                ],
+            }
+
         # AO-02B_SPECIFIC_GOVERNED_PROPOSAL_PAYLOAD
         # Patch mínimo: quando o pedido proposal_only trouxer um escopo explícito
         # de frontend/Termos, a proposta deve nascer com payload específico,
