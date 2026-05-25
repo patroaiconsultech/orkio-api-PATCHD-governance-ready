@@ -24178,6 +24178,45 @@ def admin_evolution_executions(
 # AO-17A — Branch/PR Runner Governado: contrato read-only
 # ================================
 
+def _admin_evolution_is_governed_merge_stage(proposal: Dict[str, Any]) -> bool:
+    """
+    AO-22 stage detector.
+
+    Must run before AO-19 PR-stage detection because AO-22 intentionally
+    mentions Pull Request, source_branch, target_branch and merge_allowed=false,
+    but its next contract is merge review, not PR creation.
+    """
+    p = proposal if isinstance(proposal, dict) else {}
+    haystack_parts: List[str] = [
+        str(p.get("title") or ""),
+        str(p.get("summary") or ""),
+        str(p.get("rollback_plan") or ""),
+        str(p.get("source_message") or ""),
+    ]
+
+    checklist = p.get("checklist") or []
+    if isinstance(checklist, list):
+        haystack_parts.extend(str(x or "") for x in checklist)
+
+    target_files = p.get("target_files") or []
+    if isinstance(target_files, list):
+        haystack_parts.extend(str(x or "") for x in target_files)
+
+    haystack = "\n".join(haystack_parts).lower()
+
+    return (
+        "ao-22" in haystack
+        or "ao22" in haystack
+        or "merge governado" in haystack
+        or "merge do pr" in haystack
+        or "merge do pull request" in haystack
+        or (
+            ("pr_number=6" in haystack or "pull/6" in haystack or "pr #6" in haystack or "pull request #6" in haystack)
+            and ("merge_allowed=false" in haystack or "não executar merge" in haystack or "nao executar merge" in haystack)
+        )
+    )
+
+
 def _admin_evolution_is_governed_pr_stage(proposal: Dict[str, Any]) -> bool:
     """
     AO-19 stage detector.
@@ -24371,6 +24410,112 @@ def _admin_evolution_build_branch_pr_plan(proposal: Dict[str, Any]) -> Dict[str,
     title = str(p.get("title") or "Proposta de evolução controlada").strip()
     risk = str(p.get("risk") or "baixo_medio").strip()
     rollback_plan = str(p.get("rollback_plan") or "").strip()
+
+    # AO-22_MERGE_PLAN_READONLY_PAYLOAD
+    if _admin_evolution_is_governed_merge_stage(p):
+        ao22_pid = str(p.get("proposal_id") or "").strip()
+        ao22_status = str(p.get("status") or "approved").strip() or "approved"
+        ao22_execution_id = str(p.get("execution_id") or "").strip()
+        ao22_execution_status = str(p.get("execution_status") or "").strip()
+        ao22_dry_run_completed = ao22_execution_status == "dry_run_completed"
+        ao22_source_branch, ao22_target_branch = _admin_evolution_extract_governed_pr_branches(
+            p,
+            fallback_proposal_id=ao22_pid,
+        )
+        ao22_target_files = p.get("target_files") or ["src/routes/legal/Terms.jsx"]
+        if not isinstance(ao22_target_files, list):
+            ao22_target_files = ["src/routes/legal/Terms.jsx"]
+        ao22_target_files = [str(x or "").strip() for x in ao22_target_files if str(x or "").strip()]
+        if not ao22_target_files:
+            ao22_target_files = ["src/routes/legal/Terms.jsx"]
+
+        return {
+            "ok": True,
+            "stage": "AO-22",
+            "mode": "governed_merge_plan_readonly",
+            "proposal_id": ao22_pid,
+            "proposal_status": ao22_status,
+            "execution_id": ao22_execution_id,
+            "execution_status": ao22_execution_status,
+            "dry_run_completed": ao22_dry_run_completed,
+            "pr_number": 6,
+            "pr_url": "https://github.com/patroaiconsultech/orkio-web-PATCHD-patroai-integrated/pull/6",
+            "source_branch": ao22_source_branch,
+            "head_branch": ao22_source_branch,
+            "target_branch": ao22_target_branch,
+            "base_branch": ao22_target_branch,
+            "repo_target": "frontend",
+            "target_files": ao22_target_files,
+            "can_prepare_branch_pr": False,
+            "can_prepare_branch_patch": False,
+            "can_apply_branch_patch": False,
+            "can_revert_branch_patch": False,
+            "can_create_branch": False,
+            "can_open_pr": False,
+            "can_create_pr": False,
+            "can_prepare_merge": bool(ao22_status == "approved" and ao22_dry_run_completed),
+            "can_merge": False,
+            "can_deploy": False,
+            "can_run_migration": False,
+            "execution_enabled": False,
+            "can_execute_real": False,
+            "write_allowed": False,
+            "file_write_allowed": False,
+            "commit_allowed": False,
+            "create_pr_allowed": False,
+            "merge_allowed": False,
+            "deploy_allowed": False,
+            "migration_allowed": False,
+            "main_branch_write_allowed": False,
+            "suggested_merge_title": "AO-22 — Merge Governado do Pull Request #6",
+            "risk": str(p.get("risk") or "baixo"),
+            "merge_contract": {
+                "pr_number": 6,
+                "pr_url": "https://github.com/patroaiconsultech/orkio-web-PATCHD-patroai-integrated/pull/6",
+                "source_branch": ao22_source_branch,
+                "target_branch": ao22_target_branch,
+                "repo_target": "frontend",
+                "merge_allowed": False,
+                "merge_now": False,
+                "deploy_allowed": False,
+                "migration_allowed": False,
+                "main_branch_write_allowed": False,
+                "requires_admin_approval_before_merge": True,
+                "requires_diff_preflight_before_merge": True,
+                "requires_admin_approval_before_deploy": True,
+            },
+            "rollback_contract": {
+                "rollback_plan_required": True,
+                "rollback_without_admin_approval": False,
+                "rollback_plan": str(p.get("rollback_plan") or ""),
+                "rollback_if_merge_not_executed": "Nenhuma ação técnica necessária.",
+                "rollback_if_merge_executed": "Revert do merge commit ou novo PR corretivo, sem deploy automático.",
+            },
+            "smoke_contract": {
+                "build_required": True,
+                "smoke_required": True,
+                "admin_review_required": True,
+                "minimum_checks": [
+                    "PR #6 permanece aberto antes do merge.",
+                    "Files changed contém apenas src/routes/legal/Terms.jsx.",
+                    "Main permanece sem escrita direta.",
+                    "Merge permanece bloqueado neste plano read-only.",
+                    "Deploy permanece bloqueado.",
+                    "Migration permanece bloqueada.",
+                ],
+            },
+            "blocked_actions": [
+                "write_repository_now",
+                "write_main_branch",
+                "commit_now",
+                "open_pr_now",
+                "merge_now",
+                "deploy",
+                "migration",
+            ],
+            "next_required_stage": "AO-22B governed merge execution only after explicit Admin approval and merge preflight validation",
+            "message": "AO-22 pronto para revisão: próxima etapa poderá preparar merge governado do PR #6, ainda sem executar merge.",
+        }
 
     # AO-19_BRANCH_PR_PLAN_READONLY_PAYLOAD
     # AO-19 must win before AO-17C/AO-18A restore point detection.
