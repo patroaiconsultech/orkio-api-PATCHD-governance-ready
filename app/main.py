@@ -25297,6 +25297,57 @@ def _admin_evolution_github_delete_file_from_snapshot(
     }
 
 
+
+def _admin_evolution_infer_repo_target_from_proposal(proposal: Dict[str, Any]) -> str:
+    """AO-17C helper: infer repo target from governed proposal target_files."""
+    try:
+        target_files = proposal.get("target_files")
+        if isinstance(target_files, str):
+            files = [target_files]
+        elif isinstance(target_files, list):
+            files = [str(x or "").strip() for x in target_files]
+        else:
+            files = []
+        files = [x for x in files if x]
+
+        if not files:
+            return ""
+
+        frontend_prefixes = (
+            "src/",
+            "public/",
+            "index.html",
+            "package.json",
+            "package-lock.json",
+            "vite.config",
+        )
+        backend_prefixes = (
+            "app/",
+            "api/",
+            "alembic/",
+            "requirements",
+            "pyproject",
+            "Dockerfile",
+        )
+
+        all_frontend = all(
+            f.startswith(frontend_prefixes) or f.endswith((".jsx", ".tsx", ".js", ".ts", ".css", ".html"))
+            for f in files
+        )
+        all_backend = all(
+            f.startswith(backend_prefixes) or f.endswith(".py")
+            for f in files
+        )
+
+        if all_frontend and not all_backend:
+            return "frontend"
+        if all_backend and not all_frontend:
+            return "backend"
+    except Exception:
+        return ""
+    return ""
+
+
 def _admin_evolution_default_restore_point_patch_files(proposal: Dict[str, Any], *, branch: str, repo_target: Optional[str]) -> List[Dict[str, str]]:
     pid = str(proposal.get("proposal_id") or "proposal").strip()
     payload = {
@@ -25318,6 +25369,15 @@ def _admin_evolution_default_restore_point_patch_files(proposal: Dict[str, Any],
     }
     content = json.dumps(payload, ensure_ascii=False, indent=2) + "\n"
     wanted = str(repo_target or "both").strip().lower()
+
+    # AO-17C_FRONTEND_ONLY_BRANCH_PATCH_SCOPE
+    # Patch mínimo: se a proposal é frontend-only, não tentar escrever marker/snapshot
+    # no repo backend. A branch AO-17 pode existir apenas no frontend.
+    if wanted in {"both", "all", "", "default", "auto"}:
+        inferred_repo_target = _admin_evolution_infer_repo_target_from_proposal(proposal)
+        if inferred_repo_target in {"frontend", "backend"}:
+            wanted = inferred_repo_target
+
     kinds: List[str] = []
     if wanted in {"both", "all", "", "default", "auto"}:
         kinds = ["backend", "frontend"]
@@ -25327,7 +25387,7 @@ def _admin_evolution_default_restore_point_patch_files(proposal: Dict[str, Any],
         kinds = ["frontend"]
     else:
         kinds = ["backend", "frontend"]
-    return [
+    files = [
         {
             "repo_kind": kind,
             "path": f".orkio/evolution/{pid}/restore-point-marker.json",
@@ -25335,6 +25395,65 @@ def _admin_evolution_default_restore_point_patch_files(proposal: Dict[str, Any],
         }
         for kind in kinds
     ]
+
+    # AO-17C_FRONTEND_ONLY_BRANCH_PATCH_SCOPE
+    # Se a proposta AO-17C aponta Terms.jsx e não recebeu body.files,
+    # gerar o patch textual real no frontend a partir do snapshot da branch.
+    try:
+        target_files = proposal.get("target_files")
+        if isinstance(target_files, str):
+            tfiles = [target_files]
+        elif isinstance(target_files, list):
+            tfiles = [str(x or "").strip() for x in target_files]
+        else:
+            tfiles = []
+
+        proposal_text = " ".join(str(proposal.get(k) or "") for k in (
+            "source_message",
+            "summary",
+            "rollback_plan",
+            "title",
+        ))
+
+        wants_terms_patch = (
+            "frontend" in kinds
+            and any(f == "src/routes/legal/Terms.jsx" for f in tfiles)
+            and (
+                "Plataforma em evolução controlada e auditável" in proposal_text
+                or "AO-17C/AO-18A" in proposal_text
+            )
+        )
+
+        if wants_terms_patch:
+            current = _admin_evolution_github_read_snapshot(
+                repo_kind="frontend",
+                branch=branch,
+                path="src/routes/legal/Terms.jsx",
+            )
+            if not current.get("ok") or not current.get("exists"):
+                raise HTTPException(status_code=409, detail="terms_target_snapshot_unavailable")
+
+            current_content = str(current.get("content") or "")
+            old_text = "Plataforma em evolução controlada."
+            new_text = "Plataforma em evolução controlada e auditável."
+
+            if new_text in current_content:
+                # Já aplicado na branch. Não gerar escrita duplicada no arquivo alvo.
+                pass
+            elif old_text in current_content:
+                files.append({
+                    "repo_kind": "frontend",
+                    "path": "src/routes/legal/Terms.jsx",
+                    "content": current_content.replace(old_text, new_text, 1),
+                })
+            else:
+                raise HTTPException(status_code=409, detail="terms_patch_anchor_not_found")
+    except HTTPException:
+        raise
+    except Exception:
+        raise HTTPException(status_code=409, detail="terms_patch_generation_failed")
+
+    return files
 
 
 def _admin_evolution_normalize_patch_files(
