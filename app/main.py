@@ -21467,6 +21467,30 @@ def chat(
                 should_execute_runtime = True
         except Exception:
             pass
+    # AO-34C: bypass governed capability runtime for simple conversational prompts.
+    # Conversation must reach _openai_answer instead of hanging in capability execution.
+    try:
+        _ao34c_text = str(inp.message or "").strip().lower()
+        _ao34c_simple_conversational = (
+            _ao34c_text in {"oi", "olá", "ola", "bom dia", "boa tarde", "boa noite"}
+            or _ao34c_text.startswith(("oi,", "olá,", "ola,"))
+            or _ao34c_text.startswith(("olá ", "ola ", "oi "))
+        )
+    except Exception:
+        _ao34c_simple_conversational = False
+
+    if _ao34c_simple_conversational and not team_technical_audit:
+        try:
+            logger.warning(
+                "AO34C_SIMPLE_CONVERSATION_BYPASS trace_id=%s thread_id=%s should_execute_runtime_before=%s",
+                ao32_trace_id,
+                tid,
+                bool(should_execute_runtime),
+            )
+        except Exception:
+            pass
+        should_execute_runtime = False
+
     team_runtime_requested = bool(should_execute_runtime and has_team and len(target_agents) > 1)
     team_runtime_result: Optional[Dict[str, Any]] = None
     runtime_primary_agent = None
