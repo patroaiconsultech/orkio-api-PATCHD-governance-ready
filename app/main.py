@@ -35962,7 +35962,18 @@ async def chat_stream(
             except Exception:
                 pass
 
+    # AO-29C_CHAT_STREAM_OBSERVABILITY
+    try:
+        logger.warning("AO29_CHAT_STREAM_REQUEST_ENTER trace_id=%s thread_id=%s", trace_id, tid_seed)
+    except Exception:
+        pass
+
     async def _gen_inner():
+        # AO-29C_GEN_INNER_ENTER_OBSERVABILITY
+        try:
+            logger.warning("AO29_GEN_INNER_ENTER trace_id=%s thread_id=%s", trace_id, tid_seed)
+        except Exception:
+            pass
         base = {
             "thread_id": tid_seed,
             "trace_id": trace_id,
@@ -35973,6 +35984,12 @@ async def chat_stream(
 
         try:
             logger.info("CHAT_STREAM_OPEN trace_id=%s thread_id=%s org=%s", trace_id, tid_seed, org)
+        except Exception:
+            pass
+
+        # AO-29C_BEFORE_FIRST_STATUS_YIELD_OBSERVABILITY
+        try:
+            logger.warning("AO29_BEFORE_FIRST_STATUS_YIELD trace_id=%s thread_id=%s", trace_id, tid_seed)
         except Exception:
             pass
 
@@ -38264,7 +38281,16 @@ async def chat_stream(
                     pass
                 # Se a persistência do baseline falhar, seguimos para o runtime protegido.
 
+        # AO-29C_BEFORE_DIRECT_RUNTIME_OBSERVABILITY
+        try:
+            logger.warning("AO29_BEFORE_DIRECT_RUNTIME trace_id=%s thread_id=%s", trace_id, tid_seed)
+        except Exception:
+            pass
         task = asyncio.create_task(asyncio.to_thread(_run_direct_chat_in_isolated_session))
+        try:
+            logger.warning("AO29_DIRECT_RUNTIME_TASK_CREATED trace_id=%s thread_id=%s", trace_id, tid_seed)
+        except Exception:
+            pass
         keepalive_i = 0
 
         try:
@@ -38505,6 +38531,12 @@ async def chat_stream(
             })
 
     async def gen():
+        # AO-29C_OUTER_GEN_OBSERVABILITY
+        try:
+            logger.warning("AO29_OUTER_GEN_ENTER trace_id=%s thread_id=%s", trace_id, tid_seed)
+        except Exception:
+            pass
+
         # AO20K-HF4F_OUTER_SSE_TERMINAL_GUARD
         # Wrap the entire chat stream generator. This is intentionally outside
         # _gen_inner(), so exceptions from any early yield/route_resolved/fast-path
@@ -38512,7 +38544,15 @@ async def chat_stream(
         try:
             async for ev in _gen_inner():
                 yield ev
+            try:
+                logger.warning("AO29_STREAM_EXIT trace_id=%s thread_id=%s reason=normal", trace_id, tid_seed)
+            except Exception:
+                pass
         except asyncio.CancelledError:
+            try:
+                logger.warning("AO29_STREAM_EXIT trace_id=%s thread_id=%s reason=cancelled", trace_id, tid_seed)
+            except Exception:
+                pass
             raise
         except Exception as exc:
             try:
@@ -38521,6 +38561,11 @@ async def chat_stream(
                     trace_id,
                     tid_seed,
                 )
+            except Exception:
+                pass
+
+            try:
+                logger.warning("AO29_STREAM_EXIT trace_id=%s thread_id=%s reason=exception", trace_id, tid_seed)
             except Exception:
                 pass
 
