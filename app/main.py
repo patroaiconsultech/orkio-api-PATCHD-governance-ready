@@ -39274,6 +39274,46 @@ async def chat_stream(
                 await asyncio.sleep(2.0)
 
             result = await task
+
+            # AO39: close SSE immediately after direct runtime success.
+            try:
+                payload = _safe_payload(result)
+                has_text = bool(str(
+                    payload.get("answer")
+                    or payload.get("message")
+                    or payload.get("final_text")
+                    or payload.get("content")
+                    or ""
+                ).strip())
+                has_persisted = bool(
+                    payload.get("assistant_persisted")
+                    or payload.get("assistant_message_id")
+                )
+
+                if has_text or has_persisted:
+                    try:
+                        logger.error(
+                            "CHAT_STREAM_DONE source=stream_direct_runtime_completed_ao39 trace_id=%s thread_id=%s has_text=%s has_persisted=%s",
+                            trace_id, tid_seed, has_text, has_persisted
+                        )
+                    except Exception:
+                        pass
+
+                    async for ev in _emit_result_payload(
+                        payload,
+                        routing_source="stream_direct_runtime_completed_ao39",
+                    ):
+                        yield ev
+                    return
+            except Exception as exc:
+                try:
+                    logger.exception(
+                        "AO39_DIRECT_RUNTIME_COMPLETION_EMIT_FAILED trace_id=%s thread_id=%s error=%s",
+                        trace_id, tid_seed, exc
+                    )
+                except Exception:
+                    pass
+
             payload = _safe_payload(result)
             if not (payload.get("answer") or payload.get("message") or payload.get("final_text")):
                 final_text = "O runtime principal concluiu sem texto final. O stream foi encerrado com segurança."
