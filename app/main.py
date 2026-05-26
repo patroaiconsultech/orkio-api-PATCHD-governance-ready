@@ -4595,6 +4595,39 @@ def _admin_evolution_create_dry_run_execution(
         rollback_plan = "Rollback seguro: não há alteração real neste dry-run. Para voltar ao estado anterior, ignore a execução dry-run e mantenha a proposta sem execução real."
 
     diff_preview = _admin_evolution_build_diff_preview(proposal)
+    # AO-23_DRYRUN_STAGE_AWARE_METADATA
+    ao23_dryrun = False
+    try:
+        ao23_dryrun = bool(_admin_evolution_is_frontend_publication_stage(proposal))
+    except Exception:
+        ao23_dryrun = False
+
+    if ao23_dryrun:
+        try:
+            diff_preview = str(diff_preview or "").replace(
+                "AO-16 CONTROLLED DRY-RUN DIFF PREVIEW",
+                "AO-23 CONTROLLED FRONTEND PUBLICATION DRY-RUN PREVIEW",
+                1,
+            )
+        except Exception:
+            pass
+
+    dryrun_smoke_note = (
+        "Smoke tests planejados/simulados no AO-23. Nenhum push, deploy, migration ou comando destrutivo foi executado."
+        if ao23_dryrun
+        else "Smoke tests planejados/simulados no AO-16. Nenhum comando destrutivo foi executado."
+    )
+    dryrun_next_required_stage = (
+        "AO-23B governed frontend push/publication only after explicit Admin approval and publication preflight validation"
+        if ao23_dryrun
+        else "AO-17 branch/PR runner only after explicit Admin approval and executable artifact validation"
+    )
+    dryrun_message = (
+        "AO-23 dry-run concluído. Nenhum push, deploy, migration ou alteração de API foi executada."
+        if ao23_dryrun
+        else "AO-16 dry-run concluído. Nenhuma escrita, commit, deploy ou migration foi executada."
+    )
+
     result = {
         "ok": True,
         "proposal_id": pid,
@@ -4615,11 +4648,11 @@ def _admin_evolution_create_dry_run_execution(
             "mode": "simulated",
             "passed": smoke_plan,
             "failed": [],
-            "note": "Smoke tests planejados/simulados no AO-16. Nenhum comando destrutivo foi executado.",
+            "note": dryrun_smoke_note,
         },
         "rollback_plan": rollback_plan,
         "blocked_actions": ["write_repository", "commit", "deploy", "migration", "main_branch_write"],
-        "next_required_stage": "AO-17 branch/PR runner only after explicit Admin approval and executable artifact validation",
+        "next_required_stage": dryrun_next_required_stage,
     }
 
     if not _admin_evolution_bootstrap_db_schema():
@@ -4732,7 +4765,7 @@ def _admin_evolution_create_dry_run_execution(
         "smoke_plan": smoke_plan,
         "smoke_result": result["smoke_result"],
         "rollback_plan": rollback_plan,
-        "message": "AO-16 dry-run concluído. Nenhuma escrita, commit, deploy ou migration foi executada.",
+        "message": dryrun_message,
     }
 
 
