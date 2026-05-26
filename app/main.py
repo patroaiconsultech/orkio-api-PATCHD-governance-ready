@@ -38159,7 +38159,25 @@ async def chat_stream(
             max_wait_s = int(os.getenv("CHAT_STREAM_RUNTIME_TIMEOUT_S", "45") or "45")
         except Exception:
             max_wait_s = 45
-        max_wait_s = max(15, min(max_wait_s, 60))
+        # AO-25_RUNTIME_TIMEOUT_CAP_CONFIGURABLE
+        # Railway may set CHAT_STREAM_RUNTIME_TIMEOUT_S above 60s for heavier governed/runtime flows.
+        # Keep a safety cap, but make the cap configurable and observable instead of hard-clamping to 60.
+        try:
+            max_cap_s = int(os.getenv("CHAT_STREAM_RUNTIME_TIMEOUT_CAP_S", "180") or "180")
+        except Exception:
+            max_cap_s = 180
+        max_cap_s = max(30, min(max_cap_s, 300))
+        max_wait_s = max(15, min(max_wait_s, max_cap_s))
+        try:
+            logger.info(
+                "CHAT_STREAM_RUNTIME_TIMEOUT_CONFIG trace_id=%s env_raw=%r cap_s=%s effective_timeout_s=%s",
+                trace_id,
+                os.getenv("CHAT_STREAM_RUNTIME_TIMEOUT_S"),
+                max_cap_s,
+                max_wait_s,
+            )
+        except Exception:
+            pass
         deadline = _time.time() + max_wait_s
 
         try:
