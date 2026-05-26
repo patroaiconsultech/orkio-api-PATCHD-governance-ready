@@ -22807,6 +22807,45 @@ def chat(
             )
         answer = blocked_reply or (ans_obj.get("text") if ans_obj else None)
 
+        # AO42A: canonical institutional definition for Patroai / Patroai Consultech.
+        # Patroai is the company that owns the technology; Orkio is the platform.
+        try:
+            _ao42_text = str(inp.message or "").strip().lower()
+            _ao42_patroai_definition_requested = (
+                not blocked_reply
+                and ("patroai" in _ao42_text or "patroaí" in _ao42_text)
+                and any(
+                    _ao42_key in _ao42_text
+                    for _ao42_key in (
+                        "o que é",
+                        "oque é",
+                        "quem é",
+                        "me explique",
+                        "explique",
+                        "defina",
+                        "definição",
+                        "em uma frase",
+                    )
+                )
+            )
+            if _ao42_patroai_definition_requested:
+                answer = (
+                    "A Patroai Consultech é a empresa detentora da tecnologia Orkio, "
+                    "responsável por desenvolver, proteger e evoluir a plataforma e seus "
+                    "agentes personalizados de IA."
+                )
+                try:
+                    logger.warning(
+                        "AO42A_CANONICAL_PATROAI_DEFINITION_APPLIED trace_id=%s thread_id=%s chars=%s",
+                        ao32_trace_id,
+                        tid,
+                        len(answer),
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         if direct_runtime_result and direct_runtime_result.get("ok") and answer:
             dispatch_routing_receipt["dispatch_executed"] = True
             dispatch_routing_receipt["synthetic_fallback"] = False
