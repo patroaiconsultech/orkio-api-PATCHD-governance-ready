@@ -35991,6 +35991,76 @@ async def chat_stream(
             "detail": "Runtime protegido por terminal guard V7.",
         })
 
+        # AO-27_LITERAL_TOP_PERSISTED_FASTPATH
+        # Literal answer requests must be resolved before technical/audit routers.
+        # This restores a deterministic useful response and guarantees /api/messages
+        # can reload the assistant bubble after the SSE closes.
+        try:
+            _literal_top_match = re.match(
+                r"^\s*(?:responda\s+apenas|responda\s+somente|responder\s+apenas|diga\s+exatamente|retorne\s+somente)\s*[:：]\s*(.+?)\s*$",
+                str(message or ""),
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            _literal_top_text = (_literal_top_match.group(1).strip() if _literal_top_match else "")
+            _literal_top_safe = (
+                bool(_literal_top_text)
+                and len(_literal_top_text) <= 240
+                and "\n" not in _literal_top_text
+                and "\r" not in _literal_top_text
+            )
+        except Exception:
+            _literal_top_text = ""
+            _literal_top_safe = False
+
+        if _literal_top_safe:
+            try:
+                persisted = await asyncio.to_thread(
+                    _persist_assistant_message,
+                    text=_literal_top_text,
+                    thread_id=tid_seed,
+                    agent_id=None,
+                    agent_name="Orkio",
+                )
+                payload = {
+                    **persisted,
+                    "ok": True,
+                    "answer": _literal_top_text,
+                    "message": _literal_top_text,
+                    "final_text": _literal_top_text,
+                    "content": _literal_top_text,
+                    "text": _literal_top_text,
+                    "agent_id": None,
+                    "agent_name": "Orkio",
+                    "service": "chat_literal_top_fastpath",
+                    "provider": "platform",
+                    "status": "done",
+                    "runtime_hints": {
+                        "routing": {
+                            "routing_source": "stream_literal_top_persisted_fastpath_ao27",
+                            "route_applied": True,
+                            "execution_lifecycle": "completed",
+                        }
+                    },
+                }
+                try:
+                    logger.info(
+                        "CHAT_STREAM_LITERAL_TOP_FASTPATH trace_id=%s thread_id=%s assistant_message_id=%s",
+                        trace_id,
+                        persisted.get("thread_id") or tid_seed,
+                        persisted.get("assistant_message_id"),
+                    )
+                except Exception:
+                    pass
+                async for ev in _emit_result_payload(payload, routing_source="stream_literal_top_persisted_fastpath_ao27"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_LITERAL_TOP_FASTPATH_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # If this fast-path fails, existing guarded rails still protect the UI.
+
         # AO20K-HF4B_ABSOLUTE_TOP_OF_GEN_RUNTIME_MARKER_GUARD
         # This guard intentionally runs before route_resolved, @Orkio orchestration_audit,
         # AO20BC technical_audit, proposal_only, patch governance and every provider path.
