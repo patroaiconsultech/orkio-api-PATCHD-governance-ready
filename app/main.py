@@ -21650,16 +21650,38 @@ def chat(
     try:
         if isinstance(runtime_enrichment, dict):
             runtime_enrichment["_source_message"] = inp.message
-        _constraint_guard = _apply_runtime_hard_constraints_to_targets(
-            target_agents=target_agents,
-            alias_to_agent=alias_to_agent,
-            requested_names=requested_names,
-            mention_tokens=mention_tokens,
-            has_team=has_team,
-            runtime_enrichment=runtime_enrichment,
-            db=db,
-            org=org,
-        )
+        if bool(locals().get("ao37_skip_heavy_dispatch")):
+            try:
+                logger.warning(
+                    "AO38C_SKIP_CONSTRAINTS_FOR_PLAIN_CONVERSATION trace_id=%s thread_id=%s target_count=%s elapsed_ms=%s",
+                    ao32_trace_id,
+                    tid,
+                    len(list(target_agents or [])),
+                    _ao32_elapsed_ms(),
+                )
+            except Exception:
+                pass
+            _constraint_guard = {
+                "target_agents": list(target_agents or []),
+                "requested_names": list(requested_names or []),
+                "mention_tokens": list(mention_tokens or []),
+                "has_team": False,
+                "runtime_enrichment": runtime_enrichment if isinstance(runtime_enrichment, dict) else {},
+                "violations": [],
+                "constraints": {},
+                "readonly_trace": None,
+            }
+        else:
+            _constraint_guard = _apply_runtime_hard_constraints_to_targets(
+                target_agents=target_agents,
+                alias_to_agent=alias_to_agent,
+                requested_names=requested_names,
+                mention_tokens=mention_tokens,
+                has_team=has_team,
+                runtime_enrichment=runtime_enrichment,
+                db=db,
+                org=org,
+            )
         target_agents = list(_constraint_guard.get("target_agents") or target_agents)
         requested_names = list(_constraint_guard.get("requested_names") or requested_names)
         mention_tokens = list(_constraint_guard.get("mention_tokens") or mention_tokens)
