@@ -20989,7 +20989,26 @@ def chat(
     team_technical_audit = _is_team_technical_audit_request(inp.message or "")
     if (orion_self_knowledge_flags.get("requested") or orion_operational_maturity_flags.get("requested")) and not team_technical_audit:
         blocked_reply = None
+    try:
+        logger.warning(
+            "AO36C_BEFORE_FOUNDER_GUIDANCE trace_id=%s thread_id=%s elapsed_ms=%s",
+            ao32_trace_id,
+            tid,
+            _ao32_elapsed_ms(),
+        )
+    except Exception:
+        pass
     active_founder_guidance = _get_founder_guidance(org, tid, inp.message)
+    try:
+        logger.warning(
+            "AO36C_AFTER_FOUNDER_GUIDANCE trace_id=%s thread_id=%s has_guidance=%s elapsed_ms=%s",
+            ao32_trace_id,
+            tid,
+            bool(active_founder_guidance),
+            _ao32_elapsed_ms(),
+        )
+    except Exception:
+        pass
 
     # Parse @mentions + canonical destination contract from AppConsole.
     mention_tokens: List[str] = []
@@ -21027,13 +21046,52 @@ def chat(
             logger.exception("ENSURE_CORE_AGENTS_CHAT_FAILED org=%s", org)
         except Exception:
             pass
+    try:
+        logger.warning(
+            "AO36C_BEFORE_AGENT_QUERY trace_id=%s thread_id=%s elapsed_ms=%s",
+            ao32_trace_id,
+            tid,
+            _ao32_elapsed_ms(),
+        )
+    except Exception:
+        pass
     all_agents = db.execute(select(Agent).where(Agent.org_slug == org)).scalars().all()
+    try:
+        logger.warning(
+            "AO36C_AFTER_AGENT_QUERY trace_id=%s thread_id=%s agents_count=%s elapsed_ms=%s",
+            ao32_trace_id,
+            tid,
+            len(list(all_agents or [])),
+            _ao32_elapsed_ms(),
+        )
+    except Exception:
+        pass
     alias_to_agent = _build_dispatch_alias_map(list(all_agents or []))
+    try:
+        logger.warning(
+            "AO36C_BEFORE_DESTINATION_CONTRACT trace_id=%s thread_id=%s elapsed_ms=%s",
+            ao32_trace_id,
+            tid,
+            _ao32_elapsed_ms(),
+        )
+    except Exception:
+        pass
     destination_contract = _efata777_destination_contract_from_input(
         inp,
         alias_to_agent=alias_to_agent,
         all_agents=list(all_agents or []),
     )
+    try:
+        logger.warning(
+            "AO36C_AFTER_DESTINATION_CONTRACT trace_id=%s thread_id=%s dest_mode=%s contract_targets=%s elapsed_ms=%s",
+            ao32_trace_id,
+            tid,
+            destination_contract.get("dest_mode"),
+            len(list(destination_contract.get("target_agents_rows") or [])),
+            _ao32_elapsed_ms(),
+        )
+    except Exception:
+        pass
     if destination_contract.get("requested_agent_names"):
         requested_names = list(dict.fromkeys(list(requested_names or []) + list(destination_contract.get("requested_agent_names") or [])))
     if destination_contract.get("target_agent_names_frozen"):
@@ -21057,10 +21115,31 @@ def chat(
             mention_tokens = ["orion"]
             has_team = False
 
+    try:
+        logger.warning(
+            "AO36C_BEFORE_DISPATCH_SPECIALISTS trace_id=%s thread_id=%s requested_count=%s mention_count=%s elapsed_ms=%s",
+            ao32_trace_id,
+            tid,
+            len(list(requested_names or [])),
+            len(list(mention_tokens or [])),
+            _ao32_elapsed_ms(),
+        )
+    except Exception:
+        pass
     mediated_specialists = _dispatch_request_specialists(
         requested_names=requested_names,
         mention_tokens=mention_tokens,
     )
+    try:
+        logger.warning(
+            "AO36C_AFTER_DISPATCH_SPECIALISTS trace_id=%s thread_id=%s mediated_count=%s elapsed_ms=%s",
+            ao32_trace_id,
+            tid,
+            len(list(mediated_specialists or [])),
+            _ao32_elapsed_ms(),
+        )
+    except Exception:
+        pass
     if mediated_specialists:
         orion_only_flags["requested"] = False
 
@@ -21083,9 +21162,51 @@ def chat(
     elif contract_targets:
         target_agents = contract_targets
     else:
+        try:
+            logger.warning(
+                "AO36C_BEFORE_SELECT_TARGET_AGENTS trace_id=%s thread_id=%s has_team=%s mention_count=%s requested_count=%s elapsed_ms=%s",
+                ao32_trace_id,
+                tid,
+                bool(has_team),
+                len(list(mention_tokens or [])),
+                len(list(requested_names or [])),
+                _ao32_elapsed_ms(),
+            )
+        except Exception:
+            pass
         target_agents = _select_target_agents(db, org, inp, alias_to_agent, mention_tokens, has_team)
+        try:
+            logger.warning(
+                "AO36C_AFTER_SELECT_TARGET_AGENTS trace_id=%s thread_id=%s target_count=%s elapsed_ms=%s",
+                ao32_trace_id,
+                tid,
+                len(list(target_agents or [])),
+                _ao32_elapsed_ms(),
+            )
+        except Exception:
+            pass
         target_agents = _apply_explicit_agent_request(db, org, target_agents, requested_names)
+        try:
+            logger.warning(
+                "AO36C_AFTER_APPLY_EXPLICIT_AGENT_REQUEST trace_id=%s thread_id=%s target_count=%s elapsed_ms=%s",
+                ao32_trace_id,
+                tid,
+                len(list(target_agents or [])),
+                _ao32_elapsed_ms(),
+            )
+        except Exception:
+            pass
 
+    try:
+        logger.warning(
+            "AO36C_BEFORE_TARGET_FREEZE trace_id=%s thread_id=%s target_count=%s elapsed_ms=%s",
+            ao32_trace_id,
+            tid,
+            len(list(target_agents or [])),
+            _ao32_elapsed_ms(),
+        )
+    except Exception:
+        pass
     target_agents = _freeze_dispatch_targets(
         db,
         org,
@@ -21095,6 +21216,16 @@ def chat(
         has_team=has_team,
         user_text=inp.message,
     )
+    try:
+        logger.warning(
+            "AO36C_AFTER_TARGET_FREEZE trace_id=%s thread_id=%s target_count=%s elapsed_ms=%s",
+            ao32_trace_id,
+            tid,
+            len(list(target_agents or [])),
+            _ao32_elapsed_ms(),
+        )
+    except Exception:
+        pass
     dispatch_routing_receipt = _build_dispatch_routing_receipt(
         user_text=inp.message,
         requested_names=requested_names,
