@@ -21035,7 +21035,7 @@ def chat(
         ao37_is_plain_conversation = bool(
             ao37_raw_text
             and "@" not in ao37_raw_text
-            and ao37_dest_mode_raw not in {"multi", "team"}
+            and ao37_dest_mode_raw not in {"multi"}  # AO-37B: UI default Team is not explicit Team intent
             and not ao37_requested_payload
             and not ao37_agent_ids_payload
             and not ao37_target_agent_slug
