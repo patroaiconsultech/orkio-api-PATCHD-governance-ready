@@ -7219,6 +7219,27 @@ def _openai_answer(
       {code, error, message} on known failures (SERVER_BUSY, TIMEOUT, LLM_ERROR)
       None only if an unexpected internal failure occurs before classification.
     """
+    # AO-32_OPENAI_ANSWER_OBSERVABILITY
+    ao32_openai_started_at = _time.time()
+
+    def _ao32_openai_elapsed_ms() -> int:
+        try:
+            return int((_time.time() - ao32_openai_started_at) * 1000)
+        except Exception:
+            return -1
+
+    try:
+        logger.warning(
+            "AO32_OPENAI_ENTER model_override=%s fallback_model_override=%s history_count=%s context_count=%s elapsed_ms=%s",
+            model_override,
+            fallback_model_override,
+            len(list(history or [])),
+            len(list(context_chunks or [])),
+            _ao32_openai_elapsed_ms(),
+        )
+    except Exception:
+        pass
+
     blocked_reply = _block_if_sensitive(user_message)
     if blocked_reply is not None:
         return {
@@ -7263,6 +7284,17 @@ def _openai_answer(
         )
     except Exception:
         timeout_s = 45.0
+
+    try:
+        logger.warning(
+            "AO32_OPENAI_CLIENT_CONFIG model=%s timeout_s=%s key_present=%s elapsed_ms=%s",
+            model,
+            timeout_s,
+            bool(key),
+            _ao32_openai_elapsed_ms(),
+        )
+    except Exception:
+        pass
 
     try:
         client = OpenAI(api_key=key, timeout=timeout_s)
@@ -7350,11 +7382,44 @@ def _openai_answer(
         for candidate in [model, fallback_model]:
             if candidate and candidate not in attempt_models:
                 attempt_models.append(candidate)
+        try:
+            logger.warning(
+                "AO32_OPENAI_CONFIG model=%s fallback_model=%s attempt_models=%s timeout_s=%s elapsed_ms=%s",
+                model,
+                fallback_model,
+                ",".join(attempt_models),
+                timeout_s,
+                _ao32_openai_elapsed_ms(),
+            )
+        except Exception:
+            pass
+
         for attempt_model in attempt_models:
             try:
                 used_model = attempt_model
                 kwargs["model"] = attempt_model
+                try:
+                    logger.warning(
+                        "AO32_OPENAI_BEFORE_CREATE model=%s timeout_s=%s messages_count=%s elapsed_ms=%s",
+                        attempt_model,
+                        timeout_s,
+                        len(list(messages or [])),
+                        _ao32_openai_elapsed_ms(),
+                    )
+                except Exception:
+                    pass
+
                 r = client.chat.completions.create(**kwargs)
+
+                try:
+                    logger.warning(
+                        "AO32_OPENAI_AFTER_CREATE model=%s elapsed_ms=%s",
+                        attempt_model,
+                        _ao32_openai_elapsed_ms(),
+                    )
+                except Exception:
+                    pass
+
                 answer_text = ""
                 try:
                     answer_text = ((r.choices or [])[0].message.content or "").strip()
@@ -7371,6 +7436,16 @@ def _openai_answer(
                     "fallback_reason": "primary_model_failed" if used_model != model else "",
                 }
             except Exception as inner:
+                try:
+                    logger.warning(
+                        "AO32_OPENAI_ATTEMPT_ERROR model=%s exception_class=%s error=%s elapsed_ms=%s",
+                        attempt_model,
+                        inner.__class__.__name__,
+                        str(inner)[:500],
+                        _ao32_openai_elapsed_ms(),
+                    )
+                except Exception:
+                    pass
                 last_exc = inner
                 continue
         raise last_exc or RuntimeError("LLM_ERROR")
@@ -7391,6 +7466,18 @@ def _openai_answer(
             code = "SERVER_BUSY"
         elif "timeout" in low or "timed out" in low:
             code = "TIMEOUT"
+
+        # AO-32B_OPENAI_ERROR_LOCATION_FIXED
+        try:
+            logger.warning(
+                "AO32_OPENAI_ERROR code=%s exception_class=%s error=%s elapsed_ms=%s",
+                code,
+                e.__class__.__name__,
+                msg[:500],
+                _ao32_openai_elapsed_ms(),
+            )
+        except Exception:
+            pass
 
         return {
             "code": code,
@@ -20840,6 +20927,38 @@ def chat(
 
     uid = user.get("sub")
 
+    # AO-32_RUNTIME_CHAT_OBSERVABILITY
+    ao32_started_at = _time.time()
+    ao32_trace_id = str(getattr(inp, "trace_id", "") or "").strip()
+    ao32_client_message_id = str(getattr(inp, "client_message_id", "") or "").strip()
+
+    def _ao32_elapsed_ms() -> int:
+        try:
+            return int((_time.time() - ao32_started_at) * 1000)
+        except Exception:
+            return -1
+
+    def _ao32_agent_names(rows) -> list:
+        try:
+            return [
+                str(getattr(a, "name", "") or getattr(a, "slug", "") or getattr(a, "id", "") or "").strip()
+                for a in list(rows or [])
+            ]
+        except Exception:
+            return []
+
+    try:
+        logger.warning(
+            "AO32_CHAT_ENTER trace_id=%s thread_id=%s client_message_id=%s org=%s elapsed_ms=%s",
+            ao32_trace_id,
+            getattr(inp, "thread_id", None),
+            ao32_client_message_id,
+            org,
+            _ao32_elapsed_ms(),
+        )
+    except Exception:
+        pass
+
     # Ensure thread (create if new, ACL-check if existing)
     tid = inp.thread_id
     if not tid:
@@ -20851,6 +20970,17 @@ def chat(
     else:
         if user.get("role") != "admin":
             _require_thread_member(db, org, tid, uid)
+
+    try:
+        logger.warning(
+            "AO32_THREAD_RESOLVED trace_id=%s thread_id=%s client_message_id=%s elapsed_ms=%s",
+            ao32_trace_id,
+            tid,
+            ao32_client_message_id,
+            _ao32_elapsed_ms(),
+        )
+    except Exception:
+        pass
 
     blocked_reply = _block_if_sensitive(inp.message)
     orion_self_knowledge_flags = _orion_self_knowledge_request_flags(inp.message)
@@ -21017,6 +21147,20 @@ def chat(
         has_team = False
 
 
+    try:
+        logger.warning(
+            "AO32_TARGET_AGENTS_RESOLVED trace_id=%s thread_id=%s client_message_id=%s target_agents_count=%s target_agents=%s has_team=%s elapsed_ms=%s",
+            ao32_trace_id,
+            tid,
+            ao32_client_message_id,
+            len(list(target_agents or [])),
+            ",".join(_ao32_agent_names(target_agents)),
+            bool(has_team),
+            _ao32_elapsed_ms(),
+        )
+    except Exception:
+        pass
+
     wallet_action_prefix = f"chat:{tid}:"
     _wallet_guard_for_chat(
         db,
@@ -21083,6 +21227,19 @@ def chat(
     prev = prev[-24:]
 
     try:
+        logger.warning(
+            "AO32_BEFORE_RUNTIME_ENRICHMENT trace_id=%s thread_id=%s client_message_id=%s prev_count=%s target_agents_count=%s elapsed_ms=%s",
+            ao32_trace_id,
+            tid,
+            ao32_client_message_id,
+            len(list(prev or [])),
+            len(list(target_agents or [])),
+            _ao32_elapsed_ms(),
+        )
+    except Exception:
+        pass
+
+    try:
         runtime_enrichment = _build_runtime_enrichment(
             db,
             org,
@@ -21099,6 +21256,18 @@ def chat(
         except Exception:
             pass
         runtime_enrichment = {}
+
+    try:
+        logger.warning(
+            "AO32_AFTER_RUNTIME_ENRICHMENT trace_id=%s thread_id=%s client_message_id=%s enrichment_keys=%s elapsed_ms=%s",
+            ao32_trace_id,
+            tid,
+            ao32_client_message_id,
+            ",".join(sorted(list((runtime_enrichment or {}).keys()))) if isinstance(runtime_enrichment, dict) else "",
+            _ao32_elapsed_ms(),
+        )
+    except Exception:
+        pass
 
     try:
         receipt_intent = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
@@ -21332,6 +21501,18 @@ def chat(
         except Exception:
             team_history_seed = []
         runtime_overlay_team = (runtime_enrichment.get("system_overlay") if runtime_enrichment else "") or ""
+        try:
+            logger.warning(
+                "AO32_BEFORE_TEAM_FANOUT trace_id=%s thread_id=%s client_message_id=%s target_agents_count=%s elapsed_ms=%s",
+                ao32_trace_id,
+                tid,
+                ao32_client_message_id,
+                len(list(target_agents or [])),
+                _ao32_elapsed_ms(),
+            )
+        except Exception:
+            pass
+
         team_runtime_result = execute_team_fanout(
             target_agents,
             inp.message,
@@ -21341,6 +21522,19 @@ def chat(
             founder_guidance=active_founder_guidance,
             mention_tokens=mention_tokens,
         )
+        try:
+            logger.warning(
+                "AO32_AFTER_TEAM_FANOUT trace_id=%s thread_id=%s client_message_id=%s ok=%s text_chars=%s elapsed_ms=%s",
+                ao32_trace_id,
+                tid,
+                ao32_client_message_id,
+                bool((team_runtime_result or {}).get("ok")) if isinstance(team_runtime_result, dict) else None,
+                len(str((team_runtime_result or {}).get("text") or "")) if isinstance(team_runtime_result, dict) else -1,
+                _ao32_elapsed_ms(),
+            )
+        except Exception:
+            pass
+
         dispatch_routing_receipt = _apply_team_runtime_receipt(
             dispatch_routing_receipt,
             user_text=inp.message,
@@ -21482,7 +21676,34 @@ def chat(
 
         citations: List[Dict[str, Any]] = []
         if (not agent) or agent.rag_enabled:
+            try:
+                logger.warning(
+                    "AO32_BEFORE_RAG trace_id=%s thread_id=%s client_message_id=%s agent=%s top_k=%s file_ids_count=%s elapsed_ms=%s",
+                    ao32_trace_id,
+                    tid,
+                    ao32_client_message_id,
+                    getattr(agent, "name", None) if agent else None,
+                    effective_top_k,
+                    len(list(agent_file_ids or [])),
+                    _ao32_elapsed_ms(),
+                )
+            except Exception:
+                pass
+
             citations = keyword_retrieve(db, org_slug=org, query=inp.message, top_k=effective_top_k, file_ids=agent_file_ids)
+
+            try:
+                logger.warning(
+                    "AO32_AFTER_RAG trace_id=%s thread_id=%s client_message_id=%s agent=%s citations_count=%s elapsed_ms=%s",
+                    ao32_trace_id,
+                    tid,
+                    ao32_client_message_id,
+                    getattr(agent, "name", None) if agent else None,
+                    len(list(citations or [])),
+                    _ao32_elapsed_ms(),
+                )
+            except Exception:
+                pass
 
             # Fallback for summary-style requests
             if (not citations) and agent_file_ids:
@@ -21627,6 +21848,19 @@ def chat(
                         ):
                             direct_runtime_requested = True
                             direct_runtime_target = direct_target
+                            try:
+                                logger.warning(
+                                    "AO32_BEFORE_AGENT_RUNTIME trace_id=%s thread_id=%s client_message_id=%s direct_target=%s agent=%s elapsed_ms=%s",
+                                    ao32_trace_id,
+                                    tid,
+                                    ao32_client_message_id,
+                                    direct_target,
+                                    getattr((resolved_direct_agent_row or agent), "name", None),
+                                    _ao32_elapsed_ms(),
+                                )
+                            except Exception:
+                                pass
+
                             direct_runtime_result = execute_agent_runtime(
                                 resolved_direct_agent_row or agent,
                                 inp.message,
@@ -21637,6 +21871,20 @@ def chat(
                                 has_team=has_team,
                                 mention_tokens=mention_tokens,
                             )
+                            try:
+                                logger.warning(
+                                    "AO32_AFTER_AGENT_RUNTIME trace_id=%s thread_id=%s client_message_id=%s direct_target=%s ok=%s error=%s elapsed_ms=%s",
+                                    ao32_trace_id,
+                                    tid,
+                                    ao32_client_message_id,
+                                    direct_target,
+                                    bool(direct_runtime_result.get("ok")) if isinstance(direct_runtime_result, dict) else None,
+                                    str(direct_runtime_result.get("error") or "") if isinstance(direct_runtime_result, dict) else "",
+                                    _ao32_elapsed_ms(),
+                                )
+                            except Exception:
+                                pass
+
                             if direct_runtime_result.get("ok"):
                                 dispatch_routing_receipt["synthetic_fallback"] = False
                                 dispatch_routing_receipt["fallback_used"] = False
