@@ -82,6 +82,7 @@ from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import urllib.request as _urllib_request
 import ssl as _ssl
+import time as _time  # AO-33: global alias for AO-32 observability
 
 
 
