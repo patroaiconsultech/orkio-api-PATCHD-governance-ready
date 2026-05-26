@@ -21062,25 +21062,29 @@ def chat(
         except Exception:
             pass
         try:
-            # AO-37C: Agent has no class-level slug column in this model.
-            # Resolve Orkio by querying org agents and matching safe instance attributes.
-            ao37_org_agents = (
-                db.execute(select(Agent).where(Agent.org_slug == org))
+            # AO-37D: direct, limited Orkio lookup for plain conversation fast-path.
+            # Do not use Agent.slug and do not list all org agents here.
+            ao37_plain_orkio_agent = (
+                db.execute(
+                    select(Agent)
+                    .where(Agent.org_slug == org)
+                    .where(Agent.name == "Orkio")
+                    .limit(1)
+                )
                 .scalars()
-                .all()
+                .first()
             )
-            for _ao37_agent in list(ao37_org_agents or []):
-                _ao37_name = str(getattr(_ao37_agent, "name", "") or "").strip().lower()
-                _ao37_slug = str(getattr(_ao37_agent, "slug", "") or "").strip().lower()
-                if _ao37_name == "orkio" or _ao37_slug == "orkio":
-                    ao37_plain_orkio_agent = _ao37_agent
-                    break
             if ao37_plain_orkio_agent is None:
-                for _ao37_agent in list(ao37_org_agents or []):
-                    _ao37_name = str(getattr(_ao37_agent, "name", "") or "").strip().lower()
-                    if "orkio" in _ao37_name:
-                        ao37_plain_orkio_agent = _ao37_agent
-                        break
+                ao37_plain_orkio_agent = (
+                    db.execute(
+                        select(Agent)
+                        .where(Agent.org_slug == org)
+                        .where(Agent.name.ilike("%orkio%"))
+                        .limit(1)
+                    )
+                    .scalars()
+                    .first()
+                )
         except Exception:
             ao37_plain_orkio_agent = None
             try:
