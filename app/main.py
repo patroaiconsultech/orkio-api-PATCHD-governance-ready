@@ -37962,6 +37962,48 @@ async def chat_stream(
                     pass
                 # Se falhar, os guards existentes ainda protegem a UI.
 
+        # AO-26_LITERAL_RESPONSE_FASTPATH
+        # Literal answer requests must stay in normal chat, even when the requested
+        # literal text contains operational tokens such as AO-25, runtime or backend.
+        # This prevents accidental capture by platform_self_audit / governance handlers.
+        try:
+            _literal_match = re.match(
+                r"^\s*(?:responda\s+apenas|responda\s+somente|responder\s+apenas|diga\s+exatamente|retorne\s+somente)\s*[:：]\s*(.+?)\s*$",
+                str(message or ""),
+                flags=re.IGNORECASE | re.DOTALL,
+            )
+            _literal_text = (_literal_match.group(1).strip() if _literal_match else "")
+            _literal_safe = (
+                bool(_literal_text)
+                and len(_literal_text) <= 240
+                and "\n" not in _literal_text
+                and "\r" not in _literal_text
+            )
+        except Exception:
+            _literal_text = ""
+            _literal_safe = False
+
+        if _literal_safe:
+            try:
+                payload = {
+                    "ok": True,
+                    "message": _literal_text,
+                    "content": _literal_text,
+                    "text": _literal_text,
+                    "service": "chat_literal_fastpath",
+                    "provider": "platform",
+                    "status": "done",
+                }
+                async for ev in _emit_result_payload(payload, routing_source="stream_literal_response_fastpath_ao26"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_LITERAL_RESPONSE_FASTPATH_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+                # If the fast-path fails, existing guards still protect the UI.
+
         # AO-10_ORION_EXECUTIVE_AUDIT_FASTPATH
         # Leituras executivas explícitas para @Orion devem responder em trilho
         # leve, readonly e determinístico antes de qualquer runtime pesado.
