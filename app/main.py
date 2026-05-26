@@ -36008,6 +36008,145 @@ async def chat_stream(
             "detail": "Runtime protegido por terminal guard V7.",
         })
 
+        # AO-31D_EMIT_RESULT_PAYLOAD_PREDECLARED
+        # _emit_result_payload must exist before AO-27 and every early fast-path.
+        # Otherwise Python treats the later async def as a local variable and early
+        # calls fail with UnboundLocalError.
+        try:
+            route_plan_safe_local = _ao20k_hf2_json_safe(
+                route_plan if isinstance(route_plan, dict) else {}
+            )
+        except Exception:
+            route_plan_safe_local = {}
+
+        async def _emit_result_payload(payload: Dict[str, Any], *, routing_source: str = "stream_runtime_v3"):
+            # AO20K-HF3 — sanitize the whole payload before any SSE event is built.
+            # HF2 only sanitized runtime_hints; route_plan/payload-level fields could still
+            # carry non-serializable values and break json.dumps inside the generator.
+            if not isinstance(payload, dict):
+                payload = {
+                    "answer": str(payload or ""),
+                    "message": str(payload or ""),
+                    "final_text": str(payload or ""),
+                    "agent_id": "orkio",
+                    "agent_name": "Orkio",
+                    "runtime_hints": {},
+                }
+            try:
+                payload = _ao20k_hf2_json_safe(payload)
+            except Exception:
+                payload = {
+                    "answer": "O runtime concluiu com fallback seguro de serialização.",
+                    "message": "O runtime concluiu com fallback seguro de serialização.",
+                    "final_text": "O runtime concluiu com fallback seguro de serialização.",
+                    "agent_id": "orkio",
+                    "agent_name": "Orkio",
+                    "runtime_hints": {
+                        "routing": {
+                            "routing_source": routing_source,
+                            "serialization_fallback": True,
+                        }
+                    },
+                }
+            route_plan_safe = _ao20k_hf2_json_safe(route_plan if isinstance(route_plan, dict) else {})
+
+            final_text = str(
+                payload.get("answer")
+                or payload.get("message")
+                or payload.get("final_text")
+                or ""
+            ).strip()
+            thread_id = str(payload.get("thread_id") or tid_seed or "").strip() or None
+            agent_id = payload.get("agent_id")
+            agent_name = str(payload.get("agent_name") or "Orkio").strip() or "Orkio"
+            runtime_hints = payload.get("runtime_hints") if isinstance(payload.get("runtime_hints"), dict) else None
+            if runtime_hints is None:
+                runtime_hints = {}
+            routing_hints = runtime_hints.get("routing") if isinstance(runtime_hints.get("routing"), dict) else {}
+            routing_hints = {
+                **routing_hints,
+                "routing_source": routing_hints.get("routing_source") or routing_source,
+                "route_applied": True,
+                "execution_lifecycle": routing_hints.get("execution_lifecycle") or "completed",
+                "ao20bc_route_audit": route_plan_safe_local,
+                "requested_agent": route_plan.get("requested_agent"),
+                "resolved_agent": route_plan.get("resolved_agent"),
+                "route_family": route_plan.get("route_family"),
+                "route_reason": route_plan_safe_local.get("route_reason"),
+                "blocked_routes": route_plan.get("blocked_routes") or [],
+                "requested_patch_id": route_plan_safe_local.get("requested_patch_id"),
+                "generated_patch_id": route_plan_safe_local.get("generated_patch_id"),
+            }
+            runtime_hints["routing"] = routing_hints
+
+            # AO20K-HF2 — SSE Safe Emitter:
+            # Ensure nested runtime_hints are JSON-serializable before the done event.
+            # Without this, json.dumps inside _metatron_sse can fail after HTTP 200,
+            # causing the frontend to show the generic "stream did not complete" fallback.
+            try:
+                runtime_hints = _ao20k_hf2_json_safe(runtime_hints)
+            except Exception:
+                runtime_hints = {
+                    "routing": {
+                        "routing_source": routing_source,
+                        "route_applied": True,
+                        "execution_lifecycle": "completed_with_serialization_fallback",
+                        "ao20k_hf2_serialization_fallback": True,
+                        "ao20bc_route_audit": route_plan_safe_local,
+                    }
+                }
+
+            assistant_message_id = payload.get("assistant_message_id")
+            assistant_persisted = bool(payload.get("assistant_persisted", True))
+
+            final_base = {
+                **base,
+                "thread_id": thread_id,
+                "agent_id": agent_id or "orkio",
+                "agent_name": agent_name,
+                "final_speaker": agent_name,
+            }
+
+            if not final_text:
+                final_text = "O runtime principal concluiu sem texto final. O stream foi encerrado com segurança."
+            final_text = _sanitize_visible_stream_text(final_text)
+
+            try:
+                logger.info("CHAT_STREAM_FIRST_CHUNK trace_id=%s thread_id=%s chars=%s", trace_id, thread_id, len(final_text))
+            except Exception:
+                pass
+
+            yield _metatron_sse("status", {
+                **final_base,
+                "status": "Resposta preparada.",
+                "phase": "answer_ready",
+            })
+            yield _metatron_sse("chunk", {
+                **final_base,
+                "delta": final_text,
+                "content": final_text,
+            })
+            yield _metatron_sse("agent_done", {
+                **final_base,
+                "done": True,
+                "message": "Resposta concluída.",
+            })
+            yield _metatron_sse("done", {
+                **final_base,
+                "done": True,
+                "assistant_persisted": assistant_persisted,
+                "assistant_message_id": assistant_message_id,
+                "final_text": final_text,
+                "citations": payload.get("citations") or [],
+                "voice_id": payload.get("voice_id"),
+                "avatar_url": payload.get("avatar_url"),
+                "runtime_hints": runtime_hints,
+            })
+            try:
+                logger.info("CHAT_STREAM_DONE trace_id=%s thread_id=%s source=%s", trace_id, thread_id, routing_source)
+            except Exception:
+                pass
+
         # AO-27_LITERAL_TOP_PERSISTED_FASTPATH
         # Literal answer requests must be resolved before technical/audit routers.
         # This restores a deterministic useful response and guarantees /api/messages
@@ -36330,133 +36469,6 @@ async def chat_stream(
             "blocked_routes": route_plan_safe_local.get("blocked_routes") or [],
         })
 
-        async def _emit_result_payload(payload: Dict[str, Any], *, routing_source: str = "stream_runtime_v3"):
-            # AO20K-HF3 — sanitize the whole payload before any SSE event is built.
-            # HF2 only sanitized runtime_hints; route_plan/payload-level fields could still
-            # carry non-serializable values and break json.dumps inside the generator.
-            if not isinstance(payload, dict):
-                payload = {
-                    "answer": str(payload or ""),
-                    "message": str(payload or ""),
-                    "final_text": str(payload or ""),
-                    "agent_id": "orkio",
-                    "agent_name": "Orkio",
-                    "runtime_hints": {},
-                }
-            try:
-                payload = _ao20k_hf2_json_safe(payload)
-            except Exception:
-                payload = {
-                    "answer": "O runtime concluiu com fallback seguro de serialização.",
-                    "message": "O runtime concluiu com fallback seguro de serialização.",
-                    "final_text": "O runtime concluiu com fallback seguro de serialização.",
-                    "agent_id": "orkio",
-                    "agent_name": "Orkio",
-                    "runtime_hints": {
-                        "routing": {
-                            "routing_source": routing_source,
-                            "serialization_fallback": True,
-                        }
-                    },
-                }
-            route_plan_safe = _ao20k_hf2_json_safe(route_plan if isinstance(route_plan, dict) else {})
-
-            final_text = str(
-                payload.get("answer")
-                or payload.get("message")
-                or payload.get("final_text")
-                or ""
-            ).strip()
-            thread_id = str(payload.get("thread_id") or tid_seed or "").strip() or None
-            agent_id = payload.get("agent_id")
-            agent_name = str(payload.get("agent_name") or "Orkio").strip() or "Orkio"
-            runtime_hints = payload.get("runtime_hints") if isinstance(payload.get("runtime_hints"), dict) else None
-            if runtime_hints is None:
-                runtime_hints = {}
-            routing_hints = runtime_hints.get("routing") if isinstance(runtime_hints.get("routing"), dict) else {}
-            routing_hints = {
-                **routing_hints,
-                "routing_source": routing_hints.get("routing_source") or routing_source,
-                "route_applied": True,
-                "execution_lifecycle": routing_hints.get("execution_lifecycle") or "completed",
-                "ao20bc_route_audit": route_plan_safe_local,
-                "requested_agent": route_plan.get("requested_agent"),
-                "resolved_agent": route_plan.get("resolved_agent"),
-                "route_family": route_plan.get("route_family"),
-                "route_reason": route_plan_safe_local.get("route_reason"),
-                "blocked_routes": route_plan.get("blocked_routes") or [],
-                "requested_patch_id": route_plan_safe_local.get("requested_patch_id"),
-                "generated_patch_id": route_plan_safe_local.get("generated_patch_id"),
-            }
-            runtime_hints["routing"] = routing_hints
-
-            # AO20K-HF2 — SSE Safe Emitter:
-            # Ensure nested runtime_hints are JSON-serializable before the done event.
-            # Without this, json.dumps inside _metatron_sse can fail after HTTP 200,
-            # causing the frontend to show the generic "stream did not complete" fallback.
-            try:
-                runtime_hints = _ao20k_hf2_json_safe(runtime_hints)
-            except Exception:
-                runtime_hints = {
-                    "routing": {
-                        "routing_source": routing_source,
-                        "route_applied": True,
-                        "execution_lifecycle": "completed_with_serialization_fallback",
-                        "ao20k_hf2_serialization_fallback": True,
-                        "ao20bc_route_audit": route_plan_safe_local,
-                    }
-                }
-
-            assistant_message_id = payload.get("assistant_message_id")
-            assistant_persisted = bool(payload.get("assistant_persisted", True))
-
-            final_base = {
-                **base,
-                "thread_id": thread_id,
-                "agent_id": agent_id or "orkio",
-                "agent_name": agent_name,
-                "final_speaker": agent_name,
-            }
-
-            if not final_text:
-                final_text = "O runtime principal concluiu sem texto final. O stream foi encerrado com segurança."
-            final_text = _sanitize_visible_stream_text(final_text)
-
-            try:
-                logger.info("CHAT_STREAM_FIRST_CHUNK trace_id=%s thread_id=%s chars=%s", trace_id, thread_id, len(final_text))
-            except Exception:
-                pass
-
-            yield _metatron_sse("status", {
-                **final_base,
-                "status": "Resposta preparada.",
-                "phase": "answer_ready",
-            })
-            yield _metatron_sse("chunk", {
-                **final_base,
-                "delta": final_text,
-                "content": final_text,
-            })
-            yield _metatron_sse("agent_done", {
-                **final_base,
-                "done": True,
-                "message": "Resposta concluída.",
-            })
-            yield _metatron_sse("done", {
-                **final_base,
-                "done": True,
-                "assistant_persisted": assistant_persisted,
-                "assistant_message_id": assistant_message_id,
-                "final_text": final_text,
-                "citations": payload.get("citations") or [],
-                "voice_id": payload.get("voice_id"),
-                "avatar_url": payload.get("avatar_url"),
-                "runtime_hints": runtime_hints,
-            })
-            try:
-                logger.info("CHAT_STREAM_DONE trace_id=%s thread_id=%s source=%s", trace_id, thread_id, routing_source)
-            except Exception:
-                pass
 
         # AO20K-HF4_RUNTIME_MARKER_AND_MINIMAL_BRANCH_PLAN_PROBE
         # AO01C_PRE_AO20BC_INTERNAL_TOKEN_GUARD
