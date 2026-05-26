@@ -21595,6 +21595,15 @@ def chat(
         pass
 
     try:
+        logger.warning(
+            "AO38B_BEFORE_RECEIPT_MERGE trace_id=%s thread_id=%s elapsed_ms=%s",
+            ao32_trace_id,
+            tid,
+            _ao32_elapsed_ms(),
+        )
+    except Exception:
+        pass
+    try:
         receipt_intent = str((((runtime_enrichment or {}).get("intent_package") or {}).get("intent") or "")).strip().lower()
         if block_roster_fallback and receipt_intent == "team_roster_answer":
             receipt_intent = "direct_agent_message" if dispatch_routing_receipt.get("target_agent_frozen") else "orchestrator_dispatch_readonly"
@@ -21605,6 +21614,15 @@ def chat(
     except Exception:
         pass
 
+    try:
+        logger.warning(
+            "AO38B_AFTER_RECEIPT_MERGE_BEFORE_FORCED_DISPATCH trace_id=%s thread_id=%s elapsed_ms=%s",
+            ao32_trace_id,
+            tid,
+            _ao32_elapsed_ms(),
+        )
+    except Exception:
+        pass
     try:
         forced_dispatch_flags = _runtime_orion_dispatch_request_flags(inp.message)
         if forced_dispatch_flags.get("requested"):
@@ -21620,6 +21638,15 @@ def chat(
     except Exception:
         pass
 
+    try:
+        logger.warning(
+            "AO38B_AFTER_FORCED_DISPATCH_BEFORE_CONSTRAINTS trace_id=%s thread_id=%s elapsed_ms=%s",
+            ao32_trace_id,
+            tid,
+            _ao32_elapsed_ms(),
+        )
+    except Exception:
+        pass
     try:
         if isinstance(runtime_enrichment, dict):
             runtime_enrichment["_source_message"] = inp.message
@@ -21644,6 +21671,19 @@ def chat(
         constraint_violations = []
         runtime_constraints = {}
         readonly_squad_trace = None
+
+    try:
+        logger.warning(
+            "AO38B_AFTER_CONSTRAINTS trace_id=%s thread_id=%s target_agents_count=%s violations_count=%s has_readonly_trace=%s elapsed_ms=%s",
+            ao32_trace_id,
+            tid,
+            len(list(target_agents or [])),
+            len(list(constraint_violations or [])),
+            bool(locals().get("readonly_squad_trace")),
+            _ao32_elapsed_ms(),
+        )
+    except Exception:
+        pass
 
     if 'readonly_squad_trace' not in locals():
         readonly_squad_trace = _constraint_guard.get("readonly_trace") if isinstance(_constraint_guard.get("readonly_trace"), dict) else None
@@ -21713,8 +21753,37 @@ def chat(
             runtime_hints=(runtime_enrichment or {}).get("runtime_hints") if isinstance(runtime_enrichment, dict) else None,
         )
 
+    try:
+        logger.warning(
+            "AO38B_BEFORE_PLANNER_REORDER trace_id=%s thread_id=%s target_agents_count=%s elapsed_ms=%s",
+            ao32_trace_id,
+            tid,
+            len(list(target_agents or [])),
+            _ao32_elapsed_ms(),
+        )
+    except Exception:
+        pass
     if runtime_enrichment.get("planner_snapshot") and len(target_agents) > 1:
         target_agents = _reorder_agents_by_planner(target_agents, runtime_enrichment.get("planner_snapshot"))
+    try:
+        logger.warning(
+            "AO38B_AFTER_PLANNER_REORDER_BEFORE_EXECUTION_REVIEW trace_id=%s thread_id=%s target_agents_count=%s elapsed_ms=%s",
+            ao32_trace_id,
+            tid,
+            len(list(target_agents or [])),
+            _ao32_elapsed_ms(),
+        )
+    except Exception:
+        pass
+    try:
+        logger.warning(
+            "AO38B_BEFORE_EXECUTION_REVIEW trace_id=%s thread_id=%s elapsed_ms=%s",
+            ao32_trace_id,
+            tid,
+            _ao32_elapsed_ms(),
+        )
+    except Exception:
+        pass
     try:
         recent_execution_rows = _read_recent_execution_events(db, org=org, thread_id=tid, limit=8)
         execution_review = _build_execution_review_snapshot(recent_execution_rows)
@@ -21728,6 +21797,16 @@ def chat(
             runtime_hints_live["explicit_requested_agents"] = requested_names
             runtime_hints_live["multi_agent_requested"] = len(requested_names) > 1 or has_team
             runtime_enrichment["runtime_hints"] = runtime_hints_live
+    except Exception:
+        pass
+    try:
+        logger.warning(
+            "AO38B_AFTER_EXECUTION_REVIEW_BEFORE_ORION_FLAGS trace_id=%s thread_id=%s target_agents_count=%s elapsed_ms=%s",
+            ao32_trace_id,
+            tid,
+            len(list(target_agents or [])),
+            _ao32_elapsed_ms(),
+        )
     except Exception:
         pass
     try:
@@ -21749,6 +21828,15 @@ def chat(
     except Exception:
         pass
     try:
+        logger.warning(
+            "AO38B_AFTER_ORION_FLAGS_BEFORE_DAG_EVENT trace_id=%s thread_id=%s elapsed_ms=%s",
+            ao32_trace_id,
+            tid,
+            _ao32_elapsed_ms(),
+        )
+    except Exception:
+        pass
+    try:
         dag_snapshot = runtime_enrichment.get("dag_snapshot") or {}
         if dag_snapshot.get("route_applied"):
             _persist_trial_event(
@@ -21766,8 +21854,32 @@ def chat(
     except Exception:
         pass
 
+    try:
+        logger.warning(
+            "AO38B_AFTER_DAG_EVENT_BEFORE_RUNTIME_DECISION trace_id=%s thread_id=%s elapsed_ms=%s",
+            ao32_trace_id,
+            tid,
+            _ao32_elapsed_ms(),
+        )
+    except Exception:
+        pass
+
     # PATCH27_12AJ — execution-first collapse for sync chat
     should_execute_runtime = _should_execute_runtime_from_enrichment(runtime_enrichment)
+    try:
+        _ao38b_intent_package = runtime_enrichment.get("intent_package") if isinstance(runtime_enrichment, dict) else {}
+        _ao38b_runtime_operation = _ao38b_intent_package.get("runtime_operation") if isinstance(_ao38b_intent_package, dict) else {}
+        logger.warning(
+            "AO38B_AFTER_RUNTIME_DECISION trace_id=%s thread_id=%s should_execute_runtime=%s intent=%s capability=%s elapsed_ms=%s",
+            ao32_trace_id,
+            tid,
+            bool(should_execute_runtime),
+            str((_ao38b_intent_package or {}).get("intent") or ""),
+            str((_ao38b_runtime_operation or {}).get("capability_name") or (_ao38b_intent_package or {}).get("capability_name") or ""),
+            _ao32_elapsed_ms(),
+        )
+    except Exception:
+        pass
     if not should_execute_runtime and isinstance(runtime_enrichment, dict):
         try:
             intent_package_live = runtime_enrichment.get("intent_package") if isinstance(runtime_enrichment.get("intent_package"), dict) else {}
@@ -21814,6 +21926,19 @@ def chat(
         except Exception:
             pass
         should_execute_runtime = False
+
+    try:
+        logger.warning(
+            "AO38B_AFTER_AO34C_BEFORE_RUNTIME_BRANCH trace_id=%s thread_id=%s should_execute_runtime=%s has_team=%s target_agents_count=%s elapsed_ms=%s",
+            ao32_trace_id,
+            tid,
+            bool(should_execute_runtime),
+            bool(has_team),
+            len(list(target_agents or [])),
+            _ao32_elapsed_ms(),
+        )
+    except Exception:
+        pass
 
     team_runtime_requested = bool(should_execute_runtime and has_team and len(target_agents) > 1)
     team_runtime_result: Optional[Dict[str, Any]] = None
