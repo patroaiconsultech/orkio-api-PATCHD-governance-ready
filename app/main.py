@@ -25270,9 +25270,25 @@ def admin_evolution_proposal_execution_plan(
     execution_status = str(row.get("execution_status") or "not_started").strip()
     dry_run_completed = execution_status == "dry_run_completed"
     branch_pr_plan = _admin_evolution_build_branch_pr_plan(row)
-    is_restore_point_stage = branch_pr_plan.get("stage") == "AO-17C/AO-18A"
 
-    if dry_run_completed and is_restore_point_stage:
+    # AO-23B_EXECUTION_PLAN_WRAPPER_STAGE_AWARE
+    branch_pr_plan_stage = str(branch_pr_plan.get("stage") or "").strip().upper()
+    branch_pr_plan_mode = str(branch_pr_plan.get("mode") or "").strip()
+    is_ao23b_frontend_push_stage = (
+        branch_pr_plan_stage == "AO-23B"
+        or branch_pr_plan_mode == "governed_frontend_push_plan_readonly"
+    )
+    is_ao23_frontend_publication_stage = (
+        branch_pr_plan_stage == "AO-23"
+        or branch_pr_plan_mode == "governed_frontend_publication_plan_readonly"
+    )
+    is_restore_point_stage = branch_pr_plan_stage == "AO-17C/AO-18A"
+
+    if dry_run_completed and is_ao23b_frontend_push_stage:
+        next_stage = "AO-23C governed frontend push execution only after explicit Admin confirmation and publication preflight validation"
+    elif dry_run_completed and is_ao23_frontend_publication_stage:
+        next_stage = "AO-23B governed frontend push/publication only after explicit Admin approval and publication preflight validation"
+    elif dry_run_completed and is_restore_point_stage:
         next_stage = "AO-17C/AO-18A restore point branch patch plan review (read-only)"
     elif dry_run_completed:
         next_stage = "AO-17A branch/pr plan review (read-only)"
@@ -25280,6 +25296,17 @@ def admin_evolution_proposal_execution_plan(
         next_stage = "AO-16 controlled dry-run"
     else:
         next_stage = row.get("next_state") or "readonly"
+
+    if dry_run_completed and is_ao23b_frontend_push_stage:
+        execution_plan_message = "AO-23B disponível em modo read-only: push governado dos commits locais somente após confirmação Admin explícita, validação de publicação e sem deploy/migration automático."
+    elif dry_run_completed and is_ao23_frontend_publication_stage:
+        execution_plan_message = "AO-23 disponível em modo read-only: publicação frontend somente após aprovação Admin explícita e dry-run concluído, sem push/deploy/migration automático."
+    elif dry_run_completed and is_restore_point_stage:
+        execution_plan_message = "AO-17C/AO-18A disponível em modo read-only: patch na branch existente somente após restore point e aprovação Admin explícita."
+    elif dry_run_completed:
+        execution_plan_message = "AO-17A disponível em modo read-only: branch/PR somente após aprovação Admin explícita."
+    else:
+        execution_plan_message = "AO-16 permite dry-run governado. Não executa escrita, commit, deploy ou migration."
 
     return {
         "ok": True,
@@ -25298,17 +25325,11 @@ def admin_evolution_proposal_execution_plan(
         "snapshot_required": bool(branch_pr_plan.get("snapshot_required")),
         "can_prepare_branch_pr": bool(branch_pr_plan.get("can_prepare_branch_pr")),
         "can_prepare_branch_patch": bool(branch_pr_plan.get("can_prepare_branch_patch")),
+        "can_prepare_push": bool(branch_pr_plan.get("can_prepare_push")),
+        "publication_plan_required": bool(dry_run_completed and (is_ao23_frontend_publication_stage or is_ao23b_frontend_push_stage)),
         "branch_pr_plan_endpoint": f"/api/admin/evolution/proposals/{proposal_id}/branch-pr-plan",
         "branch_pr_plan": branch_pr_plan,
-        "message": (
-            "AO-17C/AO-18A disponível em modo read-only: patch na branch existente somente após restore point e aprovação Admin explícita."
-            if dry_run_completed and is_restore_point_stage
-            else (
-                "AO-17A disponível em modo read-only: branch/PR somente após aprovação Admin explícita."
-                if dry_run_completed
-                else "AO-16 permite dry-run governado. Não executa escrita, commit, deploy ou migration."
-            )
-        ),
+        "message": execution_plan_message,
         "rollback_plan": row.get("rollback_plan") or "",
         "checklist": row.get("checklist") or [],
     }
