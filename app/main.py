@@ -38602,6 +38602,57 @@ async def chat_stream(
         except Exception:
             pass
         deadline = _time.time() + max_wait_s
+        _ao35a_stream_started_at = now_ts()
+
+        # AO-35A: if chat() already persisted a real assistant answer,
+        # suppress the false timeout fallback and close the stream cleanly.
+        def _ao35a_find_recent_assistant_payload(thread_id: str, since_ts: int):
+            try:
+                db2 = SessionLocal()
+            except Exception:
+                return None
+
+            try:
+                try:
+                    since_i = int(since_ts or 0) - 1
+                except Exception:
+                    since_i = 0
+
+                q = (
+                    db2.query(Message)
+                    .filter(Message.thread_id == thread_id)
+                    .filter(Message.role == "assistant")
+                    .filter(Message.created_at >= since_i)
+                    .order_by(Message.created_at.desc())
+                    .limit(8)
+                )
+
+                for m in q.all():
+                    text = str(getattr(m, "content", None) or "").strip()
+                    if not text:
+                        continue
+                    if text.startswith("Não consegui concluir a resposta pelo runtime principal"):
+                        continue
+                    return {
+                        "thread_id": getattr(m, "thread_id", None) or thread_id,
+                        "assistant_message_id": getattr(m, "id", None),
+                        "agent_id": getattr(m, "agent_id", None),
+                        "agent_name": getattr(m, "agent_name", None) or "Orkio",
+                        "final_text": text,
+                    }
+            except Exception:
+                try:
+                    logger.exception("AO35A_EXISTING_ASSISTANT_LOOKUP_FAILED thread_id=%s", thread_id)
+                except Exception:
+                    pass
+            finally:
+                try:
+                    db2.close()
+                except Exception:
+                    pass
+
+            return None
+
 
         try:
             while not task.done():
@@ -38621,6 +38672,61 @@ async def chat_stream(
                         task.cancel()
                     except Exception:
                         pass
+
+                    existing_assistant = await asyncio.to_thread(
+                        _ao35a_find_recent_assistant_payload,
+                        tid_seed,
+                        int(_ao35a_stream_started_at or 0),
+                    )
+                    if existing_assistant:
+                        timeout_base = {
+                            **base,
+                            "thread_id": existing_assistant.get("thread_id") or tid_seed,
+                        }
+
+                        try:
+                            logger.warning(
+                                "CHAT_STREAM_TIMEOUT_SUPPRESSED_EXISTING_ASSISTANT trace_id=%s thread_id=%s timeout_s=%s assistant_message_id=%s",
+                                trace_id,
+                                timeout_base.get("thread_id"),
+                                max_wait_s,
+                                existing_assistant.get("assistant_message_id"),
+                            )
+                        except Exception:
+                            pass
+
+                        yield _metatron_sse("agent_done", {
+                            **timeout_base,
+                            "done": True,
+                            "message": "Resposta assistant já persistida; fallback de timeout suprimido.",
+                        })
+                        yield _metatron_sse("done", {
+                            **timeout_base,
+                            "done": True,
+                            "assistant_persisted": True,
+                            "assistant_message_id": existing_assistant.get("assistant_message_id"),
+                            "agent_id": existing_assistant.get("agent_id"),
+                            "agent_name": existing_assistant.get("agent_name") or "Orkio",
+                            "final_text": existing_assistant.get("final_text") or "",
+                            "runtime_hints": {
+                                "routing": {
+                                    "routing_source": "stream_timeout_suppressed_existing_assistant_ao35a",
+                                    "execution_lifecycle": "timeout_suppressed_existing_assistant",
+                                    "route_applied": True,
+                                }
+                            },
+                        })
+
+                        try:
+                            logger.info(
+                                "CHAT_STREAM_DONE trace_id=%s thread_id=%s source=stream_timeout_suppressed_existing_assistant_ao35a",
+                                trace_id,
+                                timeout_base.get("thread_id"),
+                            )
+                        except Exception:
+                            pass
+
+                        return
 
                     final_text = "Não consegui concluir a resposta pelo runtime principal nesta tentativa. O stream foi encerrado com segurança; tente novamente em instantes."
                     persisted = await asyncio.to_thread(
