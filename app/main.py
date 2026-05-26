@@ -22084,6 +22084,65 @@ def chat(
         )
         db.add(m_ass)
         db.commit()
+
+        # AO41B: return immediately after persisted plain conversation runtime answer.
+        # This is restricted to AO37 plain conversation + successful direct Orkio runtime.
+        try:
+            _ao41b_direct_slug = _canonical_dispatch_specialist_slug(
+                direct_runtime_target or final_signer_agent_name or ""
+            )
+        except Exception:
+            _ao41b_direct_slug = ""
+
+        if (
+            bool(locals().get("ao37_skip_heavy_dispatch"))
+            and isinstance(direct_runtime_result, dict)
+            and bool(direct_runtime_result.get("ok"))
+            and bool(str(answer or "").strip())
+            and not bool(has_team)
+            and _ao41b_direct_slug == "orkio"
+        ):
+            try:
+                logger.warning(
+                    "AO41B_RETURN_AFTER_PERSIST_PLAIN_CONVERSATION trace_id=%s thread_id=%s message_id=%s chars=%s",
+                    ao32_trace_id,
+                    tid,
+                    getattr(m_ass, "id", None),
+                    len(str(answer or "")),
+                )
+            except Exception:
+                pass
+
+            _ao41b_last_agent = final_signer_agent or agent
+            _ao41b_runtime_hints = runtime_enrichment.get("runtime_hints") if isinstance(runtime_enrichment, dict) else None
+            try:
+                if isinstance(_ao41b_runtime_hints, dict):
+                    _ao41b_runtime_hints = dict(
+                        _ao41b_runtime_hints,
+                        capabilities=_get_runtime_capability_registry(db=db, org=org),
+                    )
+                else:
+                    _ao41b_runtime_hints = {
+                        "capabilities": _get_runtime_capability_registry(db=db, org=org)
+                    }
+            except Exception:
+                _ao41b_runtime_hints = _ao41b_runtime_hints if isinstance(_ao41b_runtime_hints, dict) else {}
+
+            return {
+                "thread_id": tid,
+                "answer": answer,
+                "final_text": answer,
+                "content": answer,
+                "citations": all_citations or citations or [],
+                "agent_id": getattr(_ao41b_last_agent, "id", None) if _ao41b_last_agent else final_signer_agent_id,
+                "agent_name": getattr(_ao41b_last_agent, "name", None) if _ao41b_last_agent else final_signer_agent_name,
+                "voice_id": resolve_agent_voice(_ao41b_last_agent) if _ao41b_last_agent else None,
+                "avatar_url": getattr(_ao41b_last_agent, "avatar_url", None) if _ao41b_last_agent else None,
+                "assistant_persisted": True,
+                "assistant_message_id": getattr(m_ass, "id", None),
+                "runtime_hints": _ao41b_runtime_hints,
+            }
+
         try:
             _emit_runtime_readonly_receipts(
                 trace_id=getattr(inp, "trace_id", None),
