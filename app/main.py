@@ -22399,7 +22399,23 @@ def chat(
 
                                 dispatch_routing_receipt["file_evidence_count"] = int(direct_runtime_result.get("file_evidence_count") or 0)
                                 dispatch_routing_receipt = _apply_patch_governance_fields_to_receipt(dispatch_routing_receipt, direct_runtime_result)
-                                capability_inventory_answer = None
+                                # AO40B: promote successful direct runtime text to final chat answer.
+                                runtime_text = str(direct_runtime_result.get("text") or "").strip()
+                                if runtime_text:
+                                    capability_inventory_answer = runtime_text
+                                    try:
+                                        logger.warning(
+                                            "AO40B_DIRECT_RUNTIME_PROMOTED trace_id=%s thread_id=%s direct_target=%s chars=%s elapsed_ms=%s",
+                                            ao32_trace_id,
+                                            tid,
+                                            direct_target,
+                                            len(runtime_text),
+                                            _ao32_elapsed_ms(),
+                                        )
+                                    except Exception:
+                                        pass
+                                else:
+                                    capability_inventory_answer = None
                             else:
                                 dispatch_routing_receipt["synthetic_fallback"] = True
                                 dispatch_routing_receipt["fallback_used"] = True
