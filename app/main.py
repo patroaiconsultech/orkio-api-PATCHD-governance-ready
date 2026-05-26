@@ -21062,27 +21062,25 @@ def chat(
         except Exception:
             pass
         try:
-            ao37_plain_orkio_agent = (
-                db.execute(
-                    select(Agent).where(
-                        Agent.org_slug == org,
-                        Agent.slug == "orkio",
-                    )
-                )
+            # AO-37C: Agent has no class-level slug column in this model.
+            # Resolve Orkio by querying org agents and matching safe instance attributes.
+            ao37_org_agents = (
+                db.execute(select(Agent).where(Agent.org_slug == org))
                 .scalars()
-                .first()
+                .all()
             )
+            for _ao37_agent in list(ao37_org_agents or []):
+                _ao37_name = str(getattr(_ao37_agent, "name", "") or "").strip().lower()
+                _ao37_slug = str(getattr(_ao37_agent, "slug", "") or "").strip().lower()
+                if _ao37_name == "orkio" or _ao37_slug == "orkio":
+                    ao37_plain_orkio_agent = _ao37_agent
+                    break
             if ao37_plain_orkio_agent is None:
-                ao37_plain_orkio_agent = (
-                    db.execute(
-                        select(Agent).where(
-                            Agent.org_slug == org,
-                            Agent.name == "Orkio",
-                        )
-                    )
-                    .scalars()
-                    .first()
-                )
+                for _ao37_agent in list(ao37_org_agents or []):
+                    _ao37_name = str(getattr(_ao37_agent, "name", "") or "").strip().lower()
+                    if "orkio" in _ao37_name:
+                        ao37_plain_orkio_agent = _ao37_agent
+                        break
         except Exception:
             ao37_plain_orkio_agent = None
             try:
