@@ -20983,201 +20983,414 @@ def chat(
     except Exception:
         pass
 
-    blocked_reply = _block_if_sensitive(inp.message)
-    orion_self_knowledge_flags = _orion_self_knowledge_request_flags(inp.message)
-    orion_operational_maturity_flags = _orion_operational_maturity_request_flags(inp.message)
-    team_technical_audit = _is_team_technical_audit_request(inp.message or "")
-    if (orion_self_knowledge_flags.get("requested") or orion_operational_maturity_flags.get("requested")) and not team_technical_audit:
-        blocked_reply = None
+    # AO-37: deterministic Orkio target for plain conversation.
+    # Plain conversation must not traverse heavy dispatch before target_agents resolution.
+    ao37_skip_heavy_dispatch = False
+    ao37_plain_orkio_agent = None
+
     try:
-        logger.warning(
-            "AO36C_BEFORE_FOUNDER_GUIDANCE trace_id=%s thread_id=%s elapsed_ms=%s",
-            ao32_trace_id,
-            tid,
-            _ao32_elapsed_ms(),
+        ao37_raw_text = str(inp.message or "").strip()
+        ao37_raw_lower = ao37_raw_text.lower()
+        ao37_dest_mode_raw = str(
+            getattr(inp, "dest_mode", None)
+            or getattr(inp, "destination_mode", None)
+            or ""
+        ).strip().lower()
+        ao37_requested_payload = _efata777_clean_list(getattr(inp, "requested_agent_names", None))
+        ao37_agent_ids_payload = _efata777_clean_list(getattr(inp, "agent_ids", None))
+        ao37_target_agent_slug = str(getattr(inp, "target_agent_slug", "") or "").strip()
+        ao37_visible_agent = str(getattr(inp, "visible_agent", "") or "").strip()
+
+        def _ao37_flag_requested(fn_name: str) -> bool:
+            try:
+                fn = globals().get(fn_name)
+                if callable(fn):
+                    data = fn(ao37_raw_text)
+                    if isinstance(data, dict):
+                        return bool(data.get("requested"))
+            except Exception:
+                return False
+            return False
+
+        ao37_governed_terms = (
+            "audit",
+            "auditoria",
+            "runtime",
+            "governança",
+            "governance",
+            "orquestração",
+            "orchestration",
+            "proposal",
+            "proposal_only",
+            "patch",
+            "branch",
+            "pull request",
+            "github",
+            "readonly",
+            "read-only",
+            "diagnostic",
+            "diagnóstico",
+        )
+
+        ao37_is_plain_conversation = bool(
+            ao37_raw_text
+            and "@" not in ao37_raw_text
+            and ao37_dest_mode_raw not in {"multi", "team"}
+            and not ao37_requested_payload
+            and not ao37_agent_ids_payload
+            and not ao37_target_agent_slug
+            and not ao37_visible_agent
+            and not ao37_raw_lower.startswith(("team", "time"))
+            and not any(term in ao37_raw_lower for term in ao37_governed_terms)
+            and not _is_team_technical_audit_request(ao37_raw_text)
+            and not _is_execution_bridge_readonly_diagnostic_request(ao37_raw_text)
+            and not _ao37_flag_requested("_runtime_orion_dispatch_request_flags")
+            and not _ao37_flag_requested("_orion_self_knowledge_request_flags")
+            and not _ao37_flag_requested("_orion_operational_maturity_request_flags")
         )
     except Exception:
-        pass
-    active_founder_guidance = _get_founder_guidance(org, tid, inp.message)
-    try:
-        logger.warning(
-            "AO36C_AFTER_FOUNDER_GUIDANCE trace_id=%s thread_id=%s has_guidance=%s elapsed_ms=%s",
-            ao32_trace_id,
-            tid,
-            bool(active_founder_guidance),
-            _ao32_elapsed_ms(),
-        )
-    except Exception:
-        pass
+        ao37_is_plain_conversation = False
 
-    # Parse @mentions + canonical destination contract from AppConsole.
-    mention_tokens: List[str] = []
-    requested_names = _detect_requested_agent_names(inp.message or "")
-    payload_requested_names = _efata777_clean_list(getattr(inp, "requested_agent_names", None))
-    if payload_requested_names:
-        requested_names = list(dict.fromkeys(list(requested_names or []) + payload_requested_names))
-    try:
-        mention_tokens = re.findall(
-            r"@([A-Za-z0-9_\-/]+(?:\s+[A-Za-z0-9_\-/]+){0,2})(?=(?:\s*[,.:;!?])|(?:\s+@)|$)",
-            inp.message or "",
-            flags=re.IGNORECASE,
-        )
-        mention_tokens = [str(x or "").strip() for x in mention_tokens if str(x or "").strip()]
-        for req in requested_names:
-            if req:
-                mention_tokens.append(req)
-        seen: set = set()
-        mention_tokens = [m for m in mention_tokens if not (m.lower() in seen or seen.add(m.lower()))]
-    except Exception:
-        mention_tokens = [str(x) for x in requested_names]
-
-    orion_only_flags = _orion_only_request_flags(inp.message or "")
-    excluded_agent_names = [str(x).strip().lower() for x in (orion_only_flags.get("excluded_agents") or []) if str(x).strip()]
-    if excluded_agent_names:
-        requested_names = [x for x in requested_names if str(x).strip().lower() not in excluded_agent_names]
-        mention_tokens = [x for x in mention_tokens if str(x).strip().lower() not in excluded_agent_names]
-    has_team = any(m.strip().lower() in ("time", "team") for m in mention_tokens) or len(requested_names) > 1
-
-    # Build alias map once
-    try:
-        ensure_core_agents(db, org)
-    except Exception:
+    if ao37_is_plain_conversation:
         try:
-            logger.exception("ENSURE_CORE_AGENTS_CHAT_FAILED org=%s", org)
+            logger.warning(
+                "AO37_BEFORE_ORKIO_TARGET_QUERY trace_id=%s thread_id=%s elapsed_ms=%s",
+                ao32_trace_id,
+                tid,
+                _ao32_elapsed_ms(),
+            )
         except Exception:
             pass
-    try:
-        logger.warning(
-            "AO36C_BEFORE_AGENT_QUERY trace_id=%s thread_id=%s elapsed_ms=%s",
-            ao32_trace_id,
-            tid,
-            _ao32_elapsed_ms(),
-        )
-    except Exception:
-        pass
-    all_agents = db.execute(select(Agent).where(Agent.org_slug == org)).scalars().all()
-    try:
-        logger.warning(
-            "AO36C_AFTER_AGENT_QUERY trace_id=%s thread_id=%s agents_count=%s elapsed_ms=%s",
-            ao32_trace_id,
-            tid,
-            len(list(all_agents or [])),
-            _ao32_elapsed_ms(),
-        )
-    except Exception:
-        pass
-    alias_to_agent = _build_dispatch_alias_map(list(all_agents or []))
-    try:
-        logger.warning(
-            "AO36C_BEFORE_DESTINATION_CONTRACT trace_id=%s thread_id=%s elapsed_ms=%s",
-            ao32_trace_id,
-            tid,
-            _ao32_elapsed_ms(),
-        )
-    except Exception:
-        pass
-    destination_contract = _efata777_destination_contract_from_input(
-        inp,
-        alias_to_agent=alias_to_agent,
-        all_agents=list(all_agents or []),
-    )
-    try:
-        logger.warning(
-            "AO36C_AFTER_DESTINATION_CONTRACT trace_id=%s thread_id=%s dest_mode=%s contract_targets=%s elapsed_ms=%s",
-            ao32_trace_id,
-            tid,
-            destination_contract.get("dest_mode"),
-            len(list(destination_contract.get("target_agents_rows") or [])),
-            _ao32_elapsed_ms(),
-        )
-    except Exception:
-        pass
-    if destination_contract.get("requested_agent_names"):
-        requested_names = list(dict.fromkeys(list(requested_names or []) + list(destination_contract.get("requested_agent_names") or [])))
-    if destination_contract.get("target_agent_names_frozen"):
-        for _name in list(destination_contract.get("target_agent_names_frozen") or []):
-            if _name:
-                mention_tokens.append(_name)
-        seen_contract_mentions: set = set()
-        mention_tokens = [m for m in mention_tokens if not (str(m).lower() in seen_contract_mentions or seen_contract_mentions.add(str(m).lower()))]
-    if destination_contract.get("dest_mode") == "multi" and destination_contract.get("target_agents_rows"):
-        has_team = True
+        try:
+            ao37_plain_orkio_agent = (
+                db.execute(
+                    select(Agent).where(
+                        Agent.org_slug == org,
+                        Agent.slug == "orkio",
+                    )
+                )
+                .scalars()
+                .first()
+            )
+            if ao37_plain_orkio_agent is None:
+                ao37_plain_orkio_agent = (
+                    db.execute(
+                        select(Agent).where(
+                            Agent.org_slug == org,
+                            Agent.name == "Orkio",
+                        )
+                    )
+                    .scalars()
+                    .first()
+                )
+        except Exception:
+            ao37_plain_orkio_agent = None
+            try:
+                logger.exception(
+                    "AO37_ORKIO_TARGET_QUERY_FAILED trace_id=%s thread_id=%s",
+                    ao32_trace_id,
+                    tid,
+                )
+            except Exception:
+                pass
 
-    # PATCH27_12AY — Orion self-knowledge hard gate BEFORE any fan-out
-    forced_orion_agent = None
-    if orion_self_knowledge_flags.get("requested") or orion_operational_maturity_flags.get("requested"):
-        forced_orion_agent = (
-            alias_to_agent.get("orion")
-            or alias_to_agent.get("orion cto")
+        try:
+            logger.warning(
+                "AO37_AFTER_ORKIO_TARGET_QUERY trace_id=%s thread_id=%s found=%s elapsed_ms=%s",
+                ao32_trace_id,
+                tid,
+                bool(ao37_plain_orkio_agent),
+                _ao32_elapsed_ms(),
+            )
+        except Exception:
+            pass
+
+    if ao37_is_plain_conversation and ao37_plain_orkio_agent is not None:
+        ao37_skip_heavy_dispatch = True
+
+        blocked_reply = None
+        orion_self_knowledge_flags = {"requested": False}
+        orion_operational_maturity_flags = {"requested": False}
+        team_technical_audit = False
+        active_founder_guidance = None
+
+        requested_names = ["orkio"]
+        mention_tokens = ["orkio"]
+        has_team = False
+        forced_orion_agent = None
+        orion_only_flags = {"requested": False, "excluded_agents": []}
+        excluded_agent_names = []
+        mediated_specialists = []
+        all_agents = [ao37_plain_orkio_agent]
+        alias_to_agent = {"orkio": ao37_plain_orkio_agent}
+
+        target_agents = [ao37_plain_orkio_agent]
+        destination_contract = {
+            "destination_contract_used": True,
+            "dest_mode": "single",
+            "requested_agent_names": ["orkio"],
+            "target_agent_frozen": True,
+            "target_agent_names_frozen": ["orkio"],
+            "target_agents_frozen": ["orkio"],
+            "target_agents_rows": [ao37_plain_orkio_agent],
+            "visible_agent": "orkio",
+        }
+
+        try:
+            dispatch_routing_receipt = _build_dispatch_routing_receipt(
+                user_text=inp.message,
+                requested_names=requested_names,
+                mention_tokens=mention_tokens,
+                has_team=has_team,
+                target_agents=target_agents,
+                visible_agent="orkio",
+            )
+            dispatch_routing_receipt = _efata777_apply_destination_receipt(
+                dispatch_routing_receipt,
+                destination_contract,
+                block_roster=True,
+            )
+        except Exception:
+            dispatch_routing_receipt = {
+                "dispatch_attempted": True,
+                "dispatch_executed": False,
+                "fallback_used": False,
+                "fallback_reason": "",
+                "target_agents": ["orkio"],
+                "visible_agent": "orkio",
+                "destination_contract_used": True,
+                "route_applied": True,
+            }
+
+        try:
+            logger.warning(
+                "AO37_PLAIN_CONVERSATION_TARGET_ORKIO trace_id=%s thread_id=%s client_message_id=%s elapsed_ms=%s",
+                ao32_trace_id,
+                tid,
+                ao32_client_message_id,
+                _ao32_elapsed_ms(),
+            )
+        except Exception:
+            pass
+
+    if not ao37_skip_heavy_dispatch:
+        blocked_reply = _block_if_sensitive(inp.message)
+        orion_self_knowledge_flags = _orion_self_knowledge_request_flags(inp.message)
+        orion_operational_maturity_flags = _orion_operational_maturity_request_flags(inp.message)
+        team_technical_audit = _is_team_technical_audit_request(inp.message or "")
+        if (orion_self_knowledge_flags.get("requested") or orion_operational_maturity_flags.get("requested")) and not team_technical_audit:
+            blocked_reply = None
+        try:
+            logger.warning(
+                "AO36C_BEFORE_FOUNDER_GUIDANCE trace_id=%s thread_id=%s elapsed_ms=%s",
+                ao32_trace_id,
+                tid,
+                _ao32_elapsed_ms(),
+            )
+        except Exception:
+            pass
+        active_founder_guidance = _get_founder_guidance(org, tid, inp.message)
+        try:
+            logger.warning(
+                "AO36C_AFTER_FOUNDER_GUIDANCE trace_id=%s thread_id=%s has_guidance=%s elapsed_ms=%s",
+                ao32_trace_id,
+                tid,
+                bool(active_founder_guidance),
+                _ao32_elapsed_ms(),
+            )
+        except Exception:
+            pass
+
+        # Parse @mentions + canonical destination contract from AppConsole.
+        mention_tokens: List[str] = []
+        requested_names = _detect_requested_agent_names(inp.message or "")
+        payload_requested_names = _efata777_clean_list(getattr(inp, "requested_agent_names", None))
+        if payload_requested_names:
+            requested_names = list(dict.fromkeys(list(requested_names or []) + payload_requested_names))
+        try:
+            mention_tokens = re.findall(
+                r"@([A-Za-z0-9_\-/]+(?:\s+[A-Za-z0-9_\-/]+){0,2})(?=(?:\s*[,.:;!?])|(?:\s+@)|$)",
+                inp.message or "",
+                flags=re.IGNORECASE,
+            )
+            mention_tokens = [str(x or "").strip() for x in mention_tokens if str(x or "").strip()]
+            for req in requested_names:
+                if req:
+                    mention_tokens.append(req)
+            seen: set = set()
+            mention_tokens = [m for m in mention_tokens if not (m.lower() in seen or seen.add(m.lower()))]
+        except Exception:
+            mention_tokens = [str(x) for x in requested_names]
+
+        orion_only_flags = _orion_only_request_flags(inp.message or "")
+        excluded_agent_names = [str(x).strip().lower() for x in (orion_only_flags.get("excluded_agents") or []) if str(x).strip()]
+        if excluded_agent_names:
+            requested_names = [x for x in requested_names if str(x).strip().lower() not in excluded_agent_names]
+            mention_tokens = [x for x in mention_tokens if str(x).strip().lower() not in excluded_agent_names]
+        has_team = any(m.strip().lower() in ("time", "team") for m in mention_tokens) or len(requested_names) > 1
+
+        # Build alias map once
+        try:
+            ensure_core_agents(db, org)
+        except Exception:
+            try:
+                logger.exception("ENSURE_CORE_AGENTS_CHAT_FAILED org=%s", org)
+            except Exception:
+                pass
+        try:
+            logger.warning(
+                "AO36C_BEFORE_AGENT_QUERY trace_id=%s thread_id=%s elapsed_ms=%s",
+                ao32_trace_id,
+                tid,
+                _ao32_elapsed_ms(),
+            )
+        except Exception:
+            pass
+        all_agents = db.execute(select(Agent).where(Agent.org_slug == org)).scalars().all()
+        try:
+            logger.warning(
+                "AO36C_AFTER_AGENT_QUERY trace_id=%s thread_id=%s agents_count=%s elapsed_ms=%s",
+                ao32_trace_id,
+                tid,
+                len(list(all_agents or [])),
+                _ao32_elapsed_ms(),
+            )
+        except Exception:
+            pass
+        alias_to_agent = _build_dispatch_alias_map(list(all_agents or []))
+        try:
+            logger.warning(
+                "AO36C_BEFORE_DESTINATION_CONTRACT trace_id=%s thread_id=%s elapsed_ms=%s",
+                ao32_trace_id,
+                tid,
+                _ao32_elapsed_ms(),
+            )
+        except Exception:
+            pass
+        destination_contract = _efata777_destination_contract_from_input(
+            inp,
+            alias_to_agent=alias_to_agent,
+            all_agents=list(all_agents or []),
         )
-        if forced_orion_agent is not None:
+        try:
+            logger.warning(
+                "AO36C_AFTER_DESTINATION_CONTRACT trace_id=%s thread_id=%s dest_mode=%s contract_targets=%s elapsed_ms=%s",
+                ao32_trace_id,
+                tid,
+                destination_contract.get("dest_mode"),
+                len(list(destination_contract.get("target_agents_rows") or [])),
+                _ao32_elapsed_ms(),
+            )
+        except Exception:
+            pass
+        if destination_contract.get("requested_agent_names"):
+            requested_names = list(dict.fromkeys(list(requested_names or []) + list(destination_contract.get("requested_agent_names") or [])))
+        if destination_contract.get("target_agent_names_frozen"):
+            for _name in list(destination_contract.get("target_agent_names_frozen") or []):
+                if _name:
+                    mention_tokens.append(_name)
+            seen_contract_mentions: set = set()
+            mention_tokens = [m for m in mention_tokens if not (str(m).lower() in seen_contract_mentions or seen_contract_mentions.add(str(m).lower()))]
+        if destination_contract.get("dest_mode") == "multi" and destination_contract.get("target_agents_rows"):
+            has_team = True
+
+        # PATCH27_12AY — Orion self-knowledge hard gate BEFORE any fan-out
+        forced_orion_agent = None
+        if orion_self_knowledge_flags.get("requested") or orion_operational_maturity_flags.get("requested"):
+            forced_orion_agent = (
+                alias_to_agent.get("orion")
+                or alias_to_agent.get("orion cto")
+            )
+            if forced_orion_agent is not None:
+                requested_names = ["orion"]
+                mention_tokens = ["orion"]
+                has_team = False
+
+        try:
+            logger.warning(
+                "AO36C_BEFORE_DISPATCH_SPECIALISTS trace_id=%s thread_id=%s requested_count=%s mention_count=%s elapsed_ms=%s",
+                ao32_trace_id,
+                tid,
+                len(list(requested_names or [])),
+                len(list(mention_tokens or [])),
+                _ao32_elapsed_ms(),
+            )
+        except Exception:
+            pass
+        mediated_specialists = _dispatch_request_specialists(
+            requested_names=requested_names,
+            mention_tokens=mention_tokens,
+        )
+        try:
+            logger.warning(
+                "AO36C_AFTER_DISPATCH_SPECIALISTS trace_id=%s thread_id=%s mediated_count=%s elapsed_ms=%s",
+                ao32_trace_id,
+                tid,
+                len(list(mediated_specialists or [])),
+                _ao32_elapsed_ms(),
+            )
+        except Exception:
+            pass
+        if mediated_specialists:
+            orion_only_flags["requested"] = False
+
+        if orion_only_flags.get("requested") and not team_technical_audit:
+            forced_orion_agent = (
+                forced_orion_agent
+                or alias_to_agent.get("orion")
+                or alias_to_agent.get("orion cto")
+            )
             requested_names = ["orion"]
             mention_tokens = ["orion"]
             has_team = False
 
-    try:
-        logger.warning(
-            "AO36C_BEFORE_DISPATCH_SPECIALISTS trace_id=%s thread_id=%s requested_count=%s mention_count=%s elapsed_ms=%s",
-            ao32_trace_id,
-            tid,
-            len(list(requested_names or [])),
-            len(list(mention_tokens or [])),
-            _ao32_elapsed_ms(),
-        )
-    except Exception:
-        pass
-    mediated_specialists = _dispatch_request_specialists(
-        requested_names=requested_names,
-        mention_tokens=mention_tokens,
-    )
-    try:
-        logger.warning(
-            "AO36C_AFTER_DISPATCH_SPECIALISTS trace_id=%s thread_id=%s mediated_count=%s elapsed_ms=%s",
-            ao32_trace_id,
-            tid,
-            len(list(mediated_specialists or [])),
-            _ao32_elapsed_ms(),
-        )
-    except Exception:
-        pass
-    if mediated_specialists:
-        orion_only_flags["requested"] = False
+        # STAB: select_target_agents — determinístico, nunca sobrescrito.
+        # EFATA777_DESTINATION_CONTRACT_V1: explicit payload destination wins over
+        # textual prefix parsing, unless a hard Orion-only safety gate is active.
+        contract_targets = list(destination_contract.get("target_agents_rows") or [])
+        if forced_orion_agent is not None:
+            target_agents = [forced_orion_agent]
+        elif contract_targets:
+            target_agents = contract_targets
+        else:
+            try:
+                logger.warning(
+                    "AO36C_BEFORE_SELECT_TARGET_AGENTS trace_id=%s thread_id=%s has_team=%s mention_count=%s requested_count=%s elapsed_ms=%s",
+                    ao32_trace_id,
+                    tid,
+                    bool(has_team),
+                    len(list(mention_tokens or [])),
+                    len(list(requested_names or [])),
+                    _ao32_elapsed_ms(),
+                )
+            except Exception:
+                pass
+            target_agents = _select_target_agents(db, org, inp, alias_to_agent, mention_tokens, has_team)
+            try:
+                logger.warning(
+                    "AO36C_AFTER_SELECT_TARGET_AGENTS trace_id=%s thread_id=%s target_count=%s elapsed_ms=%s",
+                    ao32_trace_id,
+                    tid,
+                    len(list(target_agents or [])),
+                    _ao32_elapsed_ms(),
+                )
+            except Exception:
+                pass
+            target_agents = _apply_explicit_agent_request(db, org, target_agents, requested_names)
+            try:
+                logger.warning(
+                    "AO36C_AFTER_APPLY_EXPLICIT_AGENT_REQUEST trace_id=%s thread_id=%s target_count=%s elapsed_ms=%s",
+                    ao32_trace_id,
+                    tid,
+                    len(list(target_agents or [])),
+                    _ao32_elapsed_ms(),
+                )
+            except Exception:
+                pass
 
-    if orion_only_flags.get("requested") and not team_technical_audit:
-        forced_orion_agent = (
-            forced_orion_agent
-            or alias_to_agent.get("orion")
-            or alias_to_agent.get("orion cto")
-        )
-        requested_names = ["orion"]
-        mention_tokens = ["orion"]
-        has_team = False
-
-    # STAB: select_target_agents — determinístico, nunca sobrescrito.
-    # EFATA777_DESTINATION_CONTRACT_V1: explicit payload destination wins over
-    # textual prefix parsing, unless a hard Orion-only safety gate is active.
-    contract_targets = list(destination_contract.get("target_agents_rows") or [])
-    if forced_orion_agent is not None:
-        target_agents = [forced_orion_agent]
-    elif contract_targets:
-        target_agents = contract_targets
-    else:
         try:
             logger.warning(
-                "AO36C_BEFORE_SELECT_TARGET_AGENTS trace_id=%s thread_id=%s has_team=%s mention_count=%s requested_count=%s elapsed_ms=%s",
-                ao32_trace_id,
-                tid,
-                bool(has_team),
-                len(list(mention_tokens or [])),
-                len(list(requested_names or [])),
-                _ao32_elapsed_ms(),
-            )
-        except Exception:
-            pass
-        target_agents = _select_target_agents(db, org, inp, alias_to_agent, mention_tokens, has_team)
-        try:
-            logger.warning(
-                "AO36C_AFTER_SELECT_TARGET_AGENTS trace_id=%s thread_id=%s target_count=%s elapsed_ms=%s",
+                "AO36C_BEFORE_TARGET_FREEZE trace_id=%s thread_id=%s target_count=%s elapsed_ms=%s",
                 ao32_trace_id,
                 tid,
                 len(list(target_agents or [])),
@@ -21185,10 +21398,18 @@ def chat(
             )
         except Exception:
             pass
-        target_agents = _apply_explicit_agent_request(db, org, target_agents, requested_names)
+        target_agents = _freeze_dispatch_targets(
+            db,
+            org,
+            list(target_agents or []),
+            requested_names=requested_names,
+            mention_tokens=mention_tokens,
+            has_team=has_team,
+            user_text=inp.message,
+        )
         try:
             logger.warning(
-                "AO36C_AFTER_APPLY_EXPLICIT_AGENT_REQUEST trace_id=%s thread_id=%s target_count=%s elapsed_ms=%s",
+                "AO36C_AFTER_TARGET_FREEZE trace_id=%s thread_id=%s target_count=%s elapsed_ms=%s",
                 ao32_trace_id,
                 tid,
                 len(list(target_agents or [])),
@@ -21196,87 +21417,57 @@ def chat(
             )
         except Exception:
             pass
-
-    try:
-        logger.warning(
-            "AO36C_BEFORE_TARGET_FREEZE trace_id=%s thread_id=%s target_count=%s elapsed_ms=%s",
-            ao32_trace_id,
-            tid,
-            len(list(target_agents or [])),
-            _ao32_elapsed_ms(),
+        dispatch_routing_receipt = _build_dispatch_routing_receipt(
+            user_text=inp.message,
+            requested_names=requested_names,
+            mention_tokens=mention_tokens,
+            has_team=has_team,
+            target_agents=target_agents,
+            visible_agent=str(destination_contract.get("visible_agent") or ""),
         )
-    except Exception:
-        pass
-    target_agents = _freeze_dispatch_targets(
-        db,
-        org,
-        list(target_agents or []),
-        requested_names=requested_names,
-        mention_tokens=mention_tokens,
-        has_team=has_team,
-        user_text=inp.message,
-    )
-    try:
-        logger.warning(
-            "AO36C_AFTER_TARGET_FREEZE trace_id=%s thread_id=%s target_count=%s elapsed_ms=%s",
-            ao32_trace_id,
-            tid,
-            len(list(target_agents or [])),
-            _ao32_elapsed_ms(),
+        block_roster_fallback = _should_block_roster_fallback(
+            inp.message,
+            requested_names=requested_names,
+            mention_tokens=mention_tokens,
+            has_team=has_team,
         )
-    except Exception:
-        pass
-    dispatch_routing_receipt = _build_dispatch_routing_receipt(
-        user_text=inp.message,
-        requested_names=requested_names,
-        mention_tokens=mention_tokens,
-        has_team=has_team,
-        target_agents=target_agents,
-        visible_agent=str(destination_contract.get("visible_agent") or ""),
-    )
-    block_roster_fallback = _should_block_roster_fallback(
-        inp.message,
-        requested_names=requested_names,
-        mention_tokens=mention_tokens,
-        has_team=has_team,
-    )
-    block_roster_fallback = bool(
-        block_roster_fallback
-        or destination_contract.get("target_agent_frozen")
-        or destination_contract.get("target_agents_frozen")
-    )
-    dispatch_routing_receipt = _efata777_apply_destination_receipt(
-        dispatch_routing_receipt,
-        destination_contract,
-        block_roster=block_roster_fallback,
-    )
-    if block_roster_fallback:
-        dispatch_routing_receipt["dispatch_attempted"] = True
-        dispatch_routing_receipt["dispatch_executed"] = False
-        dispatch_routing_receipt["fallback_used"] = False
-        dispatch_routing_receipt["fallback_reason"] = ""
+        block_roster_fallback = bool(
+            block_roster_fallback
+            or destination_contract.get("target_agent_frozen")
+            or destination_contract.get("target_agents_frozen")
+        )
+        dispatch_routing_receipt = _efata777_apply_destination_receipt(
+            dispatch_routing_receipt,
+            destination_contract,
+            block_roster=block_roster_fallback,
+        )
+        if block_roster_fallback:
+            dispatch_routing_receipt["dispatch_attempted"] = True
+            dispatch_routing_receipt["dispatch_executed"] = False
+            dispatch_routing_receipt["fallback_used"] = False
+            dispatch_routing_receipt["fallback_reason"] = ""
 
-    if excluded_agent_names:
-        target_agents = [a for a in (target_agents or []) if str(getattr(a, "name", "") or "").strip().lower() not in excluded_agent_names]
-    if team_technical_audit:
-        preferred_team_aliases = ["orion", "orion cto", "auditor", "technical auditor", "cto", "cto runtime"]
-        team_targets: List[Any] = []
-        seen_team_ids: set = set()
-        for alias in preferred_team_aliases:
-            a = alias_to_agent.get(alias)
-            if a and getattr(a, "id", None) not in seen_team_ids:
-                team_targets.append(a)
-                seen_team_ids.add(getattr(a, "id", None))
-        if team_targets:
-            target_agents = team_targets
-            requested_names = ["orion", "auditor", "cto"]
-            mention_tokens = ["orion", "team"]
-            has_team = True
-    if orion_only_flags.get("requested") and forced_orion_agent is not None and not team_technical_audit and not mediated_specialists:
-        target_agents = [forced_orion_agent]
-        requested_names = ["orion"]
-        mention_tokens = ["orion"]
-        has_team = False
+        if excluded_agent_names:
+            target_agents = [a for a in (target_agents or []) if str(getattr(a, "name", "") or "").strip().lower() not in excluded_agent_names]
+        if team_technical_audit:
+            preferred_team_aliases = ["orion", "orion cto", "auditor", "technical auditor", "cto", "cto runtime"]
+            team_targets: List[Any] = []
+            seen_team_ids: set = set()
+            for alias in preferred_team_aliases:
+                a = alias_to_agent.get(alias)
+                if a and getattr(a, "id", None) not in seen_team_ids:
+                    team_targets.append(a)
+                    seen_team_ids.add(getattr(a, "id", None))
+            if team_targets:
+                target_agents = team_targets
+                requested_names = ["orion", "auditor", "cto"]
+                mention_tokens = ["orion", "team"]
+                has_team = True
+        if orion_only_flags.get("requested") and forced_orion_agent is not None and not team_technical_audit and not mediated_specialists:
+            target_agents = [forced_orion_agent]
+            requested_names = ["orion"]
+            mention_tokens = ["orion"]
+            has_team = False
 
 
     try:
