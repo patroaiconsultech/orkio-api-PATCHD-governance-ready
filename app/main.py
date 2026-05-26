@@ -4595,14 +4595,28 @@ def _admin_evolution_create_dry_run_execution(
         rollback_plan = "Rollback seguro: não há alteração real neste dry-run. Para voltar ao estado anterior, ignore a execução dry-run e mantenha a proposta sem execução real."
 
     diff_preview = _admin_evolution_build_diff_preview(proposal)
-    # AO-23_DRYRUN_STAGE_AWARE_METADATA
+    # AO-23B_DRYRUN_STAGE_AWARE_METADATA
+    ao23b_dryrun = False
     ao23_dryrun = False
     try:
-        ao23_dryrun = bool(_admin_evolution_is_frontend_publication_stage(proposal))
+        ao23b_dryrun = bool(_admin_evolution_is_frontend_push_stage(proposal))
+    except Exception:
+        ao23b_dryrun = False
+    try:
+        ao23_dryrun = bool((not ao23b_dryrun) and _admin_evolution_is_frontend_publication_stage(proposal))
     except Exception:
         ao23_dryrun = False
 
-    if ao23_dryrun:
+    if ao23b_dryrun:
+        try:
+            diff_preview = str(diff_preview or "").replace(
+                "AO-16 CONTROLLED DRY-RUN DIFF PREVIEW",
+                "AO-23B CONTROLLED FRONTEND PUSH DRY-RUN PREVIEW",
+                1,
+            )
+        except Exception:
+            pass
+    elif ao23_dryrun:
         try:
             diff_preview = str(diff_preview or "").replace(
                 "AO-16 CONTROLLED DRY-RUN DIFF PREVIEW",
@@ -4613,17 +4627,23 @@ def _admin_evolution_create_dry_run_execution(
             pass
 
     dryrun_smoke_note = (
-        "Smoke tests planejados/simulados no AO-23. Nenhum push, deploy, migration ou comando destrutivo foi executado."
+        "Smoke tests planejados/simulados no AO-23B. Nenhum push, deploy, migration ou comando destrutivo foi executado."
+        if ao23b_dryrun
+        else "Smoke tests planejados/simulados no AO-23. Nenhum push, deploy, migration ou comando destrutivo foi executado."
         if ao23_dryrun
         else "Smoke tests planejados/simulados no AO-16. Nenhum comando destrutivo foi executado."
     )
     dryrun_next_required_stage = (
-        "AO-23B governed frontend push/publication only after explicit Admin approval and publication preflight validation"
+        "AO-23C governed frontend push execution only after explicit Admin confirmation and publication preflight validation"
+        if ao23b_dryrun
+        else "AO-23B governed frontend push/publication only after explicit Admin approval and publication preflight validation"
         if ao23_dryrun
         else "AO-17 branch/PR runner only after explicit Admin approval and executable artifact validation"
     )
     dryrun_message = (
-        "AO-23 dry-run concluído. Nenhum push, deploy, migration ou alteração de API foi executada."
+        "AO-23B dry-run concluído. Nenhum push, deploy, migration ou alteração de API foi executada."
+        if ao23b_dryrun
+        else "AO-23 dry-run concluído. Nenhum push, deploy, migration ou alteração de API foi executada."
         if ao23_dryrun
         else "AO-16 dry-run concluído. Nenhuma escrita, commit, deploy ou migration foi executada."
     )
@@ -24211,6 +24231,60 @@ def admin_evolution_executions(
 # AO-17A — Branch/PR Runner Governado: contrato read-only
 # ================================
 
+def _admin_evolution_is_frontend_push_stage(proposal: Dict[str, Any]) -> bool:
+    """
+    AO-23B detector.
+
+    Must run before AO-23 publication detection because AO-23B also mentions
+    frontend publication, push governance, Node 20 and target_branch=main,
+    but its contract is specifically the governed push of local commits.
+    """
+    p = proposal if isinstance(proposal, dict) else {}
+    haystack_parts: List[str] = [
+        str(p.get("title") or ""),
+        str(p.get("summary") or ""),
+        str(p.get("rollback_plan") or ""),
+        str(p.get("source_message") or ""),
+        str(p.get("diff_preview") or ""),
+    ]
+
+    checklist = p.get("checklist") or p.get("validation_checklist") or []
+    if isinstance(checklist, list):
+        haystack_parts.extend(str(x or "") for x in checklist)
+
+    target_files = p.get("target_files") or []
+    if isinstance(target_files, list):
+        haystack_parts.extend(str(x or "") for x in target_files)
+
+    haystack = "\n".join(haystack_parts).lower()
+
+    has_ao23b_intent = (
+        "ao-23b" in haystack
+        or "ao23b" in haystack
+        or "push governado do frontend" in haystack
+        or "push governado" in haystack
+        or "ahead 2" in haystack
+        or "commits locais pendentes" in haystack
+        or "7c65e6d" in haystack
+        or "ao-23 align admin ui publication labels" in haystack
+    )
+
+    has_frontend_push_contract = (
+        "6ea230c" in haystack
+        and (
+            "7c65e6d" in haystack
+            or "adminevolutioncenter.jsx" in haystack
+            or "src/routes/adminevolutioncenter.jsx" in haystack
+        )
+        and (
+            ".nvmrc" in haystack
+            or "package.json" in haystack
+        )
+    )
+
+    return bool(has_ao23b_intent and has_frontend_push_contract)
+
+
 def _admin_evolution_is_frontend_publication_stage(proposal: Dict[str, Any]) -> bool:
     """
     AO-23 detector.
@@ -24237,6 +24311,9 @@ def _admin_evolution_is_frontend_publication_stage(proposal: Dict[str, Any]) -> 
         haystack_parts.extend(str(x or "") for x in target_files)
 
     haystack = "\n".join(haystack_parts).lower()
+
+    if _admin_evolution_is_frontend_push_stage(p):
+        return False
 
     has_ao23_intent = (
         "ao-23" in haystack
@@ -24497,6 +24574,96 @@ def _admin_evolution_build_branch_pr_plan(proposal: Dict[str, Any]) -> Dict[str,
     title = str(p.get("title") or "Proposta de evolução controlada").strip()
     risk = str(p.get("risk") or "baixo_medio").strip()
     rollback_plan = str(p.get("rollback_plan") or "").strip()
+
+    # AO-23B_FRONTEND_PUSH_PLAN_READONLY_PAYLOAD
+    if _admin_evolution_is_frontend_push_stage(p):
+        ao23b_pid = str(p.get("proposal_id") or "").strip()
+        ao23b_status = str(p.get("status") or "pending_approval").strip() or "pending_approval"
+        ao23b_execution_id = str(p.get("execution_id") or "").strip()
+        ao23b_execution_status = str(p.get("execution_status") or "not_started").strip() or "not_started"
+        ao23b_dry_run_completed = ao23b_execution_status == "dry_run_completed"
+
+        ao23b_target_files = p.get("target_files") or [
+            ".nvmrc",
+            "package.json",
+            "src/routes/AdminEvolutionCenter.jsx",
+        ]
+        if not isinstance(ao23b_target_files, list):
+            ao23b_target_files = [".nvmrc", "package.json", "src/routes/AdminEvolutionCenter.jsx"]
+        ao23b_target_files = [str(x or "").strip() for x in ao23b_target_files if str(x or "").strip()]
+
+        return {
+            "ok": True,
+            "stage": "AO-23B",
+            "mode": "governed_frontend_push_plan_readonly",
+            "proposal_id": ao23b_pid,
+            "proposal_status": ao23b_status,
+            "execution_id": ao23b_execution_id,
+            "execution_status": ao23b_execution_status,
+            "dry_run_completed": ao23b_dry_run_completed,
+            "repo_target": "frontend",
+            "target_branch": "main",
+            "base_branch": "main",
+            "local_commits": [
+                "6ea230c",
+                "7c65e6d",
+            ],
+            "target_files": ao23b_target_files,
+            "can_prepare_push": bool(ao23b_status == "approved" and ao23b_dry_run_completed),
+            "can_push": False,
+            "can_deploy": False,
+            "can_run_migration": False,
+            "execution_enabled": False,
+            "can_execute_real": False,
+            "write_allowed": False,
+            "file_write_allowed": False,
+            "commit_allowed": False,
+            "create_pr_allowed": False,
+            "merge_allowed": False,
+            "push_allowed": False,
+            "deploy_allowed": False,
+            "migration_allowed": False,
+            "main_branch_write_allowed": False,
+            "main_direct_write_allowed": False,
+            "api_changes_allowed": False,
+            "suggested_push_title": "AO-23B — Push Governado do Frontend",
+            "risk": str(p.get("risk") or "baixo"),
+            "push_contract": {
+                "repo_target": "frontend",
+                "target_branch": "main",
+                "local_commits": ["6ea230c", "7c65e6d"],
+                "target_files": ao23b_target_files,
+                "push_allowed": False,
+                "push_now": False,
+                "deploy_allowed": False,
+                "deploy_now": False,
+                "migration_allowed": False,
+                "main_direct_write_allowed": False,
+                "requires_admin_approval_before_push": True,
+                "requires_build_verify_before_push": True,
+                "requires_deploy_observation_if_auto_deploy_triggers": True,
+            },
+            "rollback_contract": {
+                "rollback_plan_required": True,
+                "rollback_without_admin_approval": False,
+                "rollback_plan": str(p.get("rollback_plan") or ""),
+                "rollback_if_push_not_executed": "Nenhuma ação técnica necessária.",
+                "rollback_if_push_or_deploy_fails": "Revert dos commits 6ea230c e 7c65e6d ou novo commit corretivo, sem migration.",
+            },
+            "blocked_actions": [
+                "write_repository_now",
+                "write_main_branch",
+                "commit_now",
+                "open_pr_now",
+                "merge_now",
+                "push_now",
+                "deploy",
+                "migration",
+                "api_change",
+            ],
+            "next_required_stage": "AO-23C governed frontend push execution only after explicit Admin confirmation and publication preflight validation",
+            "message": "AO-23B pronto para revisão: próxima etapa poderá preparar execução governada de push dos commits 6ea230c e 7c65e6d, ainda sem executar push ou deploy.",
+        }
 
     # AO-23_FRONTEND_PUBLICATION_PLAN_READONLY_PAYLOAD
     if _admin_evolution_is_frontend_publication_stage(p):
@@ -33712,6 +33879,114 @@ async def chat_stream(
         Converte o patch_plan do pipeline governado em uma proposal_only auditável.
         Este spec não escreve repositório, não comita e não faz deploy.
         """
+        # AO-23B_SPECIFIC_FRONTEND_PUSH_PROPOSAL_PAYLOAD
+        # Push governado do frontend deve vencer AO-23 publication proposal.
+        ao23b_text = str(message or "")
+        ao23b_norm = ao23b_text.lower()
+        ao23b_push_intent = (
+            "ao-23b" in ao23b_norm
+            or "ao23b" in ao23b_norm
+            or "push governado do frontend" in ao23b_norm
+            or "push governado" in ao23b_norm
+            or "ahead 2" in ao23b_norm
+            or "commits locais pendentes" in ao23b_norm
+            or "7c65e6d" in ao23b_norm
+            or "ao-23 align admin ui publication labels" in ao23b_norm
+        )
+        ao23b_frontend_context = (
+            "frontend" in ao23b_norm
+            and "6ea230c" in ao23b_norm
+            and (
+                "7c65e6d" in ao23b_norm
+                or "adminevolutioncenter.jsx" in ao23b_norm
+                or "src/routes/adminevolutioncenter.jsx" in ao23b_norm
+            )
+        )
+        if ao23b_push_intent and ao23b_frontend_context:
+            return {
+                "title": "AO-23B — Push Governado do Frontend",
+                "summary": (
+                    "Criar proposta governada para push futuro dos commits locais do frontend "
+                    "para origin/main no repositório orkio-web-PATCHD-patroai-integrated. "
+                    "Commits pendentes: 6ea230c Pin frontend runtime to Node 20 e "
+                    "7c65e6d AO-23 align admin UI publication labels. Esta etapa é somente "
+                    "proposal_only: não executa push, não executa deploy, não executa migration "
+                    "e não altera API."
+                ),
+                "risk": "baixo",
+                "target_files": [
+                    ".nvmrc",
+                    "package.json",
+                    "src/routes/AdminEvolutionCenter.jsx",
+                ],
+                "rollback_plan": (
+                    "Se o push ainda não tiver sido executado, nenhuma ação técnica é necessária. "
+                    "Se o push for executado e causar falha de build/deploy, o rollback seguro será "
+                    "revert dos commits 6ea230c e 7c65e6d ou novo commit corretivo, sem migration."
+                ),
+                "checklist": [
+                    "proposal_only nasce como AO-23B, não como AO-23/AO-22/AO-17.",
+                    "repo_target=frontend.",
+                    "target_branch=main.",
+                    "local_commits contém 6ea230c e 7c65e6d.",
+                    "target_files contém .nvmrc, package.json e src/routes/AdminEvolutionCenter.jsx.",
+                    "WEB está main...origin/main [ahead 2].",
+                    "npm run build passou com Node 20.",
+                    "npm run build:verify passou com BUILD_VERIFY_OK_AO23_FINAL.",
+                    "AO-23 anterior foi aprovada e teve dry-run concluído.",
+                    "Plano AO-23 retornou can_prepare_push=true.",
+                    "push_allowed=false na criação da proposal.",
+                    "deploy_allowed=false.",
+                    "migration_allowed=false.",
+                    "main_direct_write=false.",
+                    "api_changes_allowed=false.",
+                    "human_approval_required=true permanece obrigatório.",
+                    "execution_enabled=false permanece até approval gate.",
+                    "Não executar push durante proposal_only.",
+                    "Não executar deploy durante proposal_only.",
+                ],
+                "diff_preview": (
+                    "AO-23B FRONTEND GOVERNED PUSH PREVIEW\n\n"
+                    "Repository:\n"
+                    "- patroaiconsultech/orkio-web-PATCHD-patroai-integrated\n\n"
+                    "Pending local commits:\n"
+                    "- 6ea230c Pin frontend runtime to Node 20\n"
+                    "- 7c65e6d AO-23 align admin UI publication labels\n\n"
+                    "Target branch:\n"
+                    "- main\n\n"
+                    "Target files:\n"
+                    "- .nvmrc\n"
+                    "- package.json\n"
+                    "- src/routes/AdminEvolutionCenter.jsx\n\n"
+                    "Validated evidence:\n"
+                    "- npm run build OK with Node 20\n"
+                    "- npm run build:verify OK\n"
+                    "- BUILD_VERIFY_OK_AO23_FINAL\n"
+                    "- WEB ahead 2\n\n"
+                    "Conceptual change:\n"
+                    "+ Registrar proposta governada para push futuro dos dois commits locais do frontend.\n\n"
+                    "Blocked real actions:\n"
+                    "- push=false\n"
+                    "- deploy=false\n"
+                    "- migration=false\n"
+                    "- api_change=false\n"
+                    "- main_direct_write=false"
+                ),
+                "smoke_plan": [
+                    "API sobe sem erro de import/sintaxe.",
+                    "/api/health retorna 200.",
+                    "Login/Admin continuam funcionando.",
+                    "Nenhuma escrita real em repo, push, deploy ou migration é executada.",
+                    "Rollback plan está presente.",
+                    "proposal_only nasce como AO-23B, não como AO-23.",
+                    "WEB permanece ahead 2 até push governado.",
+                    "target_files contém .nvmrc, package.json e src/routes/AdminEvolutionCenter.jsx.",
+                    "push_allowed=false.",
+                    "deploy_allowed=false.",
+                    "migration_allowed=false.",
+                ],
+            }
+
         # AO-23_SPECIFIC_FRONTEND_PUBLICATION_PROPOSAL_PAYLOAD
         # Publicação governada do frontend deve vencer AO-22 quando o objetivo for push/deploy do commit local.
         ao23_text = str(message or "")
