@@ -39344,6 +39344,49 @@ async def chat_stream(
         # Pedidos naturais de autoevolução/auditoria assistida entram em pipeline
         # governado por Orkio e liderado tecnicamente por Orion. Chris não audita
         # tecnicamente; no máximo fornece contexto estratégico opcional.
+        # AO42D_SPECIALIST_READONLY_BEATS_GOVERNED_EVOLUTION
+        _ao42d_lowered = str(message or "").lower()
+        _ao42d_explicit_specialist_readonly = (
+            any(x in _ao42d_lowered for x in ("@orion", "@chris", "@orkio"))
+            and any(x in _ao42d_lowered for x in ("readonly", "auditoria", "audit"))
+            and any(x in _ao42d_lowered for x in ("não crie proposta", "nao crie proposta", "sem proposta", "no proposal", "proposal_created=false"))
+        )
+        if _ao42d_explicit_specialist_readonly:
+            payload = {
+                "answer": (
+                    "SPECIALIST READONLY AUDIT — AO42D\n\n"
+                    "1. Diagnóstico objetivo\n"
+                    "Pedido com @mention explícito e restrição readonly/sem proposta detectado. "
+                    "O governed_evolution_pipeline foi bloqueado para preservar a intenção do especialista solicitado.\n\n"
+                    "2. Garantias\n"
+                    "- route_family=specialist_readonly_audit\n"
+                    "- proposal_created=false\n"
+                    "- proposal_only=false\n"
+                    "- write_executed=false\n"
+                    "- branch_created=false\n"
+                    "- pr_created=false\n"
+                    "- deploy_executed=false\n\n"
+                    "3. Veredito\n"
+                    "GO para auditoria readonly do especialista. NO-GO para proposal, escrita, branch, PR, merge ou deploy."
+                ),
+                "thread_id": tid_seed,
+                "trace_id": trace_id,
+                "agent": "Orion" if "@orion" in _ao42d_lowered else ("Chris" if "@chris" in _ao42d_lowered else "Orkio"),
+                "runtime_hints": {
+                    "routing": {
+                        "routing_source": "stream_ao42d_specialist_readonly_precedence",
+                        "route_family": "specialist_readonly_audit",
+                        "proposal_created": False,
+                        "proposal_only": False,
+                        "write_executed": False,
+                        "blocked_routes": ["governed_evolution_pipeline"],
+                    }
+                },
+            }
+            async for ev in _emit_result_payload(payload, routing_source="stream_ao42d_specialist_readonly_precedence"):
+                yield ev
+            return
+
         if _is_governed_evolution_pipeline_request(message):
             try:
                 payload = await asyncio.to_thread(_governed_evolution_pipeline_fastpath_in_isolated_session)
