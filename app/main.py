@@ -14596,6 +14596,7 @@ def execute_agent_runtime(
     user_prompt_override: Optional[str] = None,
 ) -> Dict[str, Any]:
     execution_id = new_id()
+    runtime_started_at = _time.time()  # AO42B_EXECUTE_AGENT_RUNTIME_NORMALIZED_OUTPUT
     agent_name = _agent_attr(agent_row, "name", None) or "Agent"
     agent_slug = _canonical_dispatch_specialist_slug(agent_name) or "agent"
     file_ctx = _build_file_context_block(citations)
@@ -14611,8 +14612,16 @@ def execute_agent_runtime(
     if agent_row is None:
         return {
             "ok": False,
+            "agent_slug": agent_slug,
+            "agent_name": agent_name,
+            "answer": "",
             "text": "",
             "error": "agent_runtime_unavailable",
+            "execution_id": execution_id,
+            "runtime_ms": int((_time.time() - runtime_started_at) * 1000),
+            "provider": "",
+            "model": "",
+            "warnings": [],
             "ans_obj": {
                 "code": "LLM_ERROR",
                 "error": "agent_runtime_unavailable",
@@ -14707,8 +14716,16 @@ def execute_agent_runtime(
         execution_trace.extend(list(governance_fields.get("governance_trace") or []))
         return {
             "ok": True,
+            "agent_slug": agent_slug,
+            "agent_name": agent_name,
+            "answer": text,
             "text": text,
             "error": "",
+            "execution_id": execution_id,
+            "runtime_ms": int((_time.time() - runtime_started_at) * 1000),
+            "provider": "openai",
+            "model": str(ans_obj.get("model") or "") if isinstance(ans_obj, dict) else "",
+            "warnings": [],
             "ans_obj": ans_obj,
             "runtime_execution_id": execution_id,
             "executor_agent": agent_name,
@@ -14755,8 +14772,16 @@ def execute_agent_runtime(
     execution_trace.extend(list(governance_fields.get("governance_trace") or []))
     return {
         "ok": False,
+        "agent_slug": agent_slug,
+        "agent_name": agent_name,
+        "answer": "",
         "text": "",
         "error": error,
+        "execution_id": execution_id,
+        "runtime_ms": int((_time.time() - runtime_started_at) * 1000),
+        "provider": "openai",
+        "model": str(ans_obj.get("model") or "") if isinstance(ans_obj, dict) else "",
+        "warnings": [error] if error else [],
         "ans_obj": ans_obj if isinstance(ans_obj, dict) else {},
         "runtime_execution_id": execution_id,
         "executor_agent": agent_name,
