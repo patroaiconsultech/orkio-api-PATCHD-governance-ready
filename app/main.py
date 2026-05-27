@@ -40310,6 +40310,175 @@ async def chat_stream(
                 except Exception:
                     pass
 
+            # AO46B1_NATURAL_EXECUTIVE_READING_FASTPATH
+            # Cobre pedidos naturais de leitura executiva sem @Orion,
+            # antes do AO46A capturar "contexto atual" como snapshot simples.
+            if not str(_hf4k_kind or "").strip():
+                try:
+                    _ao46b1_raw = str(message or "").strip()
+                    try:
+                        _ao46b1_norm = _normalize_router_text(_ao46b1_raw)
+                    except Exception:
+                        _ao46b1_norm = " ".join(_ao46b1_raw.lower().split())
+
+                    _ao46b1_plain = re.sub(r"^\s*@(?:orkio|team|chris|orion)\s+", "", _ao46b1_norm, flags=re.IGNORECASE).strip()
+                    _ao46b1_words = re.findall(r"[\wÀ-ÿ]+", _ao46b1_plain, flags=re.UNICODE)
+                    _ao46b1_short = len(_ao46b1_plain) <= 360 and len(_ao46b1_words) <= 55
+
+                    _ao46b1_wants_exec = any(x in _ao46b1_plain for x in (
+                        "leitura executiva",
+                        "prioridade mais importante",
+                        "proximo melhor passo",
+                        "próximo melhor passo",
+                        "prioridade agora",
+                        "o que devemos fazer agora",
+                        "maior impacto",
+                        "menor risco",
+                        "oportunidade de maior impacto",
+                        "oportunidade de menor risco",
+                    ))
+
+                    _ao46b1_blocked = any(x in _ao46b1_plain for x in (
+                        "github", "repo", "repositorio", "repositório",
+                        "codespace", "terminal", "log", "logs",
+                        "patch", "deploy", "branch", "commit", "pull request", " pr ",
+                        "backend", "frontend", "api", "migration", "migração", "migracao",
+                        "traceback", "exception", "bug", "erro",
+                        "war room", "warroom", "autoevolucao", "autoevolução",
+                        "proposal", "proposta", "dry-run", "dry run",
+                    ))
+
+                    if _ao46b1_short and _ao46b1_wants_exec and not _ao46b1_blocked:
+                        _ao46b1_profile = {}
+                        _ao46b1_db = None
+                        try:
+                            _ao46b1_user_payload = user if isinstance(user, dict) else {}
+                        except Exception:
+                            _ao46b1_user_payload = {}
+
+                        try:
+                            _ao46b1_uid = str((_ao46b1_user_payload or {}).get("sub") or "").strip()
+                            if _ao46b1_uid:
+                                _ao46b1_db = SessionLocal()
+                                _ao46b1_u = _ao46b1_db.execute(
+                                    select(User).where(User.id == _ao46b1_uid, User.org_slug == org)
+                                ).scalar_one_or_none()
+                                if _ao46b1_u:
+                                    _ao46b1_profile = {
+                                        "name": getattr(_ao46b1_u, "name", None),
+                                        "email": getattr(_ao46b1_u, "email", None),
+                                        "company": getattr(_ao46b1_u, "company", None),
+                                        "profile_role": getattr(_ao46b1_u, "profile_role", None),
+                                        "user_type": getattr(_ao46b1_u, "user_type", None),
+                                        "intent": getattr(_ao46b1_u, "intent", None),
+                                        "notes": getattr(_ao46b1_u, "notes", None),
+                                        "country": getattr(_ao46b1_u, "country", None),
+                                        "language": getattr(_ao46b1_u, "language", None),
+                                        "usage_tier": getattr(_ao46b1_u, "usage_tier", None),
+                                        "signup_source": getattr(_ao46b1_u, "signup_source", None),
+                                        "signup_code_label": getattr(_ao46b1_u, "signup_code_label", None),
+                                        "product_scope": getattr(_ao46b1_u, "product_scope", None),
+                                        "onboarding_completed": bool(getattr(_ao46b1_u, "onboarding_completed", False)),
+                                    }
+                        except Exception:
+                            try:
+                                logger.exception("AO46B1_NATURAL_EXECUTIVE_READING_PROFILE_LOOKUP_FAILED trace_id=%s", trace_id)
+                            except Exception:
+                                pass
+                        finally:
+                            if _ao46b1_db is not None:
+                                try:
+                                    _ao46b1_db.close()
+                                except Exception:
+                                    pass
+
+                        def _ao46b1_pick(*vals, default="não informado"):
+                            for _v in vals:
+                                _s = str(_v or "").strip()
+                                if _s:
+                                    return _s
+                            return default
+
+                        def _ao46b1_label_intent(v):
+                            raw_intent = str(v or "").strip().lower()
+                            return {
+                                "explore": "explorar a plataforma e validar valor percebido",
+                                "meeting": "preparar conversa ou reunião executiva",
+                                "pilot": "avaliar piloto com critérios claros de sucesso",
+                                "funding": "organizar narrativa para captação/investimento",
+                                "other": "explorar uma próxima ação útil",
+                            }.get(raw_intent, _ao46b1_pick(v, default="explorar uma próxima ação útil"))
+
+                        _ao46b1_name = _ao46b1_pick(_ao46b1_profile.get("name"), (_ao46b1_user_payload or {}).get("name"), default="usuário")
+                        _ao46b1_company = _ao46b1_pick(_ao46b1_profile.get("company"), default="seu projeto")
+                        _ao46b1_role = _ao46b1_pick(_ao46b1_profile.get("profile_role"), (_ao46b1_user_payload or {}).get("role"))
+                        _ao46b1_intent = _ao46b1_label_intent(_ao46b1_profile.get("intent"))
+                        _ao46b1_language = _ao46b1_pick(_ao46b1_profile.get("language"), default="pt-BR")
+                        _ao46b1_scope = _ao46b1_pick(
+                            _ao46b1_profile.get("product_scope"),
+                            _ao46b1_profile.get("signup_source"),
+                            _ao46b1_profile.get("signup_code_label"),
+                            _ao46b1_profile.get("usage_tier"),
+                        )
+                        _ao46b1_onboarding = "concluído" if bool(_ao46b1_profile.get("onboarding_completed")) else "pendente"
+
+                        _ao46b1_priority = "transformar a primeira experiência em uma vitória concreta e rápida para usuários beta."
+                        _ao46b1_low_risk = "começar com um fluxo guiado de leitura executiva e plano de teste, sem depender de runtime pesado."
+                        _ao46b1_next = "rodar um teste com 5 usuários e medir se cada um entende o contexto, recebe valor e sabe o próximo passo em menos de 10 minutos."
+
+                        if "pilot" in str(_ao46b1_profile.get("intent") or "").lower():
+                            _ao46b1_priority = "converter a avaliação em um piloto mensurável, com critérios de sucesso explícitos."
+                            _ao46b1_low_risk = "limitar o piloto a uma jornada principal, poucos usuários e feedback estruturado."
+                            _ao46b1_next = "definir 3 critérios de sucesso do piloto, 5 usuários-alvo e um roteiro de validação de 7 dias."
+                        elif "funding" in str(_ao46b1_profile.get("intent") or "").lower():
+                            _ao46b1_priority = "organizar uma narrativa executiva clara para demonstrar problema, solução, tração e próximos marcos."
+                            _ao46b1_low_risk = "validar a narrativa com evidências reais antes de ampliar promessas ou valuation."
+                            _ao46b1_next = "montar uma versão curta de pitch com problema, solução, mercado, diferenciais, prova e próximos marcos."
+                        elif "founder" in str(_ao46b1_profile.get("user_type") or "").lower():
+                            _ao46b1_priority = "provar rapidamente que a plataforma gera valor percebido antes de expandir escopo."
+                            _ao46b1_low_risk = "focar em uma jornada principal e medir reação de usuários reais."
+                            _ao46b1_next = "selecionar 5 usuários beta, observar a primeira sessão e medir clareza, confiança e ação tomada."
+
+                        _hf4k_kind = "natural_executive_reading"
+                        _hf4p_target = "Orion"
+                        _hf4k_final_text = (
+                            "Orion — leitura executiva natural AO46B1\n\n"
+                            "1. Diagnóstico objetivo\n"
+                            f"- Usuário/contexto: {_ao46b1_name}.\n"
+                            f"- Projeto/empresa: {_ao46b1_company}.\n"
+                            f"- Papel informado: {_ao46b1_role}.\n"
+                            f"- Objetivo atual: {_ao46b1_intent}.\n"
+                            f"- Onboarding: {_ao46b1_onboarding}.\n"
+                            f"- Escopo/acesso: {_ao46b1_scope}.\n"
+                            f"- Idioma base: {_ao46b1_language}.\n\n"
+                            "2. Oportunidade de maior impacto\n"
+                            f"- {_ao46b1_priority}\n\n"
+                            "3. Menor risco operacional\n"
+                            f"- {_ao46b1_low_risk}\n\n"
+                            "4. Próximo melhor passo\n"
+                            f"- {_ao46b1_next}\n\n"
+                            "5. Validação beta recomendada\n"
+                            "- Testar clareza da primeira tela.\n"
+                            "- Testar pergunta de contexto atual.\n"
+                            "- Testar leitura executiva inicial.\n"
+                            "- Testar pedido prático, como plano ou Business Plan.\n"
+                            "- Testar continuidade com pergunta curta depois de especialista.\n\n"
+                            "6. Governança\n"
+                            "- Modo readonly.\n"
+                            "- proposal_created=false.\n"
+                            "- write_executed=false.\n"
+                            "- branch_created=false.\n"
+                            "- deploy_executed=false.\n\n"
+                            "Veredito Orion\n"
+                            "GO para validação beta controlada. NO-GO para ampliar usuários antes de validar relatório executivo e fallback útil de runtime."
+                        )
+                except Exception:
+                    try:
+                        logger.exception("AO46B1_NATURAL_EXECUTIVE_READING_FASTPATH_FAILED trace_id=%s", trace_id)
+                    except Exception:
+                        pass
+
+
             # AO46A_CONTEXT_SNAPSHOT_FASTPATH
             # Contexto/perfil/próximo passo devem responder localmente, sem runtime pesado.
             if not str(_hf4k_kind or "").strip():
@@ -40492,6 +40661,8 @@ async def chat_stream(
                     _hf4k_agent_name = "Team"
                 elif _hf4k_kind == "team_bare_ao_ack":
                     _hf4k_agent_name = "Orkio"
+                elif _hf4k_kind == "natural_executive_reading":
+                    _hf4k_agent_name = "Orion"
             except Exception:
                 _hf4k_agent_name = "Orkio"
 
@@ -40514,6 +40685,7 @@ async def chat_stream(
                 "issue_map_patch_plan_readonly": "issue_map_patch_plan_readonly",
                 "memory_lookup_readonly": "memory_lookup_readonly",
                 "premium_context_snapshot": "context_snapshot_fastpath",
+                "natural_executive_reading": "natural_executive_reading_fastpath",
             }.get(str(_hf4k_kind or ""), "safe_fastpath_coverage")
 
             _hf6r1_route_priority = {
@@ -40534,6 +40706,7 @@ async def chat_stream(
                 "memory_lookup_readonly": 110,
                 "simple_status": 120,
                 "premium_context_snapshot": 65,
+                "natural_executive_reading": 64,
             }.get(str(_hf4k_kind or ""), 999)
 
             if _hf4k_kind and _hf4k_final_text:
