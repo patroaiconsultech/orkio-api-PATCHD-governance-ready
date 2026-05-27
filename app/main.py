@@ -42769,14 +42769,52 @@ async def realtime_client_secret(
         language_profile=language_profile,
     )
 
-    # Optional: inject agent instructions as session prompt (keeps behavior aligned with Orkio agents)
+    # AO47A_REALTIME_AGENT_IDENTITY_BINDING
+    # Realtime nunca deve iniciar como assistente genérica.
+    # Se agent_id não vier do frontend, Orkio é o agente padrão governado.
     agent_system_prompt = None
     agent_voice = None
-    if body.agent_id is not None:
-        agent = db.execute(select(Agent).where(Agent.id == body.agent_id, Agent.org_slug == org)).scalar_one_or_none()
+    agent_identity_name = "Orkio"
+    agent_identity_source = "default_orkio_fallback"
+    _ao47a_agent_id = str(body.agent_id or "").strip() or None
+
+    if _ao47a_agent_id is not None:
+        agent = db.execute(select(Agent).where(Agent.id == _ao47a_agent_id, Agent.org_slug == org)).scalar_one_or_none()
         if agent:
+            agent_identity_name = (agent.name or "Orkio").strip() or "Orkio"
+            agent_identity_source = "requested_agent"
             agent_system_prompt = (agent.system_prompt or "").strip()[:8000] or None
             agent_voice = resolve_agent_voice(agent) if agent else None
+    else:
+        try:
+            default_agent = db.execute(
+                select(Agent).where(Agent.name == "Orkio", Agent.org_slug == org)
+            ).scalar_one_or_none()
+            if default_agent:
+                agent_identity_name = (default_agent.name or "Orkio").strip() or "Orkio"
+                agent_identity_source = "default_orkio_agent"
+                agent_system_prompt = (default_agent.system_prompt or "").strip()[:8000] or None
+                agent_voice = resolve_agent_voice(default_agent)
+        except Exception:
+            try:
+                logger.exception("AO47A_DEFAULT_ORKIO_CLIENT_SECRET_LOOKUP_FAILED org=%s", org)
+            except Exception:
+                pass
+
+    identity_guard = (
+        "IDENTIDADE OBRIGATÓRIA DO REALTIME — AO47A\n"
+        f"- Você é {agent_identity_name}, agente da plataforma PatroAI.\n"
+        "- Nunca se apresente como assistente genérica, modelo genérico ou voz sem nome.\n"
+        "- Se o usuário perguntar quem é você, responda com seu nome e função na PatroAI.\n"
+        "- Em português do Brasil, mantenha tom executivo, claro, seguro e objetivo.\n"
+        "- Se nenhuma especialidade específica for informada, atue como Orkio, anfitrião executivo da PatroAI.\n"
+        f"- identity_source={agent_identity_source}."
+    )
+
+    if agent_system_prompt:
+        agent_system_prompt = (identity_guard + "\n\n" + agent_system_prompt).strip()
+    else:
+        agent_system_prompt = identity_guard
 
     instructions = build_summit_instructions(
         mode=mode,
@@ -42914,15 +42952,39 @@ async def realtime_start(
         language_profile=language_profile,
     )
 
-    agent_id = body.agent_id
+    # AO47A_REALTIME_AGENT_IDENTITY_BINDING
+    # Se o frontend não enviar agent_id, bindar Orkio como default seguro.
+    agent_id = str(body.agent_id or "").strip() or None
     agent_name = None
     agent_voice = None
+    agent_identity_source = "requested_agent"
+
     if agent_id is not None:
         agent = db.execute(select(Agent).where(Agent.id == agent_id, Agent.org_slug == org)).scalar_one_or_none()
         if not agent:
             raise HTTPException(status_code=404, detail="Agent not found for this tenant")
-        agent_name = agent.name
+        agent_name = (agent.name or "Orkio").strip() or "Orkio"
         agent_voice = resolve_agent_voice(agent) if agent else None
+    else:
+        agent_identity_source = "default_orkio_fallback"
+        try:
+            default_agent = db.execute(
+                select(Agent).where(Agent.name == "Orkio", Agent.org_slug == org)
+            ).scalar_one_or_none()
+            if default_agent:
+                agent_id = str(default_agent.id)
+                agent_name = (default_agent.name or "Orkio").strip() or "Orkio"
+                agent_voice = resolve_agent_voice(default_agent)
+                agent_identity_source = "default_orkio_agent"
+            else:
+                agent_name = "Orkio"
+        except Exception:
+            try:
+                logger.exception("AO47A_DEFAULT_ORKIO_REALTIME_START_LOOKUP_FAILED org=%s user_id=%s", org, uid)
+            except Exception:
+                pass
+            agent_name = "Orkio"
+            agent_identity_source = "default_orkio_fallback_error"
 
     default_realtime_voice = (os.getenv("OPENAI_REALTIME_VOICE_DEFAULT", "") or os.getenv("OPENAI_TTS_VOICE_DEFAULT", "cedar")).strip() or "cedar"
     voice = normalize_realtime_voice(body.voice or agent_voice or default_realtime_voice, default=default_realtime_voice)
@@ -42949,6 +43011,10 @@ async def realtime_start(
                 "language_profile": summit_cfg.get("language_profile"),
                 "transcription_language": summit_cfg.get("transcription_language"),
                 "stage_guidance": summit_cfg.get("stage_guidance"),
+                "agent_identity_binding": "AO47A_REALTIME_AGENT_IDENTITY_BINDING",
+                "agent_identity_source": agent_identity_source,
+                "resolved_agent_id": str(agent_id or ""),
+                "resolved_agent_name": agent_name or "Orkio",
             }, ensure_ascii=False),
         )
         db.add(rs)
@@ -43003,6 +43069,8 @@ async def realtime_start(
         "session_id": sid,
         "thread_id": tid,
         "agent_id": agent_id,
+        "agent_name": agent_name or "Orkio",
+        "agent_identity_source": agent_identity_source,
         "model": body.model,
         "voice": voice,
         "mode": summit_cfg.get("mode"),
@@ -43014,7 +43082,7 @@ async def realtime_start(
         "ok": True,
         "session_id": sid,
         "thread_id": tid,
-        "agent": {"id": agent_id, "name": agent_name},
+        "agent": {"id": agent_id, "name": agent_name or "Orkio", "identity_source": agent_identity_source},
         "model": body.model,
         "voice": voice,
         "mode": summit_cfg.get("mode"),
