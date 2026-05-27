@@ -33120,6 +33120,66 @@ async def chat_stream(
 
     def _build_chris_strategic_squad_answer(text: str, *, db2: Session, org_slug: str) -> str:
         normalized = _normalize_router_text(text)
+
+        # AO44B: Business Plan must beat Chris valuation fastpath.
+        # This function is the source of "Chris — Valuation Estratégica Preliminar".
+        ao44b_business_plan_requested = any(
+            key in normalized
+            for key in (
+                "business plan",
+                "businessplan",
+                "plano de negocios",
+                "plano de negocio",
+                "plano de negócios",
+                "plano empresarial",
+                "business case",
+                "plano estrategico da empresa",
+                "plano estratégico da empresa",
+                "capacidade de criar um bom business",
+                "capacidade de criar um business",
+            )
+        )
+
+        if ao44b_business_plan_requested:
+            try:
+                logger.warning(
+                    "AO44B_BUSINESS_PLAN_BEATS_CHRIS_VALUATION trace_id=%s thread_id=%s",
+                    trace_id,
+                    tid_seed,
+                )
+            except Exception:
+                pass
+
+            return (
+                "Chris — Business Plan Architect\n\n"
+                "Sim. A plataforma Orkio tem capacidade de criar um bom Business Plan porque combina contexto do fundador, "
+                "agentes especializados, estratégia, produto, tecnologia, operação, go-to-market, riscos, narrativa para investidores "
+                "e modelagem financeira em um fluxo único.\n\n"
+                "1. Capacidade da plataforma\n"
+                "- Orkio pode organizar o plano a partir do contexto da PatroAI, do fundador, da tecnologia, do mercado e dos objetivos de captação ou comercialização.\n"
+                "- Chris lidera estratégia, posicionamento, mercado, modelo de negócio, valuation e narrativa.\n"
+                "- Orion complementa com arquitetura, governança, tecnologia, riscos técnicos e execução.\n"
+                "- Orkio consolida tudo em um documento executivo claro e utilizável.\n\n"
+                "2. Estrutura recomendada do Business Plan\n"
+                "- Resumo executivo.\n"
+                "- Problema e oportunidade.\n"
+                "- Solução PatroAI / Orkio.\n"
+                "- Mercado-alvo, ICP e dores prioritárias.\n"
+                "- Produto, tecnologia, agentes e governança.\n"
+                "- Modelo de negócio e monetização.\n"
+                "- Go-to-market e canais.\n"
+                "- Diferenciais competitivos e propriedade intelectual.\n"
+                "- Operação, roadmap e milestones.\n"
+                "- Projeções financeiras, MRR, ARR, custos e unit economics.\n"
+                "- Valuation como seção do plano, não como resposta principal.\n"
+                "- Riscos, mitigação e tese para investidores.\n\n"
+                "3. Próximo passo recomendado\n"
+                "Pedir: 'Chris, monte o Business Plan executivo da PatroAI em versão investidor, com Orion auditando tecnologia e riscos.'\n\n"
+                "Veredito da Chris\n"
+                "Sim: a plataforma tem capacidade real de criar um Business Plan forte. O próximo salto é transformar o contexto já existente em documento executivo, "
+                "com narrativa, números, roadmap, tese de mercado e riscos bem posicionados."
+            )
+
         now = now_ts()
         since_30d = now - 30 * 86400
 
