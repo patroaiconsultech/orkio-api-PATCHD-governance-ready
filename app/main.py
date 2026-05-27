@@ -39396,6 +39396,23 @@ async def chat_stream(
                     }
                 },
             }
+            # AO43B_PERSIST_SPECIALIST_READONLY_PAYLOAD
+            try:
+                _ao43b_persisted = _persist_assistant_message(
+                    text=str(payload.get("answer") or ""),
+                    thread_id=tid_seed,
+                    agent_id=str(payload.get("agent") or "Orion").lower(),
+                    agent_name=str(payload.get("agent") or "Orion"),
+                )
+                if isinstance(_ao43b_persisted, dict):
+                    payload.update(_ao43b_persisted)
+                payload["assistant_persisted"] = True
+            except Exception:
+                try:
+                    logger.exception("AO43B_SPECIALIST_READONLY_PERSIST_FAILED trace_id=%s thread_id=%s", trace_id, tid_seed)
+                except Exception:
+                    pass
+
             async for ev in _emit_result_payload(payload, routing_source="stream_ao42d_specialist_readonly_precedence"):
                 yield ev
             return
