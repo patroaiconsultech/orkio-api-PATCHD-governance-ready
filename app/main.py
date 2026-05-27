@@ -42439,13 +42439,57 @@ async def tts_endpoint(
     if not api_key:
         raise HTTPException(status_code=503, detail="OPENAI_API_KEY not configured")
 
+    org = get_request_org(user, x_org_slug)
+
     # Resolve voice: admin/db → env-by-agent → explicit inp.voice → configured default
+    # AO47B1_REALTIME_DUPLICATE_AUDIO_GUARD
+    # Evita áudio duplicado: quando há sessão Realtime ativa no mesmo thread,
+    # o TTS clássico não deve gerar uma segunda fala.
+    try:
+        tts_thread_id = str(getattr(inp, "thread_id", "") or "").strip()
+    except Exception:
+        tts_thread_id = ""
+
+    if tts_thread_id:
+        try:
+            active_realtime = db.execute(
+                select(RealtimeSession)
+                .where(
+                    RealtimeSession.org_slug == org,
+                    RealtimeSession.thread_id == tts_thread_id,
+                    RealtimeSession.ended_at.is_(None),
+                )
+                .order_by(RealtimeSession.started_at.desc())
+            ).scalar_one_or_none()
+
+            if active_realtime:
+                logger.warning(
+                    "AO47B1_TTS_BLOCKED_DURING_ACTIVE_REALTIME trace_id=%s org=%s thread_id=%s realtime_session_id=%s",
+                    trace_id,
+                    org,
+                    tts_thread_id,
+                    active_realtime.id,
+                )
+                return {
+                    "ok": True,
+                    "blocked": True,
+                    "reason": "active_realtime_session",
+                    "thread_id": tts_thread_id,
+                    "realtime_session_id": active_realtime.id,
+                }
+        except Exception:
+            logger.exception(
+                "AO47B1_REALTIME_DUPLICATE_AUDIO_GUARD_FAILED trace_id=%s org=%s thread_id=%s",
+                trace_id,
+                org,
+                tts_thread_id,
+            )
+
     default_tts_voice = _normalize_voice_id(
         (os.getenv("OPENAI_TTS_VOICE_DEFAULT", "") or os.getenv("OPENAI_REALTIME_VOICE_DEFAULT", "cedar")),
         default="cedar",
     )
     voice = _normalize_voice_id(inp.voice or default_tts_voice, default=default_tts_voice)
-    org = get_request_org(user, x_org_slug)
     _VALID_VOICES = ("alloy","ash","ballad","cedar","coral","echo","fable","marin","nova","onyx","sage","shimmer","verse")
     resolved_via = "default"
     fallback_used = False
