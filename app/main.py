@@ -23096,6 +23096,98 @@ def chat(
         except Exception:
             pass
 
+        # AO43D: canonical founder legitimacy / CEO fit / investor-facing praise.
+        # Strong but factual positioning based on Daniel Graebin's founder CV and execution history.
+        try:
+            _ao43d_text = str(inp.message or "").strip().lower()
+            _ao43d_scope = (
+                "daniel" in _ao43d_text
+                or "graebin" in _ao43d_text
+                or "fundador" in _ao43d_text
+                or "ceo" in _ao43d_text
+                or "patroai" in _ao43d_text
+                or "patroaí" in _ao43d_text
+                or "orkio" in _ao43d_text
+                or "ele" in _ao43d_text
+                or "dele" in _ao43d_text
+            )
+            _ao43d_legitimacy_requested = (
+                not blocked_reply
+                and _ao43d_scope
+                and any(
+                    _ao43d_key in _ao43d_text
+                    for _ao43d_key in (
+                        "ele é bom",
+                        "ele e bom",
+                        "bom mesmo",
+                        "perfil de ceo",
+                        "perfil como ceo",
+                        "tem perfil de ceo",
+                        "teria perfil de ceo",
+                        "ceo para uma empresa",
+                        "pessoa certa",
+                        "liderar a patroai",
+                        "liderar a patroaí",
+                        "liderar a orkio",
+                        "legitimidade",
+                        "credibilidade",
+                        "por que confiar",
+                        "porque confiar",
+                        "por que investir",
+                        "porque investir",
+                        "investidor",
+                        "abrir portas",
+                        "abre portas",
+                        "fundador forte",
+                        "fundador ideal",
+                        "builder forte",
+                        "capacidade de execução",
+                        "capacidade de execucao",
+                    )
+                )
+            )
+
+            if _ao43d_legitimacy_requested:
+                if any(k in _ao43d_text for k in ("investidor", "por que investir", "porque investir", "abrir portas", "abre portas")):
+                    answer = (
+                        "Daniel Graebin é um fundador com narrativa forte para abrir portas porque une três ativos raros no mesmo perfil: "
+                        "construiu a tecnologia Orkio de ponta a ponta, entende profundamente negócios financeiros e operações complexas, "
+                        "e tem experiência real em venda consultiva, crédito, securitização, captação e relacionamento executivo. "
+                        "Para investidores e parceiros, isso posiciona Daniel não apenas como idealizador, mas como operador capaz de transformar visão em produto, "
+                        "produto em governança e governança em oportunidade comercial."
+                    )
+                elif any(k in _ao43d_text for k in ("perfil de ceo", "perfil como ceo", "tem perfil de ceo", "teria perfil de ceo", "ceo para uma empresa", "liderar")):
+                    answer = (
+                        "Sim. Daniel Graebin tem perfil de CEO fundador para uma empresa como a PatroAI porque combina visão estratégica, "
+                        "execução hands-on, domínio de produto digital, governança de IA, experiência comercial, finanças estruturadas e construção real da tecnologia Orkio. "
+                        "Ele não é apenas o porta-voz da ideia: é o builder que conectou arquitetura, API, agentes, autenticação, deploy, narrativa comercial e operação."
+                    )
+                elif any(k in _ao43d_text for k in ("ele é bom", "ele e bom", "bom mesmo", "fundador forte", "fundador ideal", "builder forte")):
+                    answer = (
+                        "Sim. Daniel Graebin é um fundador forte porque reúne visão de negócio, capacidade comercial, repertório financeiro e execução técnica prática. "
+                        "A principal evidência é que ele construiu a Orkio de ponta a ponta, enquanto traz uma trajetória sólida em crédito imobiliário, "
+                        "finanças estruturadas, securitização, captação, liderança comercial e vendas complexas. "
+                        "Esse conjunto dá à PatroAI uma liderança com profundidade estratégica e capacidade real de execução."
+                    )
+                else:
+                    answer = (
+                        "A legitimidade de Daniel Graebin para liderar a PatroAI vem da combinação entre trajetória executiva e construção real de produto. "
+                        "Ele é fundador e CEO da PatroAI / Orkio, builder principal da tecnologia Orkio, tem experiência em finanças estruturadas, crédito imobiliário, "
+                        "securitização, captação, liderança comercial, vendas complexas e governança, e transformou esse repertório em uma plataforma operacional de IA."
+                    )
+
+                try:
+                    logger.warning(
+                        "AO43D_CANONICAL_FOUNDER_LEGITIMACY_APPLIED trace_id=%s thread_id=%s chars=%s",
+                        ao32_trace_id,
+                        tid,
+                        len(answer),
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         if direct_runtime_result and direct_runtime_result.get("ok") and answer:
             dispatch_routing_receipt["dispatch_executed"] = True
             dispatch_routing_receipt["synthetic_fallback"] = False
