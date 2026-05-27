@@ -14549,6 +14549,40 @@ def _github_enforce_governed_write(
         path=path,
     )
 
+
+# AO42A_AGENT_RUNTIME_RESULT_CONTRACT
+def _agent_runtime_result(
+    *,
+    ok: bool,
+    agent_slug: str = "agent",
+    agent_name: str = "Agent",
+    text: str = "",
+    error: str = "",
+    execution_id: str = "",
+    runtime_ms: int = 0,
+    provider: str = "",
+    model: str = "",
+    warnings: list | None = None,
+    extra: dict | None = None,
+) -> Dict[str, Any]:
+    base = {
+        "ok": bool(ok),
+        "agent_slug": str(agent_slug or "agent"),
+        "agent_name": str(agent_name or "Agent"),
+        "text": str(text or ""),
+        "answer": str(text or ""),
+        "error": str(error or ""),
+        "execution_id": str(execution_id or ""),
+        "runtime_ms": int(runtime_ms or 0),
+        "provider": str(provider or ""),
+        "model": str(model or ""),
+        "warnings": list(warnings or []),
+    }
+    if isinstance(extra, dict):
+        base.update(extra)
+    return base
+
+
 def execute_agent_runtime(
     agent_row: Any,
     message: str,
