@@ -32107,24 +32107,45 @@ async def chat_stream(
     started_at = int(_time.time())
 
     def _safe_payload(obj: Any) -> Dict[str, Any]:
+        # AO40C: normalize runtime payloads for immediate SSE completion.
         if obj is None:
             return {}
+
+        payload: Dict[str, Any] = {}
+
         if isinstance(obj, dict):
-            return dict(obj)
-        if hasattr(obj, "model_dump"):
+            payload.update(dict(obj))
+        elif hasattr(obj, "model_dump"):
             try:
-                return dict(obj.model_dump())
+                payload.update(dict(obj.model_dump()))
             except Exception:
                 pass
-        if hasattr(obj, "dict"):
+        elif hasattr(obj, "dict"):
             try:
-                return dict(obj.dict())
+                payload.update(dict(obj.dict()))
             except Exception:
                 pass
-        try:
-            return dict(obj)
-        except Exception:
-            return {"raw": str(obj)}
+        else:
+            try:
+                payload.update(dict(obj))
+            except Exception:
+                payload["raw"] = str(obj)
+
+        for key in ("answer", "text", "final_text", "content", "assistant_message_id", "assistant_persisted"):
+            try:
+                if key not in payload and hasattr(obj, key):
+                    payload[key] = getattr(obj, key, None)
+            except Exception:
+                pass
+
+        if payload.get("text") and not payload.get("answer"):
+            payload["answer"] = payload.get("text")
+        if payload.get("final_text") and not payload.get("answer"):
+            payload["answer"] = payload.get("final_text")
+        if payload.get("content") and not payload.get("answer"):
+            payload["answer"] = payload.get("content")
+
+        return payload
 
     def _looks_like_internal_exception_text(text: str) -> bool:
         raw = str(text or "").strip()
