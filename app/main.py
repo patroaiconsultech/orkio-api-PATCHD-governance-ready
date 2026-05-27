@@ -39593,6 +39593,83 @@ async def chat_stream(
                     "- NO-GO para execução real."
                 )
 
+            # AO45B_HF4K_TEAM_GREETING_ACK_COVERAGE
+            # Corrige cobertura HF4K quando a UI está em Destino: Team.
+            # O greeting/ack deixa de ser "no_target", mas ainda deve bypassar runtime pesado.
+            try:
+                _ao45b_raw = str(message or "").strip()
+                _ao45b_norm = _normalize_router_text(_ao45b_raw)
+            except Exception:
+                _ao45b_raw = str(message or "").strip()
+                _ao45b_norm = " ".join(_ao45b_raw.lower().split())
+
+            try:
+                _ao45b_hf4k_empty = not bool(str(_hf4k_kind or "").strip()) and not bool(str(_hf4k_final_text or "").strip())
+            except Exception:
+                _ao45b_hf4k_empty = True
+
+            if _ao45b_hf4k_empty:
+                try:
+                    _ao45b_literal_match = re.match(
+                        r"^\s*(?:\d+[\).\-\s]+)?(?:responda\s+apenas|responda\s+somente|responder\s+apenas|diga\s+exatamente|retorne\s+somente)\s*[:：]\s*(.+?)\s*$",
+                        _ao45b_raw,
+                        flags=re.IGNORECASE | re.DOTALL,
+                    )
+                    _ao45b_literal_text = (_ao45b_literal_match.group(1).strip() if _ao45b_literal_match else "")
+                    if (
+                        _ao45b_literal_text
+                        and len(_ao45b_literal_text) <= 240
+                        and "\n" not in _ao45b_literal_text
+                        and "\r" not in _ao45b_literal_text
+                    ):
+                        _hf4k_kind = "team_literal_numbered_ack"
+                        _hf4k_final_text = _ao45b_literal_text
+                except Exception:
+                    pass
+
+            if _ao45b_hf4k_empty and not str(_hf4k_kind or "").strip():
+                try:
+                    _ao45b_words = re.findall(r"[\wÀ-ÿ]+", _ao45b_norm, flags=re.UNICODE)
+                    _ao45b_short = len(_ao45b_norm) <= 140 and len(_ao45b_words) <= 20
+
+                    _ao45b_greeting = any(x in _ao45b_norm for x in (
+                        "ola", "olá", "oi", "bom dia", "boa tarde", "boa noite"
+                    ))
+                    _ao45b_identity = any(x in _ao45b_norm for x in (
+                        "quem e voce", "quem é você", "quem e você", "quem é voce"
+                    ))
+                    _ao45b_ack = _ao45b_norm in {
+                        "ok", "okay", "teste",
+                        "@orkio ok", "@chris ok", "@orion ok", "@team ok",
+                        "orkio ok", "chris ok", "orion ok", "team ok",
+                    }
+
+                    _ao45b_blocked = any(x in _ao45b_norm for x in (
+                        "github", "repo", "repositorio", "repositório",
+                        "patch", "deploy", "branch", "pull request", "commit",
+                        "backend", "frontend", "api", "migration", "migracao", "migração",
+                        "arquivo", "file", "proposal", "proposta", "execute", "aplique"
+                    ))
+
+                    if _ao45b_short and not _ao45b_blocked and (_ao45b_greeting or _ao45b_identity or _ao45b_ack):
+                        if "@chris" in _ao45b_norm or _ao45b_norm == "chris ok":
+                            _hf4k_kind = "team_safe_agent_ping"
+                            _hf4p_target = "Chris"
+                            _hf4k_final_text = "Chris está online para contexto estratégico, Business Plan, valuation e apoio executivo. Execução real permanece bloqueada sem aprovação."
+                        elif "@orion" in _ao45b_norm or _ao45b_norm == "orion ok":
+                            _hf4k_kind = "team_safe_agent_ping"
+                            _hf4p_target = "Orion"
+                            _hf4k_final_text = "Orion está online para auditoria readonly, diagnóstico técnico e roteamento. Execução real permanece bloqueada sem aprovação."
+                        elif "@team" in _ao45b_norm or _ao45b_norm == "team ok":
+                            _hf4k_kind = "team_safe_agent_ping"
+                            _hf4p_target = "Team"
+                            _hf4k_final_text = "Team está online para coordenação segura entre Orkio, Chris e Orion. Execução real permanece bloqueada sem aprovação."
+                        else:
+                            _hf4k_kind = "team_safe_greeting_ack"
+                            _hf4k_final_text = "Olá. Eu sou Orkio, o anfitrião executivo da plataforma PatroAI. Estou online para conversa, coordenação segura e auditoria readonly."
+                except Exception:
+                    pass
+
             # AO20K-HF4U_AGENT_FASTPATH_DISPLAY_NAME
             _hf4k_agent_name = "Orkio"
             try:
@@ -39602,6 +39679,8 @@ async def chat_stream(
                     _hf4k_agent_name = str(_hf4t_target or "Orkio").strip() or "Orkio"
                 elif _hf4k_kind == "controlled_evolution_readonly":
                     _hf4k_agent_name = "Orkio"
+                elif _hf4k_kind == "team_safe_agent_ping":
+                    _hf4k_agent_name = str(_hf4p_target or "Orkio").strip() or "Orkio"
             except Exception:
                 _hf4k_agent_name = "Orkio"
 
