@@ -33151,6 +33151,444 @@ async def chat_stream(
             return 0
 
 
+    # AO45A_CHRIS_CONTEXT_CONTINUITY_PREMIUM_V1
+    # Preserva a Chris em follow-ups curtos quando a thread recente já está em
+    # contexto de Business Plan, valuation ou estratégia. Não altera AO44; atua
+    # antes do roteamento genérico e evita regressão em Orion/Orkio/governance.
+    def _ao45a_norm(text: str) -> str:
+        try:
+            return _normalize_router_text(text or "")
+        except Exception:
+            return str(text or "").strip().lower()
+
+    def _ao45a_message_content(row: Any) -> str:
+        for attr in ("content", "message", "text", "answer", "final_text"):
+            try:
+                val = getattr(row, attr, None)
+                if val:
+                    return str(val)
+            except Exception:
+                pass
+        return ""
+
+    def _ao45a_is_short_chris_followup(text: str) -> bool:
+        normalized = _ao45a_norm(text)
+        if not normalized:
+            return False
+
+        # Não sequestrar comandos literais, técnicos, auditoria, repo, patch ou agentes explícitos.
+        hard_blockers = (
+            "responda apenas",
+            "responda somente",
+            "responder apenas",
+            "diga exatamente",
+            "retorne somente",
+            "github",
+            "repo",
+            "repositorio",
+            "repositório",
+            "branch",
+            "pull request",
+            "backend",
+            "frontend",
+            "deploy",
+            "api",
+            "sse",
+            "stream",
+            "log",
+            "erro",
+            "bug",
+            "patch",
+            "codigo",
+            "código",
+            "war room",
+            "warroom",
+            "readonly",
+            "read only",
+            "auditoria",
+            "audit",
+            "root cause",
+        )
+        if any(term in normalized for term in hard_blockers):
+            return False
+
+        if re.search(r"(^|\s|@)(orkio|orion|auditor)(\b|[\s,:;.!?])", normalized, flags=re.IGNORECASE):
+            return False
+
+        # Intenções explícitas de Business Plan continuam com AO44.
+        explicit_business_plan = (
+            "business plan",
+            "businessplan",
+            "plano de negocios",
+            "plano de negócios",
+            "plano de negocio",
+            "plano empresarial",
+            "business case",
+        )
+        if any(term in normalized for term in explicit_business_plan):
+            return False
+
+        words = re.findall(r"[\wÀ-ÿ]+", normalized, flags=re.UNICODE)
+        if len(normalized) > 180 or len(words) > 24:
+            return False
+
+        followup_markers = (
+            "pode detalhar",
+            "detalha",
+            "detalhe",
+            "detalhar",
+            "aprofund",
+            "continua",
+            "continue",
+            "prossegue",
+            "prossiga",
+            "monte",
+            "monta",
+            "montar",
+            "faça",
+            "faca",
+            "gere",
+            "gera",
+            "crie",
+            "agora",
+            "e os numeros",
+            "e os números",
+            "os numeros",
+            "os números",
+            "projec",
+            "projeç",
+            "premissa",
+            "premissas",
+            "cenario",
+            "cenário",
+            "indicador",
+            "indicadores",
+            "financeiro",
+            "receita",
+            "margem",
+            "ebitda",
+            "break-even",
+            "breakeven",
+            "valuation",
+            "investidor",
+            "investidores",
+            "isso",
+            "esse",
+            "essa",
+            "disso",
+            "desse",
+            "dessa",
+            "adapt",
+            "transform",
+        )
+        return any(marker in normalized for marker in followup_markers)
+
+    def _ao45a_domain_from_text(text: str) -> str:
+        normalized = _ao45a_norm(text)
+        if any(term in normalized for term in (
+            "business plan",
+            "businessplan",
+            "plano de negocios",
+            "plano de negócios",
+            "plano adaptado",
+            "business plan architect",
+            "projeções financeiras",
+            "projecoes financeiras",
+            "modelo de negocio",
+            "modelo de negócio",
+        )):
+            return "business_plan"
+        if any(term in normalized for term in (
+            "valuation",
+            "valor da empresa",
+            "faixa indicativa",
+            "pre-money",
+            "premoney",
+            "post-money",
+            "postmoney",
+        )):
+            return "valuation"
+        if any(term in normalized for term in (
+            "go-to-market",
+            "go to market",
+            "gtm",
+            "estrategia",
+            "estratégia",
+            "mercado",
+            "posicionamento",
+            "investidor",
+            "investidores",
+        )):
+            return "strategy"
+        return ""
+
+    def _ao45a_sector_from_text(text: str) -> str:
+        normalized = _ao45a_norm(text)
+        if any(term in normalized for term in (
+            "clinica odontologica",
+            "clínica odontológica",
+            "consultorio odontologico",
+            "consultório odontológico",
+            "odontologia",
+            "odontologica",
+            "odontológica",
+            "dentista",
+            "dental",
+        )):
+            return "clinica_odontologica"
+        if _ao45a_domain_from_text(normalized) == "business_plan":
+            return "generic_sector"
+        return ""
+
+    def _ao45a_load_recent_chris_context(
+        db2: Session,
+        org_slug: str,
+        thread_id: Optional[str],
+        current_message: str,
+    ) -> Optional[Dict[str, Any]]:
+        if not thread_id or not _ao45a_is_short_chris_followup(current_message):
+            return None
+
+        try:
+            rows = (
+                db2.execute(
+                    select(Message)
+                    .where(Message.org_slug == org_slug, Message.thread_id == thread_id)
+                    .order_by(Message.created_at.desc())
+                    .limit(14)
+                )
+                .scalars()
+                .all()
+            )
+        except Exception:
+            try:
+                db2.rollback()
+            except Exception:
+                pass
+            try:
+                logger.exception("AO45A_RECENT_CONTEXT_LOAD_FAILED thread_id=%s", thread_id)
+            except Exception:
+                pass
+            return None
+
+        for row in rows:
+            content = _ao45a_message_content(row)
+            if not content:
+                continue
+
+            normalized = _ao45a_norm(content)
+            role = _ao45a_norm(
+                str(getattr(row, "role", "") or getattr(row, "sender", "") or getattr(row, "type", ""))
+            )
+
+            looks_like_assistant = (
+                "assistant" in role
+                or "chris" in normalized
+                or "business plan architect" in normalized
+                or "business plan + valuation pack" in normalized
+                or "plano adaptado" in normalized
+                or "valuation preliminar" in normalized
+            )
+            if not looks_like_assistant:
+                continue
+
+            domain = _ao45a_domain_from_text(normalized)
+            if domain not in ("business_plan", "valuation", "strategy"):
+                continue
+
+            sector = _ao45a_sector_from_text(normalized)
+            return {
+                "lead_agent": "Chris",
+                "domain": domain,
+                "sector": sector or "generic_sector",
+                "source_message_id": str(getattr(row, "id", "") or ""),
+                "source_excerpt": content[:1200],
+            }
+
+        return None
+
+    def _ao45a_build_chris_followup_answer(user_message: str, context: Dict[str, Any]) -> str:
+        normalized = _ao45a_norm(user_message)
+        domain = str((context or {}).get("domain") or "business_plan")
+        sector = str((context or {}).get("sector") or "generic_sector")
+
+        wants_numbers = any(term in normalized for term in (
+            "numero",
+            "número",
+            "numeros",
+            "números",
+            "projec",
+            "projeç",
+            "financeiro",
+            "receita",
+            "margem",
+            "ebitda",
+            "break-even",
+            "breakeven",
+            "valuation",
+            "investidor",
+            "investidores",
+        ))
+        wants_build = any(term in normalized for term in (
+            "monte",
+            "monta",
+            "montar",
+            "faça",
+            "faca",
+            "gere",
+            "gera",
+            "crie",
+            "transform",
+        ))
+
+        if sector == "clinica_odontologica" and wants_numbers:
+            return (
+                "Chris — Continuidade Contextual AO45A\n\n"
+                "Claro. Vou continuar o Business Plan da clínica odontológica pelo bloco financeiro, com premissas editáveis e números ilustrativos.\n\n"
+                "1. Premissas-base\n"
+                "- Estrutura inicial: 2 cadeiras odontológicas.\n"
+                "- Atendimento: 22 dias por mês.\n"
+                "- Ocupação inicial: 45% no cenário conservador, 65% no cenário base e 80% no cenário agressivo.\n"
+                "- Mix de receita: consultas/limpeza, restaurações, estética, ortodontia, implantes e próteses.\n"
+                "- Ticket médio inicial de referência: R$ 350 a R$ 900 por paciente, variando conforme o mix de procedimentos.\n\n"
+                "2. Cenário base ilustrativo\n"
+                "- 140 pacientes/mês com ticket médio de R$ 420: R$ 58.800/mês.\n"
+                "- Procedimentos de maior valor, como estética, ortodontia, implantes e próteses: R$ 18.000 a R$ 35.000/mês adicionais.\n"
+                "- Receita bruta mensal estimada: R$ 76.800 a R$ 93.800.\n"
+                "- Receita anualizada: R$ 921.600 a R$ 1.125.600.\n\n"
+                "3. Estrutura de custos\n"
+                "- Insumos, laboratório e materiais: 18% a 28% da receita.\n"
+                "- Equipe clínica e administrativa: 25% a 38% da receita.\n"
+                "- Aluguel, condomínio, energia, limpeza, software, contador e seguros: custo fixo mensal.\n"
+                "- Marketing e aquisição local: 6% a 12% da receita no ramp-up.\n\n"
+                "4. Indicadores que importam\n"
+                "- Receita por cadeira.\n"
+                "- Ocupação da agenda.\n"
+                "- Conversão de avaliação em tratamento.\n"
+                "- Ticket médio por procedimento.\n"
+                "- Margem por cadeira/profissional.\n"
+                "- CAC local e payback do CAC.\n"
+                "- Break-even mensal.\n\n"
+                "5. Leitura executiva\n"
+                "A clínica fica saudável quando a agenda atinge ocupação recorrente, o ticket médio sobe pelo mix de procedimentos e o CAC cai por indicação, recorrência e autoridade local.\n\n"
+                "Veredito da Chris\n"
+                "O próximo passo é transformar essas premissas em DRE mensal de 12 meses, com cenário conservador, base e agressivo."
+            )
+
+        if sector == "clinica_odontologica" and wants_build:
+            return (
+                "Chris — Continuidade Contextual AO45A\n\n"
+                "Perfeito. Vou montar a versão executiva do Business Plan da clínica odontológica.\n\n"
+                "1. Tese do negócio\n"
+                "Clínica odontológica posicionada como operação local de alta confiança, combinando atendimento recorrente, procedimentos de maior valor e relacionamento contínuo com pacientes.\n\n"
+                "2. Público-alvo\n"
+                "- Famílias da região.\n"
+                "- Adultos buscando estética, clareamento, próteses, implantes e ortodontia.\n"
+                "- Empresas locais para parcerias preventivas.\n"
+                "- Pacientes de convênio convertidos para tratamentos particulares de maior margem.\n\n"
+                "3. Modelo de receita\n"
+                "- Procedimentos avulsos.\n"
+                "- Tratamentos de maior ticket.\n"
+                "- Planos preventivos recorrentes.\n"
+                "- Parcerias locais e empresariais.\n\n"
+                "4. Operação\n"
+                "- Capacidade por cadeira.\n"
+                "- Agenda por profissional.\n"
+                "- Taxa de ocupação.\n"
+                "- Funil: lead → avaliação → diagnóstico → orçamento → tratamento → retorno.\n\n"
+                "5. Finanças\n"
+                "- Receita mensal por cadeira.\n"
+                "- Margem por procedimento.\n"
+                "- Custos clínicos variáveis.\n"
+                "- Despesas fixas.\n"
+                "- Break-even.\n"
+                "- Necessidade de capital inicial.\n\n"
+                "6. Crescimento\n"
+                "- Fase 1: estabilizar agenda e reputação local.\n"
+                "- Fase 2: aumentar ticket médio com procedimentos premium.\n"
+                "- Fase 3: contratar profissionais, expandir horários e criar recorrência.\n\n"
+                "Veredito da Chris\n"
+                "Este é um negócio com boa previsibilidade quando a gestão acompanha agenda, conversão, margem por procedimento e recorrência de pacientes."
+            )
+
+        if sector == "clinica_odontologica":
+            return (
+                "Chris — Continuidade Contextual AO45A\n\n"
+                "Claro. Vou detalhar o Business Plan da clínica odontológica a partir do contexto anterior.\n\n"
+                "1. O ponto central do plano\n"
+                "A clínica não deve ser analisada apenas como consultório, mas como uma operação de capacidade produtiva: cadeiras, horas disponíveis, profissionais, taxa de ocupação, ticket médio e margem por procedimento.\n\n"
+                "2. Onde o dinheiro é feito\n"
+                "- Ocupação da agenda.\n"
+                "- Mix de procedimentos com maior margem.\n"
+                "- Conversão da avaliação em tratamento.\n"
+                "- Retorno semestral/anual do paciente.\n"
+                "- Indicações e reputação local.\n\n"
+                "3. Onde o risco aparece\n"
+                "- Agenda ociosa.\n"
+                "- Dependência excessiva de convênios.\n"
+                "- Baixo controle de insumos e laboratório.\n"
+                "- Marketing sem medição de conversão.\n"
+                "- Falta de gestão por cadeira/profissional.\n\n"
+                "4. Como a plataforma deve estruturar o plano\n"
+                "- Diagnóstico do modelo operacional.\n"
+                "- Premissas financeiras.\n"
+                "- DRE projetado.\n"
+                "- Cenários conservador, base e agressivo.\n"
+                "- KPIs de operação clínica.\n"
+                "- Plano comercial local.\n"
+                "- Riscos e mitigação.\n\n"
+                "Veredito da Chris\n"
+                "A versão premium do plano deve mostrar não só a ideia da clínica, mas a máquina econômica por trás dela."
+            )
+
+        if wants_numbers or domain == "valuation":
+            return (
+                "Chris — Continuidade Contextual AO45A\n\n"
+                "Vamos continuar pelo bloco financeiro/valuation do plano anterior.\n\n"
+                "1. Premissas mínimas\n"
+                "- Receita mensal esperada.\n"
+                "- Ticket médio.\n"
+                "- Volume de clientes/vendas por mês.\n"
+                "- Custos diretos.\n"
+                "- Despesas fixas.\n"
+                "- Margem bruta.\n"
+                "- CAC, LTV e payback quando aplicável.\n"
+                "- Investimento inicial e necessidade de capital.\n\n"
+                "2. Estrutura de projeção\n"
+                "- Cenário conservador: ramp-up lento, menor conversão e maior CAC.\n"
+                "- Cenário base: crescimento progressivo e margem controlada.\n"
+                "- Cenário agressivo: maior ocupação, maior ticket e expansão comercial.\n\n"
+                "3. Valuation preliminar\n"
+                "- Deve ser indicativa, não laudo formal.\n"
+                "- Deve separar premissas, tração, risco, margem e comparáveis.\n"
+                "- Deve explicar por que o negócio merece a faixa proposta.\n\n"
+                "4. Saída recomendada\n"
+                "A próxima entrega ideal é uma DRE mensal de 12 a 24 meses, com receita, custos, EBITDA, caixa, break-even, necessidade de capital e faixa indicativa de valor.\n\n"
+                "Veredito da Chris\n"
+                "Consigo seguir com números, mas eles devem nascer de premissas explícitas para não virar chute bonito."
+            )
+
+        return (
+            "Chris — Continuidade Contextual AO45A\n\n"
+            "Claro. Vou continuar a partir do plano anterior, mantendo o mesmo contexto estratégico.\n\n"
+            "1. Próximo nível de detalhe\n"
+            "- Transformar a tese em estrutura operacional.\n"
+            "- Separar modelo de receita, custos, margem e canais.\n"
+            "- Definir premissas mensuráveis.\n"
+            "- Criar cenários conservador, base e agressivo.\n"
+            "- Identificar riscos e mitigadores.\n\n"
+            "2. Como a plataforma deve conduzir\n"
+            "- Primeiro entende o setor.\n"
+            "- Depois identifica os drivers econômicos.\n"
+            "- Em seguida monta projeções.\n"
+            "- Por fim consolida narrativa executiva para decisão, crédito ou investidor.\n\n"
+            "3. Entrega premium\n"
+            "O ideal é gerar um plano com resumo executivo, operação, mercado, finanças, indicadores, riscos e próximos passos claros.\n\n"
+            "Veredito da Chris\n"
+            "Vou preservar o contexto anterior e avançar como continuação, sem obrigar o usuário a repetir tudo."
+        )
+
+
     def _build_chris_strategic_squad_answer(text: str, *, db2: Session, org_slug: str) -> str:
         normalized = _normalize_router_text(text)
 
@@ -40080,6 +40518,78 @@ async def chat_stream(
         # AO01_CHRIS_STRATEGIC_SQUAD_FASTPATH_V1
         # Pedidos de valuation/estratégia para Chris/Cris devem responder em
         # trilho leve, com especialistas silenciosos e sem depender do runtime pesado.
+
+        # AO45A_CHRIS_CONTEXT_CONTINUITY_PREMIUM_V1
+        # Follow-ups curtos depois de respostas Chris/AO44 preservam a Chris e
+        # o domínio anterior da thread antes de cair no roteamento genérico.
+        try:
+            _ao45a_context = _ao45a_load_recent_chris_context(db, org, tid_seed, message)
+        except Exception:
+            _ao45a_context = None
+            try:
+                logger.exception("AO45A_CONTEXT_CONTINUITY_CHECK_FAILED trace_id=%s thread_id=%s", trace_id, tid_seed)
+            except Exception:
+                pass
+
+        if _ao45a_context:
+            try:
+                final_text = _ao45a_build_chris_followup_answer(message, _ao45a_context)
+                try:
+                    logger.warning(
+                        "AO45A_SHORT_FOLLOWUP_CHRIS_CONTEXT_PRESERVED trace_id=%s thread_id=%s domain=%s sector=%s source_message_id=%s",
+                        trace_id,
+                        tid_seed,
+                        _ao45a_context.get("domain"),
+                        _ao45a_context.get("sector"),
+                        _ao45a_context.get("source_message_id"),
+                    )
+                except Exception:
+                    pass
+
+                persisted = await asyncio.to_thread(
+                    _persist_assistant_message,
+                    text=final_text,
+                    thread_id=tid_seed,
+                    agent_id="chris",
+                    agent_name="Chris",
+                )
+                payload = {
+                    **(persisted or {}),
+                    "ok": True,
+                    "answer": final_text,
+                    "message": final_text,
+                    "final_text": final_text,
+                    "agent_id": "chris",
+                    "agent_name": "Chris",
+                    "service": "ao45a_chris_context_continuity",
+                    "provider": "platform",
+                    "status": "done",
+                    "runtime_hints": {
+                        "routing": {
+                            "routing_source": "stream_ao45a_chris_context_continuity_v1",
+                            "route_applied": True,
+                            "execution_lifecycle": "completed",
+                            "lead_agent": "Chris",
+                            "last_specialist_agent": "Chris",
+                            "last_specialist_domain": _ao45a_context.get("domain"),
+                            "last_specialist_sector": _ao45a_context.get("sector"),
+                            "last_specialist_answer_type": "contextual_followup",
+                            "ao45a_context_preserved": True,
+                            "dispatch_executed": True,
+                            "write_executed": False,
+                        }
+                    },
+                }
+                async for ev in _emit_result_payload(payload, routing_source="stream_ao45a_chris_context_continuity_v1"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHAT_STREAM_AO45A_CHRIS_CONTEXT_CONTINUITY_FAILED trace_id=%s thread_id=%s", trace_id, tid_seed)
+                except Exception:
+                    pass
+                # Se falhar, o fast-path Chris original e os guards seguem protegendo a UI.
+
         if _is_chris_strategic_squad_request(message):
             try:
                 payload = await asyncio.to_thread(_chris_strategic_squad_fastpath_in_isolated_session)
