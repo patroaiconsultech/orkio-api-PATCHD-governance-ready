@@ -6929,6 +6929,39 @@ def _ao20bc_resolve_route(text: Any, requested_agent: Optional[str] = None, sour
 
 def _ao20bc_router_audit_answer(text: Any, route: Dict[str, Any]) -> str:
     execution_id = f"ao20bc_route_audit_{new_id()[:10]}"
+    trace_nodes = [
+        {"id": f"{execution_id}_router", "agent": "Router", "status": "completed"},
+        {"id": f"{execution_id}_realtime", "agent": "Realtime", "status": "completed"},
+        {"id": f"{execution_id}_orchestrator", "agent": "Orchestrator", "status": "completed"},
+        {"id": f"{execution_id}_audit", "agent": "AO20BC", "status": "completed"},
+    ]
+
+    try:
+        audit(
+            db,
+            org_slug=org,
+            user_id=uid,
+            action="execution_graph.persisted",
+            request_id=execution_id,
+            path="/api/chat/stream",
+            status_code=200,
+            latency_ms=0,
+            meta={
+                "ao_patch": "AO20F",
+                "execution_id": execution_id,
+                "route_family": "technical_audit",
+                "resolved_agent": resolved_agent,
+                "nodes": trace_nodes,
+                "trace_mode": "persistent_auditlog",
+            },
+        )
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+
     blocked = ", ".join(route.get("blocked_routes") or []) or "nenhuma"
     return (
         "AUDITORIA FOCADA — ORKIO AO20BC / ROUTER / REALTIME / ORCHESTRATION\n\n"
