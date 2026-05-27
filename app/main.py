@@ -38792,6 +38792,27 @@ async def chat_stream(
                     "sem aprovação humana explícita."
                 )
 
+            elif (
+                # AO42C_SPECIALIST_PRECEDENCE_REFINEMENT
+                _ao01_readonly_audit
+                and any(x in lowered for x in ("@orion", "@chris", "@orkio"))
+            ):
+                _hf4k_kind = "specialist_readonly_audit"
+                _hf4k_final_text = (
+                    "SPECIALIST READONLY AUDIT — AO42C\n\n"
+                    "1. Diagnóstico objetivo\n"
+                    "Pedido readonly com @mention explícito detectado. O fluxo leve HF6R1 foi bloqueado para preservar a precedência do especialista solicitado.\n\n"
+                    "2. Garantias\n"
+                    "- proposal_created=false\n"
+                    "- proposal_only=false\n"
+                    "- write_executed=false\n"
+                    "- branch_created=false\n"
+                    "- pr_created=false\n"
+                    "- deploy_executed=false\n\n"
+                    "3. Veredito\n"
+                    "GO para auditoria readonly do especialista. NO-GO para proposal, escrita, branch, PR ou deploy."
+                )
+
             elif _ao01_readonly_audit:
                 _hf4k_kind = "readonly_audit_light"
                 _hf4k_final_text = (
