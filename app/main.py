@@ -40146,6 +40146,173 @@ async def chat_stream(
                 except Exception:
                     pass
 
+            # AO46A_CONTEXT_SNAPSHOT_FASTPATH
+            # Contexto/perfil/próximo passo devem responder localmente, sem runtime pesado.
+            if not str(_hf4k_kind or "").strip():
+                try:
+                    _ao46a_raw = str(message or "").strip()
+                    try:
+                        _ao46a_norm = _normalize_router_text(_ao46a_raw)
+                    except Exception:
+                        _ao46a_norm = " ".join(_ao46a_raw.lower().split())
+
+                    _ao46a_plain = re.sub(r"^\s*@(?:orkio|team|chris|orion)\s+", "", _ao46a_norm, flags=re.IGNORECASE).strip()
+                    _ao46a_words = re.findall(r"[\wÀ-ÿ]+", _ao46a_plain, flags=re.UNICODE)
+                    _ao46a_short = len(_ao46a_plain) <= 180 and len(_ao46a_words) <= 28
+
+                    _ao46a_is_context = any(x in _ao46a_plain for x in (
+                        "qual e meu contexto", "qual é meu contexto",
+                        "qual e o meu contexto", "qual é o meu contexto",
+                        "meu contexto atual", "contexto atual",
+                        "o que voce sabe sobre mim", "o que você sabe sobre mim",
+                        "o que sabe sobre mim", "meu perfil", "meu onboarding", "minha conta",
+                    ))
+
+                    _ao46a_is_next = any(x in _ao46a_plain for x in (
+                        "qual e o proximo passo recomendado", "qual é o próximo passo recomendado",
+                        "qual o proximo passo recomendado", "qual o próximo passo recomendado",
+                        "proximo passo recomendado", "próximo passo recomendado",
+                        "qual e o proximo passo", "qual é o próximo passo",
+                        "qual o proximo passo", "qual o próximo passo",
+                    ))
+
+                    _ao46a_blocked = any(x in _ao46a_plain for x in (
+                        "github", "repo", "repositorio", "repositório", "codespace",
+                        "terminal", "log", "logs", "patch", "deploy", "branch",
+                        "commit", "pull request", "backend", "frontend", "api",
+                        "migration", "migração", "migracao", "erro", "bug",
+                        "traceback", "exception",
+                    ))
+
+                    if _ao46a_short and not _ao46a_blocked and (_ao46a_is_context or _ao46a_is_next):
+                        _ao46a_profile = {}
+                        _ao46a_db = None
+
+                        try:
+                            _ao46a_user_payload = user if isinstance(user, dict) else {}
+                        except Exception:
+                            _ao46a_user_payload = {}
+
+                        try:
+                            _ao46a_uid = str((_ao46a_user_payload or {}).get("sub") or "").strip()
+                            if _ao46a_uid:
+                                _ao46a_db = SessionLocal()
+                                _ao46a_u = _ao46a_db.execute(
+                                    select(User).where(User.id == _ao46a_uid, User.org_slug == org)
+                                ).scalar_one_or_none()
+                                if _ao46a_u:
+                                    _ao46a_profile = {
+                                        "name": getattr(_ao46a_u, "name", None),
+                                        "email": getattr(_ao46a_u, "email", None),
+                                        "company": getattr(_ao46a_u, "company", None),
+                                        "profile_role": getattr(_ao46a_u, "profile_role", None),
+                                        "user_type": getattr(_ao46a_u, "user_type", None),
+                                        "intent": getattr(_ao46a_u, "intent", None),
+                                        "notes": getattr(_ao46a_u, "notes", None),
+                                        "country": getattr(_ao46a_u, "country", None),
+                                        "language": getattr(_ao46a_u, "language", None),
+                                        "usage_tier": getattr(_ao46a_u, "usage_tier", None),
+                                        "signup_source": getattr(_ao46a_u, "signup_source", None),
+                                        "signup_code_label": getattr(_ao46a_u, "signup_code_label", None),
+                                        "product_scope": getattr(_ao46a_u, "product_scope", None),
+                                        "onboarding_completed": bool(getattr(_ao46a_u, "onboarding_completed", False)),
+                                    }
+                        except Exception:
+                            try:
+                                logger.exception("AO46A_CONTEXT_SNAPSHOT_PROFILE_LOOKUP_FAILED trace_id=%s", trace_id)
+                            except Exception:
+                                pass
+                        finally:
+                            if _ao46a_db is not None:
+                                try:
+                                    _ao46a_db.close()
+                                except Exception:
+                                    pass
+
+                        def _ao46a_pick(*vals, default="não informado"):
+                            for _v in vals:
+                                _s = str(_v or "").strip()
+                                if _s:
+                                    return _s
+                            return default
+
+                        def _ao46a_user_type_label(v):
+                            raw = str(v or "").strip().lower()
+                            return {
+                                "founder": "Fundador(a)",
+                                "investor": "Investidor(a)",
+                                "operator": "Operador(a)",
+                                "partner": "Parceiro(a)",
+                                "other": "Outro",
+                            }.get(raw, _ao46a_pick(v))
+
+                        def _ao46a_intent_label(v):
+                            raw = str(v or "").strip().lower()
+                            return {
+                                "explore": "Explorar a plataforma",
+                                "meeting": "Preparar conversa/reunião",
+                                "pilot": "Avaliar piloto",
+                                "funding": "Captação/investimento",
+                                "other": "Outro",
+                            }.get(raw, _ao46a_pick(v))
+
+                        _ao46a_name = _ao46a_pick(_ao46a_profile.get("name"), (_ao46a_user_payload or {}).get("name"), default="usuário")
+                        _ao46a_email = _ao46a_pick(_ao46a_profile.get("email"), (_ao46a_user_payload or {}).get("email"))
+                        _ao46a_company = _ao46a_pick(_ao46a_profile.get("company"))
+                        _ao46a_role = _ao46a_pick(_ao46a_profile.get("profile_role"), (_ao46a_user_payload or {}).get("role"))
+                        _ao46a_user_type = _ao46a_user_type_label(_ao46a_profile.get("user_type"))
+                        _ao46a_intent = _ao46a_intent_label(_ao46a_profile.get("intent"))
+                        _ao46a_country = _ao46a_pick(_ao46a_profile.get("country"), default="BR")
+                        _ao46a_language = _ao46a_pick(_ao46a_profile.get("language"), default="pt-BR")
+                        _ao46a_onboarding = "concluído" if bool(_ao46a_profile.get("onboarding_completed")) else "pendente"
+                        _ao46a_scope = _ao46a_pick(
+                            _ao46a_profile.get("product_scope"),
+                            _ao46a_profile.get("signup_source"),
+                            _ao46a_profile.get("signup_code_label"),
+                            _ao46a_profile.get("usage_tier"),
+                        )
+                        _ao46a_notes = _ao46a_pick(_ao46a_profile.get("notes"), default="")
+                        if len(_ao46a_notes) > 300:
+                            _ao46a_notes = _ao46a_notes[:297].rstrip() + "..."
+
+                        _ao46a_next = "Montar um plano de teste para 5 usuários beta, com primeira vitória visível em menos de 10 minutos."
+                        if str(_ao46a_intent).lower().startswith("avaliar piloto"):
+                            _ao46a_next = "Montar um roteiro de piloto com critérios de sucesso, riscos e próximos 7 dias."
+                        elif str(_ao46a_intent).lower().startswith("captação"):
+                            _ao46a_next = "Organizar uma narrativa executiva com problema, solução, tração, mercado e próximos marcos."
+                        elif str(_ao46a_user_type).lower().startswith("fundador"):
+                            _ao46a_next = "Definir a primeira vitória visível para o usuário beta e medir se ela acontece em menos de 10 minutos."
+
+                        _hf4k_kind = "premium_context_snapshot"
+                        _hf4k_final_text = (
+                            "Orkio — contexto atual preservado\n\n"
+                            "1. Identidade\n"
+                            f"- Nome: {_ao46a_name}\n"
+                            f"- Email: {_ao46a_email}\n"
+                            f"- Organização: {org}\n\n"
+                            "2. Perfil operacional\n"
+                            f"- Empresa/projeto: {_ao46a_company}\n"
+                            f"- Papel/cargo: {_ao46a_role}\n"
+                            f"- Perfil: {_ao46a_user_type}\n"
+                            f"- Objetivo atual: {_ao46a_intent}\n"
+                            f"- País/idioma: {_ao46a_country} · {_ao46a_language}\n"
+                            f"- Onboarding: {_ao46a_onboarding}\n"
+                            f"- Escopo/acesso: {_ao46a_scope}\n"
+                        )
+                        if _ao46a_notes:
+                            _hf4k_final_text += f"\n3. Notas de contexto\n- {_ao46a_notes}\n"
+                        _hf4k_final_text += (
+                            "\n4. Próximo passo recomendado\n"
+                            f"- {_ao46a_next}\n\n"
+                            "Posso seguir com uma leitura executiva ou transformar isso em plano de teste para usuários beta."
+                        )
+                except Exception:
+                    try:
+                        logger.exception("AO46A_CONTEXT_SNAPSHOT_FASTPATH_FAILED trace_id=%s", trace_id)
+                    except Exception:
+                        pass
+
+
             # AO20K-HF4U_AGENT_FASTPATH_DISPLAY_NAME
             _hf4k_agent_name = "Orkio"
             try:
@@ -40182,6 +40349,7 @@ async def chat_stream(
                 "governed_pipeline_inventory_readonly": "governed_pipeline_inventory_readonly",
                 "issue_map_patch_plan_readonly": "issue_map_patch_plan_readonly",
                 "memory_lookup_readonly": "memory_lookup_readonly",
+                "premium_context_snapshot": "context_snapshot_fastpath",
             }.get(str(_hf4k_kind or ""), "safe_fastpath_coverage")
 
             _hf6r1_route_priority = {
@@ -40201,6 +40369,7 @@ async def chat_stream(
                 "controlled_evolution_readonly": 100,
                 "memory_lookup_readonly": 110,
                 "simple_status": 120,
+                "premium_context_snapshot": 65,
             }.get(str(_hf4k_kind or ""), 999)
 
             if _hf4k_kind and _hf4k_final_text:
