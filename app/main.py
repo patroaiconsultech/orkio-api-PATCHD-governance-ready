@@ -38317,7 +38317,7 @@ async def chat_stream(
                     or "runtime principal" in _ao01c_norm
                     or "provider pesado" in _ao01c_norm
                     or "fallback seguro" in _ao01c_norm
-                    or "ao20bc" in _ao01c_norm
+                    or ("ao20bc" in _ao01c_norm and any(x in _ao01c_norm for x in ("token interno", "diagnóstico interno", "diagnostico interno", "chat_stream_runtime_timeout")))
                 )
             )
 
