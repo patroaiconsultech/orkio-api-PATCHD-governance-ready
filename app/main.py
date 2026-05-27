@@ -33152,6 +33152,133 @@ async def chat_stream(
             except Exception:
                 pass
 
+            # AO44D: Business Plan Sector Adapter.
+            # When the user names a sector, adapt the plan instead of returning only the generic capability map.
+            ao44d_dental_requested = any(
+                key in normalized
+                for key in (
+                    "clinica odontologica",
+                    "clínica odontológica",
+                    "consultorio odontologico",
+                    "consultório odontológico",
+                    "odontologia",
+                    "odontologica",
+                    "odontológica",
+                    "dentista",
+                    "dental",
+                )
+            )
+            ao44d_sector_requested = (
+                ao44d_dental_requested
+                or " business plan para " in f" {normalized} "
+                or "plano de negocio para" in normalized
+                or "plano de negocios para" in normalized
+                or "plano de negócios para" in normalized
+                or "para uma " in normalized
+                or "para um " in normalized
+            )
+
+            if ao44d_dental_requested:
+                try:
+                    logger.warning(
+                        "AO44D_BUSINESS_PLAN_SECTOR_ADAPTER trace_id=%s thread_id=%s sector=%s",
+                        trace_id,
+                        tid_seed,
+                        "clinica_odontologica",
+                    )
+                except Exception:
+                    pass
+
+                return (
+                    "Chris — Business Plan Architect Universal\n\n"
+                    "Plano adaptado: clínica odontológica.\n\n"
+                    "Sim. A plataforma consegue criar um Business Plan específico para uma clínica odontológica, com projeções financeiras, indicadores operacionais, cenários e premissas explícitas.\n\n"
+
+                    "1. Modelo de negócio da clínica\n"
+                    "- Receita por procedimentos particulares, convênios, planos recorrentes, ortodontia, estética, implantes, próteses, prevenção e urgências.\n"
+                    "- Capacidade produtiva baseada em cadeiras odontológicas, horas disponíveis, agenda, taxa de ocupação e número de profissionais.\n"
+                    "- Canais de aquisição: tráfego local, indicações, Google, Instagram, parcerias, convênios, relacionamento com empresas e recorrência de pacientes.\n\n"
+
+                    "2. Drivers financeiros principais\n"
+                    "- Pacientes atendidos por mês.\n"
+                    "- Ticket médio por paciente e por procedimento.\n"
+                    "- Mix de procedimentos: limpeza, restauração, clareamento, ortodontia, implante, prótese e estética.\n"
+                    "- Taxa de retorno e recorrência semestral/anual.\n"
+                    "- Ocupação da agenda por cadeira e por dentista.\n"
+                    "- Receita particular versus convênio.\n"
+                    "- CAC local e custo por agendamento.\n"
+                    "- Conversão de lead em avaliação e de avaliação em tratamento.\n\n"
+
+                    "3. Custos e despesas que precisam entrar\n"
+                    "- Dentistas, auxiliares, recepção e administração.\n"
+                    "- Insumos odontológicos, laboratório protético, esterilização, descartáveis e materiais clínicos.\n"
+                    "- Aluguel, condomínio, energia, água, internet, limpeza, manutenção e seguros.\n"
+                    "- Equipamentos, depreciação, financiamento ou leasing.\n"
+                    "- Marketing, tráfego pago, comissões, software de gestão, contabilidade, jurídico e taxas de cartão.\n\n"
+
+                    "4. Indicadores essenciais\n"
+                    "- Receita mensal, margem bruta, margem EBITDA e lucro operacional.\n"
+                    "- Ticket médio, pacientes/mês, taxa de ocupação, taxa de conversão e taxa de retorno.\n"
+                    "- CAC, payback do CAC, break-even, burn rate, runway e necessidade de capital.\n"
+                    "- Receita por cadeira, receita por profissional e margem por procedimento.\n\n"
+
+                    "5. Cenários recomendados\n"
+                    "- Conservador: baixa ocupação inicial, CAC maior e ramp-up mais lento.\n"
+                    "- Base: ocupação progressiva, mix equilibrado e crescimento orgânico com marketing local.\n"
+                    "- Agressivo: alta conversão, procedimentos de maior ticket, parcerias e expansão de agenda/equipe.\n\n"
+
+                    "6. Dados mínimos para calcular com precisão\n"
+                    "- Cidade/bairro, número de cadeiras, dias e horas de atendimento.\n"
+                    "- Quantidade de dentistas e equipe.\n"
+                    "- Ticket médio esperado por procedimento.\n"
+                    "- Meta de pacientes/mês.\n"
+                    "- Custos fixos mensais.\n"
+                    "- Custo médio de insumos/laboratório por procedimento.\n"
+                    "- Investimento inicial em ponto, obra, equipamentos e marketing.\n"
+                    "- Percentual particular versus convênio.\n\n"
+
+                    "Veredito da Chris\n"
+                    "Sim: para uma clínica odontológica, a plataforma deve montar um Business Plan real, com projeção de receita, custos, margem, capacidade produtiva, break-even, indicadores por cadeira/profissional e cenários de crescimento."
+                )
+
+            if ao44d_sector_requested:
+                try:
+                    logger.warning(
+                        "AO44D_BUSINESS_PLAN_SECTOR_ADAPTER trace_id=%s thread_id=%s sector=%s",
+                        trace_id,
+                        tid_seed,
+                        "generic_sector",
+                    )
+                except Exception:
+                    pass
+
+                return (
+                    "Chris — Business Plan Architect Universal\n\n"
+                    "Sim. A plataforma consegue criar um Business Plan setorial para o negócio informado. Para ser realmente cirúrgica, ela deve primeiro identificar o setor, o modelo de receita, os custos diretos, a estrutura operacional e os indicadores críticos daquele tipo de empresa.\n\n"
+                    "1. Estrutura que será adaptada ao setor\n"
+                    "- Proposta de valor e público-alvo.\n"
+                    "- Modelo de receita e precificação.\n"
+                    "- Capacidade produtiva ou capacidade de atendimento.\n"
+                    "- Custos diretos e margem bruta.\n"
+                    "- Despesas fixas e equipe.\n"
+                    "- Canais de aquisição e CAC.\n"
+                    "- Projeções de receita, custos, margem, caixa e break-even.\n"
+                    "- Cenários conservador, base e agressivo.\n\n"
+                    "2. Indicadores mínimos\n"
+                    "- Ticket médio, volume mensal, margem bruta, EBITDA, CAC, LTV quando aplicável, payback, break-even, necessidade de capital e runway.\n\n"
+                    "3. Dados que preciso para montar o plano\n"
+                    "- Tipo exato de negócio.\n"
+                    "- Produto ou serviço vendido.\n"
+                    "- Preço/ticket médio.\n"
+                    "- Volume esperado de vendas ou clientes.\n"
+                    "- Custos diretos por venda ou entrega.\n"
+                    "- Despesas fixas mensais.\n"
+                    "- Investimento inicial.\n"
+                    "- Prazo de projeção e objetivo do plano.\n\n"
+                    "Próximo comando ideal\n"
+                    "Diga: 'Chris, monte o Business Plan para [tipo de negócio], com ticket médio de [valor], custo direto de [valor/%], despesa fixa de [valor] e meta de [clientes ou vendas] por mês.'"
+                )
+
             return (
                 "Chris — Business Plan Architect Universal\n\n"
                 "Sim. A plataforma Orkio tem capacidade de criar um Business Plan completo, cirúrgico e financeiramente estruturado "
