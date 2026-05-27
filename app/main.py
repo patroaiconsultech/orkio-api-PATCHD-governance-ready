@@ -35116,6 +35116,170 @@ async def chat_stream(
         checkpoint = _orion_checkpoint_context()
         raw = _normalize_router_text(text)
 
+        # AO46B_EXECUTIVE_READING_FASTPATH
+        # Leitura executiva premium para o primeiro CTA do console.
+        # Não cria proposta, não executa patch, não escreve em repo e não depende do runtime pesado.
+        wants_premium_executive_reading = (
+            (
+                "leitura executiva" in raw
+                or "prioridade mais importante" in raw
+                or "proximo melhor passo" in raw
+                or "próximo melhor passo" in raw
+                or "prioridade agora" in raw
+                or "o que devemos fazer agora" in raw
+                or "maior impacto" in raw
+                or "menor risco" in raw
+            )
+            and not any(x in raw for x in (
+                "github", "repo", "repositorio", "repositório",
+                "patch", "deploy", "branch", "commit", "pull request",
+                "migration", "migração", "migracao",
+                "traceback", "exception", "logs", "terminal",
+                "war room", "warroom", "autoevolucao", "autoevolução",
+                "proposal", "proposta", "dry-run", "dry run",
+            ))
+        )
+
+        if wants_premium_executive_reading:
+            try:
+                _ao46b_profile = {}
+                _ao46b_db = None
+                try:
+                    _ao46b_user_payload = user if isinstance(user, dict) else {}
+                except Exception:
+                    _ao46b_user_payload = {}
+
+                try:
+                    _ao46b_uid = str((_ao46b_user_payload or {}).get("sub") or "").strip()
+                    if _ao46b_uid:
+                        _ao46b_db = SessionLocal()
+                        _ao46b_u = _ao46b_db.execute(
+                            select(User).where(User.id == _ao46b_uid, User.org_slug == org)
+                        ).scalar_one_or_none()
+                        if _ao46b_u:
+                            _ao46b_profile = {
+                                "name": getattr(_ao46b_u, "name", None),
+                                "email": getattr(_ao46b_u, "email", None),
+                                "company": getattr(_ao46b_u, "company", None),
+                                "profile_role": getattr(_ao46b_u, "profile_role", None),
+                                "user_type": getattr(_ao46b_u, "user_type", None),
+                                "intent": getattr(_ao46b_u, "intent", None),
+                                "notes": getattr(_ao46b_u, "notes", None),
+                                "country": getattr(_ao46b_u, "country", None),
+                                "language": getattr(_ao46b_u, "language", None),
+                                "usage_tier": getattr(_ao46b_u, "usage_tier", None),
+                                "signup_source": getattr(_ao46b_u, "signup_source", None),
+                                "signup_code_label": getattr(_ao46b_u, "signup_code_label", None),
+                                "product_scope": getattr(_ao46b_u, "product_scope", None),
+                                "onboarding_completed": bool(getattr(_ao46b_u, "onboarding_completed", False)),
+                            }
+                except Exception:
+                    try:
+                        logger.exception("AO46B_EXECUTIVE_READING_PROFILE_LOOKUP_FAILED trace_id=%s", trace_id)
+                    except Exception:
+                        pass
+                finally:
+                    if _ao46b_db is not None:
+                        try:
+                            _ao46b_db.close()
+                        except Exception:
+                            pass
+
+                def _ao46b_pick(*vals, default="não informado"):
+                    for _v in vals:
+                        _s = str(_v or "").strip()
+                        if _s:
+                            return _s
+                    return default
+
+                def _ao46b_label_intent(v):
+                    raw_intent = str(v or "").strip().lower()
+                    return {
+                        "explore": "explorar a plataforma e validar valor percebido",
+                        "meeting": "preparar conversa ou reunião executiva",
+                        "pilot": "avaliar piloto com critérios claros de sucesso",
+                        "funding": "organizar narrativa para captação/investimento",
+                        "other": "explorar uma próxima ação útil",
+                    }.get(raw_intent, _ao46b_pick(v, default="explorar uma próxima ação útil"))
+
+                _ao46b_name = _ao46b_pick(_ao46b_profile.get("name"), (_ao46b_user_payload or {}).get("name"), default="usuário")
+                _ao46b_company = _ao46b_pick(_ao46b_profile.get("company"), default="seu projeto")
+                _ao46b_role = _ao46b_pick(_ao46b_profile.get("profile_role"), (_ao46b_user_payload or {}).get("role"))
+                _ao46b_intent = _ao46b_label_intent(_ao46b_profile.get("intent"))
+                _ao46b_language = _ao46b_pick(_ao46b_profile.get("language"), default="pt-BR")
+                _ao46b_scope = _ao46b_pick(
+                    _ao46b_profile.get("product_scope"),
+                    _ao46b_profile.get("signup_source"),
+                    _ao46b_profile.get("signup_code_label"),
+                    _ao46b_profile.get("usage_tier"),
+                )
+                _ao46b_onboarding = "concluído" if bool(_ao46b_profile.get("onboarding_completed")) else "pendente"
+
+                _ao46b_priority = (
+                    "transformar a primeira experiência em uma vitória concreta e rápida para usuários beta."
+                )
+                _ao46b_low_risk = (
+                    "começar com um fluxo guiado de leitura executiva e plano de teste, sem depender de runtime pesado ou automações sensíveis."
+                )
+                _ao46b_next = (
+                    "rodar um teste com 5 usuários: cada um deve entrar, entender o contexto, receber uma recomendação clara e conseguir pedir o próximo passo em menos de 10 minutos."
+                )
+
+                if "pilot" in str(_ao46b_profile.get("intent") or "").lower():
+                    _ao46b_priority = "converter a avaliação em um piloto mensurável, com critérios de sucesso explícitos."
+                    _ao46b_low_risk = "limitar o piloto a uma jornada principal, poucos usuários e feedback qualitativo estruturado."
+                    _ao46b_next = "definir 3 critérios de sucesso do piloto, 5 usuários-alvo e um roteiro de validação de 7 dias."
+                elif "funding" in str(_ao46b_profile.get("intent") or "").lower():
+                    _ao46b_priority = "organizar uma narrativa executiva clara para demonstrar problema, solução, tração e próximos marcos."
+                    _ao46b_low_risk = "validar a narrativa com evidências reais antes de ampliar promessas ou valuation."
+                    _ao46b_next = "montar uma versão curta de pitch com problema, solução, mercado, diferenciais, prova e próximos marcos."
+                elif "founder" in str(_ao46b_profile.get("user_type") or "").lower():
+                    _ao46b_priority = "provar rapidamente que a plataforma gera valor percebido antes de expandir escopo."
+                    _ao46b_low_risk = "focar em uma jornada principal e medir reação de usuários reais."
+                    _ao46b_next = "selecionar 5 usuários beta, observar a primeira sessão e medir clareza, confiança e ação tomada."
+
+                return (
+                    "Orion — leitura executiva inicial AO46B\n\n"
+                    "1. Diagnóstico objetivo\n"
+                    f"- Usuário/contexto: {_ao46b_name}.\n"
+                    f"- Projeto/empresa: {_ao46b_company}.\n"
+                    f"- Papel informado: {_ao46b_role}.\n"
+                    f"- Objetivo atual: {_ao46b_intent}.\n"
+                    f"- Onboarding: {_ao46b_onboarding}.\n"
+                    f"- Escopo/acesso: {_ao46b_scope}.\n"
+                    f"- Idioma base: {_ao46b_language}.\n\n"
+                    "2. Prioridade de maior impacto agora\n"
+                    f"- {_ao46b_priority}\n\n"
+                    "3. Menor risco operacional\n"
+                    f"- {_ao46b_low_risk}\n\n"
+                    "4. Próximo melhor passo\n"
+                    f"- {_ao46b_next}\n\n"
+                    "5. Plano de validação com 5 usuários beta\n"
+                    "- Usuário 1: testar clareza da primeira tela e onboarding.\n"
+                    "- Usuário 2: testar pergunta “qual é meu contexto atual?”.\n"
+                    "- Usuário 3: testar leitura executiva inicial.\n"
+                    "- Usuário 4: testar pedido de plano prático ou Business Plan.\n"
+                    "- Usuário 5: testar continuidade: pergunta curta depois de uma resposta especialista.\n\n"
+                    "6. Métricas de sucesso\n"
+                    "- O usuário entende o que fazer em até 60 segundos.\n"
+                    "- O primeiro valor útil aparece em menos de 10 minutos.\n"
+                    "- Nenhum fluxo crítico cai em timeout.\n"
+                    "- A resposta deixa uma próxima ação clara.\n\n"
+                    "7. Governança\n"
+                    "- Modo readonly.\n"
+                    "- proposal_created=false.\n"
+                    "- write_executed=false.\n"
+                    "- branch_created=false.\n"
+                    "- deploy_executed=false.\n\n"
+                    "Veredito Orion\n"
+                    "GO para validação beta controlada deste fluxo. NO-GO para ampliar usuários antes de validar leitura executiva, relatório executivo e fallback útil de runtime."
+                )
+            except Exception:
+                try:
+                    logger.exception("AO46B_EXECUTIVE_READING_FASTPATH_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+
         # AO19E_INTERNAL_ORCHESTRATION_AUDIT_ROUTER
         # This request must never fall back to stale AO-15/AO-16/AO-17 templates.
         wants_internal_orchestration_audit = (
