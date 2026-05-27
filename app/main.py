@@ -23262,6 +23262,63 @@ def chat(
         except Exception:
             pass
 
+        # AO44A: Business Plan intent must take precedence over valuation.
+        # Business plan includes valuation as one section, but must not be routed as valuation-first.
+        try:
+            _ao44a_text = str(inp.message or "").strip().lower()
+            _ao44a_business_plan_requested = (
+                not blocked_reply
+                and any(
+                    _ao44a_key in _ao44a_text
+                    for _ao44a_key in (
+                        "business plan",
+                        "businessplan",
+                        "plano de negócios",
+                        "plano de negocio",
+                        "plano de negócios",
+                        "plano empresarial",
+                        "business case",
+                        "plano estratégico da empresa",
+                        "plano estrategico da empresa",
+                        "capacidade de criar um bom business",
+                        "capacidade de criar um business",
+                    )
+                )
+            )
+
+            if _ao44a_business_plan_requested:
+                answer = (
+                    "Sim. A plataforma Orkio tem capacidade de criar um bom Business Plan porque combina contexto do fundador, "
+                    "agentes especializados, análise estratégica, produto, tecnologia, operação, go-to-market, riscos, narrativa para investidores "
+                    "e modelagem financeira em um fluxo único.\n\n"
+                    "A estrutura recomendada do Business Plan é:\n"
+                    "1. resumo executivo;\n"
+                    "2. problema e oportunidade;\n"
+                    "3. solução PatroAI / Orkio;\n"
+                    "4. mercado-alvo e ICP;\n"
+                    "5. modelo de negócio;\n"
+                    "6. go-to-market;\n"
+                    "7. produto, tecnologia e governança;\n"
+                    "8. diferenciais competitivos;\n"
+                    "9. operação e roadmap;\n"
+                    "10. projeções financeiras;\n"
+                    "11. valuation como seção do plano;\n"
+                    "12. riscos, mitigação e tese para investidores.\n\n"
+                    "A Chris pode liderar estratégia, mercado, posicionamento, valuation e narrativa; Orion pode auditar tecnologia, governança e execução; "
+                    "e Orkio pode consolidar tudo em um documento executivo claro."
+                )
+                try:
+                    logger.warning(
+                        "AO44A_BUSINESS_PLAN_INTENT_APPLIED trace_id=%s thread_id=%s chars=%s",
+                        ao32_trace_id,
+                        tid,
+                        len(answer),
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         if direct_runtime_result and direct_runtime_result.get("ok") and answer:
             dispatch_routing_receipt["dispatch_executed"] = True
             dispatch_routing_receipt["synthetic_fallback"] = False
