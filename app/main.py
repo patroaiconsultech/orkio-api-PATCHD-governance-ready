@@ -39374,8 +39374,21 @@ async def chat_stream(
                 "agent": "Orion" if "@orion" in _ao42d_lowered else ("Chris" if "@chris" in _ao42d_lowered else "Orkio"),
                 "runtime_hints": {
                     "routing": {
+                        # AO43_UNIFIED_TRACE_POLISH
                         "routing_source": "stream_ao42d_specialist_readonly_precedence",
                         "route_family": "specialist_readonly_audit",
+                        "display_label": "readonly specialist audit",
+                        "execution_lifecycle": "specialist_readonly_audit_lite",
+                        "specialist_mode": "readonly",
+                        "execution_depth": "lite",
+                        "trace_lite": True,
+                        "distributed_runtime": False,
+                        "persistent_execution_graph": False,
+                        "dispatch_requested": False,
+                        "dispatch_runtime_executed": False,
+                        "dispatch_semantic_resolution": True,
+                        "provider_called": False,
+                        "governance_write": False,
                         "proposal_created": False,
                         "proposal_only": False,
                         "write_executed": False,
