@@ -33141,9 +33141,11 @@ async def chat_stream(
         )
 
         if ao44b_business_plan_requested:
+            # AO44C: generic Business Plan Builder capability.
+            # Supports any business type with assumptions, projections, KPIs and scenarios.
             try:
                 logger.warning(
-                    "AO44B_BUSINESS_PLAN_BEATS_CHRIS_VALUATION trace_id=%s thread_id=%s",
+                    "AO44C_GENERIC_BUSINESS_PLAN_BUILDER trace_id=%s thread_id=%s",
                     trace_id,
                     tid_seed,
                 )
@@ -33151,33 +33153,65 @@ async def chat_stream(
                 pass
 
             return (
-                "Chris — Business Plan Architect\n\n"
-                "Sim. A plataforma Orkio tem capacidade de criar um bom Business Plan porque combina contexto do fundador, "
-                "agentes especializados, estratégia, produto, tecnologia, operação, go-to-market, riscos, narrativa para investidores "
-                "e modelagem financeira em um fluxo único.\n\n"
-                "1. Capacidade da plataforma\n"
-                "- Orkio pode organizar o plano a partir do contexto da PatroAI, do fundador, da tecnologia, do mercado e dos objetivos de captação ou comercialização.\n"
-                "- Chris lidera estratégia, posicionamento, mercado, modelo de negócio, valuation e narrativa.\n"
-                "- Orion complementa com arquitetura, governança, tecnologia, riscos técnicos e execução.\n"
-                "- Orkio consolida tudo em um documento executivo claro e utilizável.\n\n"
-                "2. Estrutura recomendada do Business Plan\n"
-                "- Resumo executivo.\n"
-                "- Problema e oportunidade.\n"
-                "- Solução PatroAI / Orkio.\n"
-                "- Mercado-alvo, ICP e dores prioritárias.\n"
-                "- Produto, tecnologia, agentes e governança.\n"
-                "- Modelo de negócio e monetização.\n"
-                "- Go-to-market e canais.\n"
-                "- Diferenciais competitivos e propriedade intelectual.\n"
-                "- Operação, roadmap e milestones.\n"
-                "- Projeções financeiras, MRR, ARR, custos e unit economics.\n"
-                "- Valuation como seção do plano, não como resposta principal.\n"
-                "- Riscos, mitigação e tese para investidores.\n\n"
-                "3. Próximo passo recomendado\n"
-                "Pedir: 'Chris, monte o Business Plan executivo da PatroAI em versão investidor, com Orion auditando tecnologia e riscos.'\n\n"
+                "Chris — Business Plan Architect Universal\n\n"
+                "Sim. A plataforma Orkio tem capacidade de criar um Business Plan completo, cirúrgico e financeiramente estruturado "
+                "para qualquer tipo de negócio — SaaS, consultoria, serviços, indústria, comércio, marketplace, fintech, healthtech, edtech, "
+                "imobiliário, franquias ou negócios locais. Cada setor exige premissas, métricas e drivers financeiros próprios.\n\n"
+
+                "1. O que a plataforma consegue construir\n"
+                "- Resumo executivo e tese do negócio.\n"
+                "- Problema, oportunidade e público-alvo.\n"
+                "- Solução, proposta de valor e diferenciais competitivos.\n"
+                "- Análise de mercado, ICP, posicionamento e concorrência.\n"
+                "- Modelo de negócio, canais, precificação e monetização.\n"
+                "- Go-to-market, funil comercial, vendas, marketing e parcerias.\n"
+                "- Plano operacional, equipe, processos, tecnologia e roadmap.\n"
+                "- Projeções financeiras com premissas explícitas.\n"
+                "- Indicadores financeiros, operacionais e comerciais.\n"
+                "- Cenários conservador, base e agressivo.\n"
+                "- Riscos, mitigação, milestones e tese para investidores.\n\n"
+
+                "2. Motor financeiro mínimo do Business Plan\n"
+                "- Receita: unidades vendidas, ticket médio, recorrência, MRR, ARR, take rate, contratos, sazonalidade ou volume transacional.\n"
+                "- Custos diretos: CMV/COGS, custo de entrega, fornecedores, infraestrutura, comissão, meios de pagamento e suporte.\n"
+                "- Margem bruta: receita líquida menos custos diretos.\n"
+                "- Despesas operacionais: equipe, tecnologia, marketing, vendas, administrativo, jurídico, contábil e infraestrutura.\n"
+                "- EBITDA operacional: margem bruta menos despesas operacionais.\n"
+                "- Caixa: investimento inicial, burn rate, runway, necessidade de capital e ponto de equilíbrio.\n"
+                "- Indicadores: CAC, LTV, payback, churn, conversão, margem bruta, margem EBITDA, break-even, MRR, ARR, NRR, ROI e unit economics.\n\n"
+
+                "3. Como a plataforma adapta por tipo de negócio\n"
+                "- SaaS: MRR, ARR, churn, CAC, LTV, NRR, payback e margem bruta.\n"
+                "- Serviços e consultoria: ticket médio, horas vendáveis, capacidade produtiva, margem por projeto e recorrência.\n"
+                "- Comércio e indústria: volume, CMV, estoque, giro, margem de contribuição e capital de giro.\n"
+                "- Marketplace: GMV, take rate, liquidez, oferta, demanda e custo de aquisição dos dois lados.\n"
+                "- Fintech/crédito: originação, inadimplência, spread, funding, CAC, risco, compliance e margem financeira.\n"
+                "- Negócios locais: fluxo de clientes, ticket médio, frequência, margem, aluguel, equipe e ponto de equilíbrio.\n\n"
+
+                "4. Dados necessários para criar um plano realmente preciso\n"
+                "- Tipo de negócio e setor.\n"
+                "- Produto ou serviço vendido.\n"
+                "- Público-alvo e região de atuação.\n"
+                "- Preço ou ticket médio.\n"
+                "- Volume esperado de vendas ou clientes.\n"
+                "- Custos diretos por venda ou entrega.\n"
+                "- Despesas fixas mensais.\n"
+                "- Equipe necessária.\n"
+                "- Canais de aquisição e orçamento comercial.\n"
+                "- Investimento inicial disponível ou desejado.\n"
+                "- Meta de receita, prazo e objetivo do plano: operação, banco, investidor, sociedade, franquia ou captação.\n\n"
+
+                "5. Modo de trabalho recomendado\n"
+                "Se o usuário trouxer poucos dados, a plataforma deve montar uma primeira versão com hipóteses explícitas e sinalizar o que falta. "
+                "Se o usuário trouxer dados reais, a plataforma deve calcular projeções, indicadores, cenários e riscos com maior precisão.\n\n"
+
+                "6. Próximo comando ideal\n"
+                "Para começar, diga: 'Chris, monte um Business Plan para [tipo de negócio], considerando [produto], [ticket médio], [custos], "
+                "[meta de receita] e [prazo de projeção].'\n\n"
+
                 "Veredito da Chris\n"
-                "Sim: a plataforma tem capacidade real de criar um Business Plan forte. O próximo salto é transformar o contexto já existente em documento executivo, "
-                "com narrativa, números, roadmap, tese de mercado e riscos bem posicionados."
+                "Sim: a plataforma deve ser capaz de criar Business Plans reais para qualquer negócio, desde que organize premissas, projeções, indicadores e cenários "
+                "de forma transparente. Valuation é apenas uma seção do plano; o núcleo é transformar estratégia, operação e finanças em uma tese executável."
             )
 
         now = now_ts()
