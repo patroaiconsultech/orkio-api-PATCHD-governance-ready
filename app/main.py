@@ -14550,6 +14550,50 @@ def _github_enforce_governed_write(
     )
 
 
+
+# AO46_SPECIALIST_CAPABILITY_CONTRACTS
+def _build_specialist_capability_contract(agent_slug: str = "") -> Dict[str, Any]:
+    slug = str(agent_slug or "").strip().lower() or "orkio"
+
+    contracts = {
+        "orion": {
+            "specialist_type": "technical_auditor",
+            "execution_policy": "readonly_default",
+            "allowed_capabilities": ["runtime_audit", "sse_audit", "backend_audit", "patch_plan_readonly"],
+            "blocked_capabilities": ["write_repository", "commit", "open_pr", "deploy", "migration"],
+            "runtime_depth": "lite",
+            "provider_access": False,
+            "governance_mode": "approval_required",
+        },
+        "chris": {
+            "specialist_type": "strategic_context",
+            "execution_policy": "readonly_default",
+            "allowed_capabilities": ["business_analysis", "valuation_context", "growth_strategy"],
+            "blocked_capabilities": ["technical_patch_authority", "write_repository", "commit", "deploy"],
+            "runtime_depth": "lite",
+            "provider_access": False,
+            "governance_mode": "approval_required",
+        },
+        "orkio": {
+            "specialist_type": "orchestrator",
+            "execution_policy": "readonly_default",
+            "allowed_capabilities": ["routing", "governance_coordination", "user_chat", "specialist_handoff"],
+            "blocked_capabilities": ["write_repository_without_approval", "deploy_without_approval"],
+            "runtime_depth": "lite",
+            "provider_access": False,
+            "governance_mode": "approval_required",
+        },
+    }
+
+    base = contracts.get(slug) or contracts["orkio"]
+    return {
+        "agent_slug": slug,
+        "specialist_contract_version": "AO46",
+        **base,
+    }
+
+
+
 # AO42A_AGENT_RUNTIME_RESULT_CONTRACT
 def _agent_runtime_result(
     *,
@@ -39446,6 +39490,9 @@ async def chat_stream(
                         "dispatch_semantic_resolution": True,
                         "provider_called": False,
                         "governance_write": False,
+                        "specialist_contract": _build_specialist_capability_contract(
+                            "orion" if "@orion" in _ao42d_lowered else ("chris" if "@chris" in _ao42d_lowered else "orkio")
+                        ),
                         "proposal_created": False,
                         "proposal_only": False,
                         "write_executed": False,
