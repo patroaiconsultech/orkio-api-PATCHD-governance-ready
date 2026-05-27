@@ -41519,7 +41519,102 @@ async def chat_stream(
 
                         return
 
-                    final_text = "Não consegui concluir a resposta pelo runtime principal nesta tentativa. O stream foi encerrado com segurança; tente novamente em instantes."
+                    # AO46C_USEFUL_RUNTIME_TIMEOUT_FALLBACK
+                    # Mantém o terminal guard, mas entrega uma recuperação útil, honesta e contextual.
+                    try:
+                        _ao46c_profile = {}
+                        _ao46c_db = None
+                        try:
+                            _ao46c_user_payload = user if isinstance(user, dict) else {}
+                        except Exception:
+                            _ao46c_user_payload = {}
+
+                        try:
+                            _ao46c_uid = str((_ao46c_user_payload or {}).get("sub") or "").strip()
+                            if _ao46c_uid:
+                                _ao46c_db = SessionLocal()
+                                _ao46c_u = _ao46c_db.execute(
+                                    select(User).where(User.id == _ao46c_uid, User.org_slug == org)
+                                ).scalar_one_or_none()
+                                if _ao46c_u:
+                                    _ao46c_profile = {
+                                        "name": getattr(_ao46c_u, "name", None),
+                                        "company": getattr(_ao46c_u, "company", None),
+                                        "profile_role": getattr(_ao46c_u, "profile_role", None),
+                                        "user_type": getattr(_ao46c_u, "user_type", None),
+                                        "intent": getattr(_ao46c_u, "intent", None),
+                                        "language": getattr(_ao46c_u, "language", None),
+                                        "product_scope": getattr(_ao46c_u, "product_scope", None),
+                                        "signup_source": getattr(_ao46c_u, "signup_source", None),
+                                        "usage_tier": getattr(_ao46c_u, "usage_tier", None),
+                                        "onboarding_completed": bool(getattr(_ao46c_u, "onboarding_completed", False)),
+                                    }
+                        except Exception:
+                            try:
+                                logger.exception("AO46C_TIMEOUT_FALLBACK_PROFILE_LOOKUP_FAILED trace_id=%s", trace_id)
+                            except Exception:
+                                pass
+                        finally:
+                            if _ao46c_db is not None:
+                                try:
+                                    _ao46c_db.close()
+                                except Exception:
+                                    pass
+
+                        def _ao46c_pick(*vals, default="não informado"):
+                            for _v in vals:
+                                _s = str(_v or "").strip()
+                                if _s:
+                                    return _s
+                            return default
+
+                        _ao46c_name = _ao46c_pick(_ao46c_profile.get("name"), (_ao46c_user_payload or {}).get("name"), default="usuário")
+                        _ao46c_company = _ao46c_pick(_ao46c_profile.get("company"), default="seu projeto")
+                        _ao46c_role = _ao46c_pick(_ao46c_profile.get("profile_role"), (_ao46c_user_payload or {}).get("role"))
+                        _ao46c_intent_raw = str(_ao46c_profile.get("intent") or "").strip().lower()
+                        _ao46c_scope = _ao46c_pick(
+                            _ao46c_profile.get("product_scope"),
+                            _ao46c_profile.get("signup_source"),
+                            _ao46c_profile.get("usage_tier"),
+                        )
+                        _ao46c_onboarding = "concluído" if bool(_ao46c_profile.get("onboarding_completed")) else "pendente"
+
+                        _ao46c_next = "retomar por uma pergunta objetiva: “qual é meu contexto atual?” ou “faça uma leitura executiva do meu contexto atual”."
+                        if "pilot" in _ao46c_intent_raw:
+                            _ao46c_next = "retomar com um roteiro de piloto curto: critérios de sucesso, 5 usuários, riscos e próximos 7 dias."
+                        elif "funding" in _ao46c_intent_raw:
+                            _ao46c_next = "retomar com uma narrativa executiva curta: problema, solução, mercado, prova e próximos marcos."
+                        elif "explore" in _ao46c_intent_raw:
+                            _ao46c_next = "retomar com uma leitura executiva simples e um plano de teste para 5 usuários beta."
+
+                        final_text = (
+                            "Não consegui concluir a resposta pelo runtime principal nesta tentativa. "
+                            "O stream foi encerrado com segurança.\n\n"
+                            "Ainda assim, para não te deixar sem direção, segue uma recuperação segura baseada no contexto atual:\n\n"
+                            "1. Contexto preservado\n"
+                            f"- Usuário: {_ao46c_name}\n"
+                            f"- Projeto/empresa: {_ao46c_company}\n"
+                            f"- Papel informado: {_ao46c_role}\n"
+                            f"- Organização: {org}\n"
+                            f"- Onboarding: {_ao46c_onboarding}\n"
+                            f"- Escopo/acesso: {_ao46c_scope}\n\n"
+                            "2. Diagnóstico provável\n"
+                            "- A solicitação chegou ao runtime principal, mas excedeu o tempo máximo seguro antes de concluir.\n"
+                            "- A conversa foi preservada e nenhuma escrita, branch, deploy ou execução real foi autorizada por este fallback.\n\n"
+                            "3. Próxima ação recomendada\n"
+                            f"- {_ao46c_next}\n\n"
+                            "4. Caminho seguro para continuar\n"
+                            "- Reformule em uma pergunta mais específica ou peça uma leitura executiva curta.\n"
+                            "- Se for Business Plan, valuation ou estratégia, chame Chris.\n"
+                            "- Se for diagnóstico técnico readonly, chame Orion.\n\n"
+                            "Status: recuperação útil emitida pelo terminal guard AO46C."
+                        )
+                    except Exception:
+                        try:
+                            logger.exception("AO46C_USEFUL_RUNTIME_TIMEOUT_FALLBACK_FAILED trace_id=%s", trace_id)
+                        except Exception:
+                            pass
+                        final_text = "Não consegui concluir a resposta pelo runtime principal nesta tentativa. O stream foi encerrado com segurança; tente novamente em instantes."
                     persisted = await asyncio.to_thread(
                         _persist_assistant_message,
                         text=final_text,
@@ -41550,7 +41645,7 @@ async def chat_stream(
                     yield _metatron_sse("agent_done", {
                         **timeout_base,
                         "done": True,
-                        "message": "Resposta operacional de segurança emitida.",
+                        "message": "Resposta útil de recuperação emitida pelo terminal guard.",
                     })
                     yield _metatron_sse("done", {
                         **timeout_base,
@@ -41560,14 +41655,14 @@ async def chat_stream(
                         "final_text": final_text,
                         "runtime_hints": {
                             "routing": {
-                                "routing_source": "stream_terminal_guard_v7",
-                                "execution_lifecycle": "timeout_terminal_guard",
+                                "routing_source": "stream_terminal_guard_useful_fallback_ao46c",
+                                "execution_lifecycle": "timeout_terminal_guard_useful_fallback",
                                 "route_applied": True,
                             }
                         },
                     })
                     try:
-                        logger.info("CHAT_STREAM_DONE trace_id=%s thread_id=%s source=timeout_terminal_guard_v7", trace_id, timeout_base.get("thread_id"))
+                        logger.info("CHAT_STREAM_DONE trace_id=%s thread_id=%s source=stream_terminal_guard_useful_fallback_ao46c", trace_id, timeout_base.get("thread_id"))
                     except Exception:
                         pass
                     return
