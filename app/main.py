@@ -22846,6 +22846,75 @@ def chat(
         except Exception:
             pass
 
+        # AO42B: canonical founder / builder / ownership-adjacent answer.
+        # Daniel Graebin is the founder, CEO and principal builder of PatroAI / Orkio.
+        try:
+            _ao42b_text = str(inp.message or "").strip().lower()
+            _ao42b_mentions_scope = (
+                "patroai" in _ao42b_text
+                or "patroaí" in _ao42b_text
+                or "orkio" in _ao42b_text
+                or "daniel" in _ao42b_text
+                or "graebin" in _ao42b_text
+                or "sócios" in _ao42b_text
+                or "socios" in _ao42b_text
+            )
+            _ao42b_founder_or_ownership_requested = (
+                not blocked_reply
+                and _ao42b_mentions_scope
+                and any(
+                    _ao42b_key in _ao42b_text
+                    for _ao42b_key in (
+                        "quem são os sócios",
+                        "quem sao os socios",
+                        "quem são os socios",
+                        "quem sao os sócios",
+                        "quem é o sócio",
+                        "quem e o socio",
+                        "quem é dono",
+                        "quem e dono",
+                        "quem controla",
+                        "quem construiu",
+                        "quem criou",
+                        "quem fundou",
+                        "fundador",
+                        "ceo",
+                        "builder",
+                        "quem é daniel",
+                        "quem e daniel",
+                        "quem é daniel graebin",
+                        "quem e daniel graebin",
+                    )
+                )
+            )
+            if _ao42b_founder_or_ownership_requested:
+                if any(k in _ao42b_text for k in ("quem construiu", "quem criou", "builder", "quem fundou")):
+                    answer = (
+                        "A tecnologia Orkio foi construída por Daniel Graebin, fundador e CEO da PatroAI / Orkio, "
+                        "que liderou de ponta a ponta o produto, a arquitetura, a governança, o deploy e o posicionamento comercial."
+                    )
+                elif any(k in _ao42b_text for k in ("quem é daniel", "quem e daniel", "daniel graebin")):
+                    answer = (
+                        "Daniel Graebin é o fundador e CEO da PatroAI / Orkio, builder principal da tecnologia Orkio "
+                        "e responsável por conectar visão de produto, arquitetura, governança, IA aplicada e estratégia comercial."
+                    )
+                else:
+                    answer = (
+                        "A Patroai Consultech tem Daniel Graebin como fundador, CEO e builder principal da tecnologia Orkio; "
+                        "não há sócios externos no núcleo tecnológico da empresa."
+                    )
+                try:
+                    logger.warning(
+                        "AO42B_CANONICAL_FOUNDER_BUILDER_APPLIED trace_id=%s thread_id=%s chars=%s",
+                        ao32_trace_id,
+                        tid,
+                        len(answer),
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         if direct_runtime_result and direct_runtime_result.get("ok") and answer:
             dispatch_routing_receipt["dispatch_executed"] = True
             dispatch_routing_receipt["synthetic_fallback"] = False
