@@ -33152,6 +33152,127 @@ async def chat_stream(
             except Exception:
                 pass
 
+            # AO44E: Business Plan + Valuation Pack.
+            # If the user asks for Business Plan and valuation in the same prompt, answer both instead of choosing only one.
+            ao44e_valuation_requested = any(
+                key in normalized
+                for key in (
+                    "valuation",
+                    "valuation preliminar",
+                    "avaliacao da empresa",
+                    "avaliação da empresa",
+                    "valor da empresa",
+                    "valor da companhia",
+                    "quanto vale",
+                    "capta",
+                    "captacao",
+                    "captação",
+                    "investidor",
+                    "investimento",
+                    "faixa indicativa",
+                    "mrr",
+                    "arr",
+                    "receita recorrente",
+                )
+            )
+
+            if ao44e_valuation_requested:
+                try:
+                    ao44e_now = now_ts()
+                    ao44e_since_30d = ao44e_now - 30 * 86400
+                    ao44e_approved_users = _safe_chris_count(db2, User, org_slug, User.approved_at.is_not(None))
+                    ao44e_total_users = _safe_chris_count(db2, User, org_slug)
+                    ao44e_leads_total = _safe_chris_count(db2, Lead, org_slug)
+                    ao44e_leads_30d = _safe_chris_count(db2, Lead, org_slug, Lead.created_at >= ao44e_since_30d)
+                    ao44e_threads_30d = _safe_chris_count(db2, Thread, org_slug, Thread.created_at >= ao44e_since_30d)
+                    ao44e_messages_30d = _safe_chris_count(db2, Message, org_slug, Message.created_at >= ao44e_since_30d)
+                    try:
+                        ao44e_cost_30d = float(db2.execute(
+                            select(func.sum(CostEvent.total_cost_usd)).where(
+                                CostEvent.org_slug == org_slug,
+                                CostEvent.created_at >= ao44e_since_30d,
+                            )
+                        ).scalar() or 0)
+                    except Exception:
+                        try:
+                            db2.rollback()
+                        except Exception:
+                            pass
+                        ao44e_cost_30d = 0.0
+
+                    ao44e_traction_score = 0
+                    if ao44e_approved_users >= 1:
+                        ao44e_traction_score += 1
+                    if ao44e_leads_total >= 10 or ao44e_leads_30d >= 3:
+                        ao44e_traction_score += 1
+                    if ao44e_messages_30d >= 50 or ao44e_threads_30d >= 10:
+                        ao44e_traction_score += 1
+
+                    ao44e_stage = "pré-lançamento / beta controlado"
+                    ao44e_low_usd, ao44e_high_usd = 250_000, 750_000
+                    if ao44e_traction_score >= 2:
+                        ao44e_stage = "beta com sinais iniciais de tração"
+                        ao44e_low_usd, ao44e_high_usd = 750_000, 1_800_000
+                    if ao44e_traction_score >= 3:
+                        ao44e_stage = "pré-seed com produto ativo e primeiros sinais operacionais"
+                        ao44e_low_usd, ao44e_high_usd = 1_500_000, 3_500_000
+
+                    logger.warning(
+                        "AO44E_BUSINESS_PLAN_VALUATION_PACK trace_id=%s thread_id=%s stage=%s",
+                        trace_id,
+                        tid_seed,
+                        ao44e_stage,
+                    )
+                except Exception:
+                    ao44e_approved_users = 0
+                    ao44e_total_users = 0
+                    ao44e_leads_total = 0
+                    ao44e_leads_30d = 0
+                    ao44e_threads_30d = 0
+                    ao44e_messages_30d = 0
+                    ao44e_cost_30d = 0.0
+                    ao44e_stage = "pré-lançamento / beta controlado"
+                    ao44e_low_usd, ao44e_high_usd = 250_000, 750_000
+
+                return (
+                    "Chris — Business Plan + Valuation Pack\n\n"
+                    "Sim. A plataforma Orkio consegue estruturar um Business Plan completo e também incluir uma valuation preliminar como seção financeira do plano. "
+                    "Business Plan e valuation não são a mesma coisa: o Business Plan organiza estratégia, operação, mercado e projeções; a valuation traduz essa tese em faixa indicativa de valor.\n\n"
+
+                    "1. Business Plan executivo\n"
+                    "- Resumo executivo e tese do negócio.\n"
+                    "- Problema, oportunidade, público-alvo e ICP.\n"
+                    "- Solução, proposta de valor e diferenciais competitivos.\n"
+                    "- Produto, tecnologia, operação, roadmap e governança.\n"
+                    "- Modelo de negócio, precificação, canais, go-to-market e funil comercial.\n"
+                    "- Projeções financeiras, unit economics, indicadores, cenários e riscos.\n\n"
+
+                    "2. Motor financeiro do plano\n"
+                    "- Receita, ticket médio, volume, recorrência, MRR, ARR ou GMV quando aplicável.\n"
+                    "- Custos diretos, margem bruta, despesas operacionais e EBITDA.\n"
+                    "- CAC, LTV, payback, churn, break-even, burn rate, runway e necessidade de capital.\n"
+                    "- Cenários conservador, base e agressivo.\n\n"
+
+                    "3. Valuation preliminar\n"
+                    f"- Estágio lido: {ao44e_stage}.\n"
+                    f"- Faixa indicativa preliminar: US$ {ao44e_low_usd:,.0f} a US$ {ao44e_high_usd:,.0f}.\n"
+                    "- Natureza da leitura: estimativa estratégica interna, não laudo financeiro formal.\n"
+                    "- A valuation deve ser validada com receita, retenção, contratos, margem, tração, risco e diligência.\n\n"
+
+                    "4. Sinais operacionais considerados\n"
+                    f"- Usuários aprovados: {ao44e_approved_users}.\n"
+                    f"- Usuários totais: {ao44e_total_users}.\n"
+                    f"- Leads totais: {ao44e_leads_total}; leads nos últimos 30 dias: {ao44e_leads_30d}.\n"
+                    f"- Atividade recente: {ao44e_threads_30d} threads e {ao44e_messages_30d} mensagens nos últimos 30 dias.\n"
+                    f"- Custo IA estimado em 30 dias: US$ {ao44e_cost_30d:,.2f}.\n\n"
+
+                    "5. Próximo passo recomendado\n"
+                    "Pedir: 'Chris, monte o Business Plan + Valuation Pack para [negócio], com premissas, projeções financeiras, cenários e tese para investidores.'\n\n"
+
+                    "Veredito da Chris\n"
+                    "Sim: a plataforma deve conseguir montar um Business Plan real e acoplar uma valuation preliminar auditável, desde que separe premissas, projeções, indicadores e riscos."
+                )
+
             # AO44D: Business Plan Sector Adapter.
             # When the user names a sector, adapt the plan instead of returning only the generic capability map.
             ao44d_dental_requested = any(
