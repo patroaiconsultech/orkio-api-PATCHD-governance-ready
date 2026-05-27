@@ -22981,6 +22981,121 @@ def chat(
         except Exception:
             pass
 
+        # AO43C: canonical full founder professional profile memory in code.
+        # Distilled from Daniel Graebin CV. Excludes personal contact data from runtime answers.
+        try:
+            _ao43c_text = str(inp.message or "").strip().lower()
+            _ao43c_scope = (
+                "daniel" in _ao43c_text
+                or "graebin" in _ao43c_text
+                or "fundador" in _ao43c_text
+                or "ceo" in _ao43c_text
+                or "patroai" in _ao43c_text
+                or "patroaí" in _ao43c_text
+                or "orkio" in _ao43c_text
+                or "ele" in _ao43c_text
+                or "dele" in _ao43c_text
+            )
+            _ao43c_profile_requested = (
+                not blocked_reply
+                and _ao43c_scope
+                and any(
+                    _ao43c_key in _ao43c_text
+                    for _ao43c_key in (
+                        "cv",
+                        "currículo",
+                        "curriculo",
+                        "perfil completo",
+                        "perfil profissional",
+                        "experiência profissional",
+                        "experiencia profissional",
+                        "trajetória profissional",
+                        "trajetoria profissional",
+                        "histórico profissional",
+                        "historico profissional",
+                        "em quais empresas",
+                        "quais empresas",
+                        "onde ele trabalhou",
+                        "onde daniel trabalhou",
+                        "empresas ele trabalhou",
+                        "empresas daniel trabalhou",
+                        "formação",
+                        "formacao",
+                        "certificações",
+                        "certificacoes",
+                        "idiomas",
+                        "ferramentas",
+                        "competências",
+                        "competencias",
+                        "habilidades",
+                        "background",
+                        "legitimidade",
+                        "carreira",
+                        "quem é daniel",
+                        "quem e daniel",
+                        "quem é daniel graebin",
+                        "quem e daniel graebin",
+                    )
+                )
+            )
+
+            if _ao43c_profile_requested:
+                _ao43c_companies = (
+                    "Daniel Graebin atuou profissionalmente na PatroAI / Orkio como Founder & CEO desde 2025; "
+                    "na Companhia Hipotecária Piratini como gestor comercial entre maio de 2012 e março de 2022; "
+                    "na Auxiliadora Predial como supervisor de vendas e franquias entre setembro de 2010 e maio de 2012; "
+                    "no Itaú Unibanco como supervisor de negócios imobiliários entre julho de 2009 e setembro de 2010; "
+                    "e no Walmart Brasil como analista financeiro entre maio de 2005 e março de 2008."
+                )
+                _ao43c_founder_project = (
+                    "Na PatroAI / Orkio, Daniel estruturou produto, proposta de valor, roadmap, arquitetura operacional, "
+                    "governança, casos de uso, treinamento de agentes, playbooks, estratégia de posicionamento e narrativa executiva. "
+                    "Ele construiu a plataforma de ponta a ponta, conectando web app, API, autenticação, agentes de IA, "
+                    "governança, deploy em nuvem, troubleshooting de runtime e estratégia de comercialização B2B."
+                )
+                _ao43c_skills = (
+                    "Suas competências incluem IA aplicada a negócios, desenho de agentes personalizados, produto digital, SaaS, "
+                    "discovery, MVP, roadmap, React, FastAPI, APIs, JWT, Docker, Railway, Postman, governança, policies, playbooks, "
+                    "auditoria, rastreabilidade, finanças estruturadas, LCI/CRI, securitização, crédito imobiliário, estratégia comercial, "
+                    "vendas complexas, canais parceiros, comitês de crédito, análise de risco, liderança, treinamento, negociação e relacionamento executivo."
+                )
+                _ao43c_education = (
+                    "Sua formação inclui MBA em Administração Executiva pela Fundação Getúlio Vargas, concluído em 2015, "
+                    "e bacharelado em Administração pelas Faculdades São Judas Tadeu, concluído em 2009. "
+                    "Também possui certificação CA-600 da ABECIP."
+                )
+                _ao43c_languages_tools = (
+                    "Daniel tem português nativo, inglês avançado e alemão intermediário. "
+                    "Entre suas ferramentas e tecnologias estão ChatGPT/Copilot, Google Cloud Vertex AI, GitHub, Postman, Docker, Railway, "
+                    "React, FastAPI, JWT, CORS, Microsoft Office avançado e SAP."
+                )
+
+                if any(k in _ao43c_text for k in ("em quais empresas", "quais empresas", "onde ele trabalhou", "onde daniel trabalhou", "empresas ele trabalhou", "empresas daniel trabalhou")):
+                    answer = _ao43c_companies
+                elif any(k in _ao43c_text for k in ("formação", "formacao", "certificações", "certificacoes", "idiomas", "ferramentas")):
+                    answer = f"{_ao43c_education} {_ao43c_languages_tools}"
+                elif any(k in _ao43c_text for k in ("competências", "competencias", "habilidades", "background", "legitimidade")):
+                    answer = _ao43c_skills
+                elif any(k in _ao43c_text for k in ("experiência profissional", "experiencia profissional", "trajetória profissional", "trajetoria profissional", "histórico profissional", "historico profissional", "carreira")):
+                    answer = f"{_ao43c_companies} {_ao43c_founder_project}"
+                else:
+                    answer = (
+                        "Daniel Graebin é o Founder & CEO da PatroAI / Orkio e o builder principal da tecnologia Orkio. "
+                        f"{_ao43c_founder_project} {_ao43c_companies} {_ao43c_skills} {_ao43c_education} {_ao43c_languages_tools}"
+                    )
+
+                try:
+                    logger.warning(
+                        "AO43C_CANONICAL_FOUNDER_FULL_CV_MEMORY_APPLIED trace_id=%s thread_id=%s chars=%s",
+                        ao32_trace_id,
+                        tid,
+                        len(answer),
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         if direct_runtime_result and direct_runtime_result.get("ok") and answer:
             dispatch_routing_receipt["dispatch_executed"] = True
             dispatch_routing_receipt["synthetic_fallback"] = False
