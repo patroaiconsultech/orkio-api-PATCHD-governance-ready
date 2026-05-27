@@ -22915,6 +22915,72 @@ def chat(
         except Exception:
             pass
 
+        # AO43A: canonical founder CV memory in code.
+        # This is a distilled institutional profile, not the full CV.
+        try:
+            _ao43a_text = str(inp.message or "").strip().lower()
+            _ao43a_scope = (
+                "daniel" in _ao43a_text
+                or "graebin" in _ao43a_text
+                or "patroai" in _ao43a_text
+                or "patroaí" in _ao43a_text
+                or "orkio" in _ao43a_text
+                or "fundador" in _ao43a_text
+                or "ceo" in _ao43a_text
+            )
+            _ao43a_cv_requested = (
+                not blocked_reply
+                and _ao43a_scope
+                and any(
+                    _ao43a_key in _ao43a_text
+                    for _ao43a_key in (
+                        "cv",
+                        "currículo",
+                        "curriculo",
+                        "trajetória",
+                        "trajetoria",
+                        "experiência",
+                        "experiencia",
+                        "background",
+                        "histórico",
+                        "historico",
+                        "perfil",
+                        "competências",
+                        "competencias",
+                        "legitimidade",
+                        "quem é daniel",
+                        "quem e daniel",
+                        "quem é daniel graebin",
+                        "quem e daniel graebin",
+                        "fundador da patroai",
+                        "fundador da orkio",
+                        "ceo da patroai",
+                        "ceo da orkio",
+                        "quem construiu",
+                        "quem criou",
+                    )
+                )
+            )
+            if _ao43a_cv_requested:
+                answer = (
+                    "Daniel Graebin é o fundador e CEO da PatroAI / Orkio e o builder principal da tecnologia Orkio. "
+                    "Ele construiu a plataforma de ponta a ponta, conectando produto digital, web app, API, autenticação, "
+                    "agentes de IA, governança, deploy em nuvem, observabilidade operacional e estratégia comercial. "
+                    "Sua trajetória combina finanças estruturadas, crédito imobiliário, securitização, captação, liderança comercial, "
+                    "comitês de decisão, venda consultiva e execução hands-on de produto com IA aplicada a negócios."
+                )
+                try:
+                    logger.warning(
+                        "AO43A_CANONICAL_FOUNDER_CV_MEMORY_APPLIED trace_id=%s thread_id=%s chars=%s",
+                        ao32_trace_id,
+                        tid,
+                        len(answer),
+                    )
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
         if direct_runtime_result and direct_runtime_result.get("ok") and answer:
             dispatch_routing_receipt["dispatch_executed"] = True
             dispatch_routing_receipt["synthetic_fallback"] = False
