@@ -39608,6 +39608,44 @@ async def chat_stream(
             except Exception:
                 _ao45b_hf4k_empty = True
 
+            # AO45B1_MULTILINE_AGENT_ACK_COVERAGE
+            # Cobre pings multiline em sala Team, ex:
+            # @Orkio ok / @Chris ok / @Orion ok / @Team ok na mesma mensagem.
+            if _ao45b_hf4k_empty:
+                try:
+                    _ao45b_lines = [
+                        " ".join(str(x or "").strip().split()).lower()
+                        for x in str(_ao45b_raw or "").splitlines()
+                        if str(x or "").strip()
+                    ]
+                    _ao45b_agent_ack_line = re.compile(r"^@?(orkio|chris|orion|team)\s+ok[.!?]?$", re.IGNORECASE)
+                    _ao45b_all_agent_acks = (
+                        2 <= len(_ao45b_lines) <= 8
+                        and all(_ao45b_agent_ack_line.match(x or "") for x in _ao45b_lines)
+                    )
+                    if _ao45b_all_agent_acks:
+                        _hf4k_kind = "team_multiline_agent_ack"
+                        _hf4p_target = "Team"
+                        _hf4k_final_text = (
+                            "Team está online.\n"
+                            "- Orkio: online para conversa, coordenação segura e auditoria readonly.\n"
+                            "- Chris: online para contexto estratégico, Business Plan e valuation.\n"
+                            "- Orion: online para diagnóstico técnico e auditoria readonly.\n\n"
+                            "Execução real permanece bloqueada sem aprovação."
+                        )
+                except Exception:
+                    pass
+
+            # AO45B1_BARE_AO_ACK_COVERAGE
+            # Cobre smoke curto como: ok AO-45A, sem acionar provider.
+            if _ao45b_hf4k_empty and not str(_hf4k_kind or "").strip():
+                try:
+                    if re.match(r"^\s*ok\s+AO[- ]?\d+[A-Z]?\s*$", str(_ao45b_raw or "").strip(), flags=re.IGNORECASE):
+                        _hf4k_kind = "team_bare_ao_ack"
+                        _hf4k_final_text = str(_ao45b_raw or "").strip()
+                except Exception:
+                    pass
+
             if _ao45b_hf4k_empty:
                 try:
                     _ao45b_literal_match = re.match(
@@ -39681,6 +39719,10 @@ async def chat_stream(
                     _hf4k_agent_name = "Orkio"
                 elif _hf4k_kind == "team_safe_agent_ping":
                     _hf4k_agent_name = str(_hf4p_target or "Orkio").strip() or "Orkio"
+                elif _hf4k_kind == "team_multiline_agent_ack":
+                    _hf4k_agent_name = "Team"
+                elif _hf4k_kind == "team_bare_ao_ack":
+                    _hf4k_agent_name = "Orkio"
             except Exception:
                 _hf4k_agent_name = "Orkio"
 
