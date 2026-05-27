@@ -44554,9 +44554,14 @@ def _report_labels(lang: str) -> dict:
             "insights": "EXECUTIVE INSIGHTS",
             "recommendations": "STRATEGIC RECOMMENDATIONS",
             "next_steps": "NEXT STEPS",
-            "empty": "[info] No persisted realtime conversation events were found for this session yet.",
-            "fallback_summary": "Conversation between the user and Orkio.",
-            "fallback_next": "Review the conversation and confirm the highest-priority action.",
+            # AO46D_EXECUTIVE_REPORT_FEEDBACK_CONTRACT
+            "empty": (
+                "[info] No usable conversation content was found for this executive report yet.\n"
+                "Recommended next step: run a short guided session with at least one user question, "
+                "one assistant answer and one clear next action, then export the report again."
+            ),
+            "fallback_summary": "Executive fallback generated from persisted thread messages.",
+            "fallback_next": "Confirm the highest-priority action, owner, risk and next validation step.",
             "speaker_user": "User",
             "speaker_assistant": "Orkio",
         }
@@ -44569,9 +44574,13 @@ def _report_labels(lang: str) -> dict:
             "insights": "INSIGHTS EJECUTIVOS",
             "recommendations": "RECOMENDACIONES ESTRATÉGICAS",
             "next_steps": "PRÓXIMOS PASOS",
-            "empty": "[info] No se encontraron eventos finales persistidos de esta sesión.",
-            "fallback_summary": "Conversación entre el usuario y Orkio.",
-            "fallback_next": "Revisar la conversación y confirmar la acción de mayor prioridad.",
+            "empty": (
+                "[info] No se encontró contenido útil suficiente para este informe ejecutivo.\n"
+                "Siguiente paso recomendado: realizar una sesión breve con al menos una pregunta del usuario, "
+                "una respuesta del asistente y una acción clara, y luego exportar nuevamente."
+            ),
+            "fallback_summary": "Fallback ejecutivo generado desde los mensajes persistidos del hilo.",
+            "fallback_next": "Confirmar la acción de mayor prioridad, responsable, riesgo y próxima validación.",
             "speaker_user": "User",
             "speaker_assistant": "Orkio",
         }
@@ -44583,9 +44592,13 @@ def _report_labels(lang: str) -> dict:
         "insights": "INSIGHTS EXECUTIVOS",
         "recommendations": "RECOMENDAÇÕES ESTRATÉGICAS",
         "next_steps": "PRÓXIMOS PASSOS",
-        "empty": "[info] Nenhum evento final persistido foi encontrado para esta sessão ainda.",
-        "fallback_summary": "Conversa entre o usuário e o Orkio.",
-        "fallback_next": "Revisar a conversa e confirmar a ação de maior prioridade.",
+        "empty": (
+            "[info] Ainda não encontrei conteúdo útil suficiente para montar este relatório executivo.\n"
+            "Próximo passo recomendado: rode uma sessão curta com pelo menos uma pergunta do usuário, "
+            "uma resposta do assistente e uma próxima ação clara. Depois exporte o relatório novamente."
+        ),
+        "fallback_summary": "Fallback executivo gerado a partir das mensagens persistidas da thread.",
+        "fallback_next": "Confirmar a ação de maior prioridade, responsável, risco e próxima validação.",
         "speaker_user": "User",
         "speaker_assistant": "Orkio",
     }
@@ -44746,7 +44759,13 @@ def _build_executive_report_from_messages(
     rs: RealtimeSession,
     messages: List[Message],
 ) -> str:
-    """Fallback executive report from persisted thread messages."""
+    """Fallback executive report from persisted thread messages.
+
+    AO46D_EXECUTIVE_REPORT_FEEDBACK_CONTRACT:
+    When realtime events are unavailable, the export must still be useful.
+    It should explain scope, summarize the thread, surface executive insights
+    and give clear next steps instead of returning only a raw transcript.
+    """
     cleaned = []
     for m in messages:
         body = _normalize_report_text(getattr(m, "content", None))
@@ -44768,6 +44787,7 @@ def _build_executive_report_from_messages(
         f"started_at: {rs.started_at or ''}",
         f"ended_at: {rs.ended_at or ''}",
         f"language: {lang}",
+        "source: thread_messages_fallback_ao46d",
         "",
     ]
     if not cleaned:
@@ -44775,7 +44795,66 @@ def _build_executive_report_from_messages(
 
     transcript_lines = [f"{item['speaker']}: {item['content']}" for item in cleaned]
     transcript = "\n".join(transcript_lines)
-    return "\n".join(header + [labels["conversation"], transcript, ""])
+
+    assistant_items = [item["content"] for item in cleaned if item["role"] != "user"]
+    user_items = [item["content"] for item in cleaned if item["role"] == "user"]
+
+    def _ao46d_clip(v: str, limit: int = 420) -> str:
+        text = _normalize_report_text(v)
+        if len(text) <= limit:
+            return text
+        return text[: limit - 3].rstrip() + "..."
+
+    executive_context = user_items[-1] if user_items else cleaned[-1]["content"]
+
+    insights = []
+    for body in assistant_items:
+        low = body.lower()
+        if any(k in low for k in [
+            "diagnóstico", "diagnostico", "prioridade", "impacto", "risco",
+            "business plan", "valuation", "recomend", "próximo", "proximo",
+            "next", "should", "go ", "no-go", "veredito"
+        ]):
+            insights.append(_ao46d_clip(body))
+        if len(insights) >= 3:
+            break
+
+    if not insights and assistant_items:
+        insights = [_ao46d_clip(x) for x in assistant_items[-3:]]
+
+    if not insights:
+        insights = [_ao46d_clip(cleaned[-1]["content"])]
+
+    next_steps = []
+    for body in assistant_items:
+        low = body.lower()
+        if any(k in low for k in ["próximo", "proximo", "next", "recomend", "go para", "deve", "should", "validar", "teste"]):
+            next_steps.append(_ao46d_clip(body))
+        if len(next_steps) >= 3:
+            break
+
+    if not next_steps:
+        next_steps = [labels["fallback_next"]]
+
+    report_body = (
+        f"{labels['summary']}\n"
+        f"{labels['fallback_summary']}\n"
+        f"Contexto executivo detectado: {_ao46d_clip(executive_context, 360)}\n\n"
+        f"{labels['discussion']}\n"
+        + "\n".join(transcript_lines)
+        + f"\n\n{labels['insights']}\n- "
+        + "\n- ".join(insights[:3])
+        + f"\n\n{labels['recommendations']}\n- "
+        + "\n- ".join(insights[:3])
+        + f"\n\n{labels['next_steps']}\n- "
+        + "\n- ".join(next_steps[:3])
+        + "\n\nCONTRATO AO46D\n"
+        "- Este relatório foi gerado por fallback de mensagens persistidas porque o trilho realtime não tinha eventos finais suficientes.\n"
+        "- O conteúdo foi preservado sem criar proposta, branch, commit, deploy ou escrita externa.\n"
+        "- Para melhorar a próxima exportação, conduza uma sessão com objetivo, decisão, risco e próximo responsável claramente verbalizados."
+    )
+
+    return "\n".join(header + [labels["conversation"], transcript, "", report_body.strip(), ""])
 
 @app.get("/api/realtime/sessions/{session_id}/ata.txt")
 def realtime_get_session_ata(
