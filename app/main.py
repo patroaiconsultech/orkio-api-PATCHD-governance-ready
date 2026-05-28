@@ -42208,6 +42208,10 @@ async def orchestrate(
         except Exception:
             try: db.rollback()
             except Exception: pass
+        finally:
+            # AO48A_DB_POOL_GUARD_ORCHESTRATE_RELEASE_DURING_STREAM
+            # Do not keep the request-scoped DB session checked out while SSE emits chunks.
+            _release_db_session(db)
 
         # Emit the plan summary as chunks so frontend renders it
         step_size = 140
@@ -42276,6 +42280,10 @@ async def orchestrate(
                     citations = keyword_retrieve(db, org, sub_task, file_ids=file_ids, top_k=int(ag.get("rag_top_k") or 6))
                 except Exception:
                     citations = []
+                finally:
+                    # AO48A_DB_POOL_GUARD_ORCHESTRATE_RELEASE_DURING_STREAM
+                    # RAG reads are short-lived; release DB before the delegated LLM call.
+                    _release_db_session(db)
 
             # LLM call
             try:
