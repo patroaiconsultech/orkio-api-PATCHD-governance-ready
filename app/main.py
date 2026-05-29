@@ -6525,22 +6525,121 @@ def list_threads(x_org_slug: Optional[str] = Header(default=None), user=Depends(
     require_onboarding_complete(user)
     uid = user.get("sub")
 
+    # AO50A_THREAD_RESTORE_LAST_ACTIVE
+    # Contract: sidebar/bootstrap must receive useful conversations before empty ones.
+    # Useful thread = user/admin visible thread with at least one real user/assistant message.
+    try:
+        logger.info("THREADS_LIST_REQUEST user_id=%s tenant=%s role=%s", uid, org, user.get("role"))
+    except Exception:
+        pass
+
     # Ensure core agents exist (solo-supervised defaults)
     ensure_core_agents(db, org)
 
-    # PATCH0100_14: ACL — only show threads where user is a member
-    # Admin users can see all threads
-    if user.get("role") == "admin":
-        rows = db.execute(select(Thread).where(Thread.org_slug == org).order_by(Thread.created_at.desc())).scalars().all()
-    else:
+    real_message_roles = ["user", "assistant"]
+
+    msg_stats = (
+        select(
+            Message.thread_id.label("thread_id"),
+            func.count(Message.id).label("message_count"),
+            func.max(Message.created_at).label("last_message_at"),
+        )
+        .where(
+            Message.org_slug == org,
+            Message.role.in_(real_message_roles),
+            Message.content.isnot(None),
+            func.length(func.trim(Message.content)) > 0,
+        )
+        .group_by(Message.thread_id)
+        .subquery()
+    )
+
+    stmt = (
+        select(
+            Thread,
+            func.coalesce(msg_stats.c.message_count, 0).label("message_count"),
+            msg_stats.c.last_message_at.label("last_message_at"),
+        )
+        .outerjoin(msg_stats, Thread.id == msg_stats.c.thread_id)
+        .where(Thread.org_slug == org)
+    )
+
+    if user.get("role") != "admin":
         member_tids = db.execute(
-            select(ThreadMember.thread_id).where(ThreadMember.org_slug == org, ThreadMember.user_id == uid)
+            select(ThreadMember.thread_id).where(
+                ThreadMember.org_slug == org,
+                ThreadMember.user_id == uid,
+            )
         ).scalars().all()
-        if member_tids:
-            rows = db.execute(select(Thread).where(Thread.org_slug == org, Thread.id.in_(member_tids)).order_by(Thread.created_at.desc())).scalars().all()
-        else:
-            rows = []
-    return [{"id": t.id, "title": t.title, "created_at": t.created_at} for t in rows]
+
+        if not member_tids:
+            try:
+                logger.info("THREADS_LIST_RESPONSE count=0 first_thread_id=None first_title=None first_message_count=0")
+            except Exception:
+                pass
+            return []
+
+        stmt = stmt.where(Thread.id.in_(member_tids))
+
+    rows = db.execute(
+        stmt.order_by(
+            msg_stats.c.last_message_at.desc().nullslast(),
+            Thread.created_at.desc(),
+        )
+    ).all()
+
+    thread_ids = [row[0].id for row in rows]
+    previews = {}
+
+    if thread_ids:
+        preview_rows = db.execute(
+            select(Message.thread_id, Message.content)
+            .where(
+                Message.org_slug == org,
+                Message.thread_id.in_(thread_ids),
+                Message.role.in_(real_message_roles),
+                Message.content.isnot(None),
+                func.length(func.trim(Message.content)) > 0,
+            )
+            .order_by(Message.thread_id.asc(), Message.created_at.desc())
+        ).all()
+
+        for tid, content in preview_rows:
+            if tid not in previews:
+                preview = str(content or "").strip().replace("\n", " ")
+                previews[tid] = preview[:160]
+
+    result = []
+    for t, message_count, last_message_at in rows:
+        count = int(message_count or 0)
+        has_messages = count > 0
+        updated_at = getattr(t, "updated_at", None) or last_message_at or t.created_at
+
+        result.append({
+            "id": t.id,
+            "title": t.title,
+            "created_at": t.created_at,
+            "updated_at": updated_at,
+            "last_message_at": last_message_at,
+            "message_count": count,
+            "last_message_preview": previews.get(t.id, ""),
+            "has_messages": has_messages,
+            "is_empty": not has_messages,
+        })
+
+    try:
+        first = result[0] if result else {}
+        logger.info(
+            "THREADS_LIST_RESPONSE count=%s first_thread_id=%s first_title=%s first_message_count=%s",
+            len(result),
+            first.get("id"),
+            first.get("title"),
+            first.get("message_count"),
+        )
+    except Exception:
+        pass
+
+    return result
 
 @app.post("/api/threads")
 def create_thread(inp: ThreadIn, x_org_slug: Optional[str] = Header(default=None), user=Depends(get_current_user), db: Session = Depends(get_db)):
