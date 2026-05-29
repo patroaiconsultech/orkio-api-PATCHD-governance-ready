@@ -40390,7 +40390,16 @@ async def chat_stream(
                         "arquivo", "file", "proposal", "proposta", "execute", "aplique"
                     ))
 
-                    if _ao45b_short and not _ao45b_blocked and (_ao45b_greeting or _ao45b_identity or _ao45b_ack):
+                    # AO01_REAL_AGENT_QUESTION_GUARD:
+                    # @Orion/@Chris/@Team com pergunta real não é ping/status.
+                    # Deve seguir para runtime normal com histórico da thread.
+                    _ao01_real_agent_question = bool(
+                        ("?" in str(_ao45b_raw or ""))
+                        and any(x in _ao45b_norm for x in ("@orion", "@chris", "@team", "@orkio"))
+                        and len(_ao45b_words) >= 5
+                    )
+
+                    if _ao45b_short and not _ao45b_blocked and not _ao01_real_agent_question and (_ao45b_greeting or _ao45b_identity or _ao45b_ack):
                         if "@chris" in _ao45b_norm or _ao45b_norm == "chris ok":
                             _hf4k_kind = "team_safe_agent_ping"
                             _hf4p_target = "Chris"
