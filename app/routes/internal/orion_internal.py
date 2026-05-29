@@ -3708,6 +3708,22 @@ def orion_runtime_execute(inp: "OrionRuntimeIn") -> Dict[str, Any]:
         return _attachment_analysis_read_payload(inp)
     if _looks_like_github_runtime_request(effective_message):
         return github_execute(inp)
+
+    # AO01_ORION_INTERNAL_CONVERSATION_ESCAPE:
+    # Perguntas comuns para @Orion não podem virar PLATFORM_SELF_AUDIT_READY.
+    # Este endpoint interno é de auditoria; conversa normal deve voltar ao runtime de chat.
+    if "?" in str(effective_message or "") and not any(term in lowered for term in (
+        "auditoria", "audit", "diagnóstico", "diagnostico", "runtime", "github",
+        "repo", "branch", "pr", "patch", "deploy", "scan", "war room"
+    )):
+        return {
+            "ok": False,
+            "service": "orion_internal",
+            "event": "ORION_INTERNAL_NOT_AUDIT",
+            "status": "pass_through",
+            "message": "Pergunta conversacional detectada; não executar platform_self_audit.",
+        }
+
     return _platform_self_audit_detached(inp)
 
 class OrionRuntimeIn(BaseModel):
