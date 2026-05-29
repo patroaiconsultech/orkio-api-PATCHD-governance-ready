@@ -21279,6 +21279,10 @@ def chat(
             and not any(term in ao37_raw_lower for term in ao37_governed_terms)
             and not _is_team_technical_audit_request(ao37_raw_text)
             and not _is_execution_bridge_readonly_diagnostic_request(ao37_raw_text)
+            # AO01_AO37_EXPLICIT_MENTION_GUARD:
+            # Conversa com @mention explícito não é plain conversation.
+            # Não pode ser reescrita para Orkio.
+            and not any(x in str(ao37_raw_text or "").lower() for x in ("@orion", "@chris", "@team", "@orkio"))
             and not _ao37_flag_requested("_runtime_orion_dispatch_request_flags")
             and not _ao37_flag_requested("_orion_self_knowledge_request_flags")
             and not _ao37_flag_requested("_orion_operational_maturity_request_flags")
