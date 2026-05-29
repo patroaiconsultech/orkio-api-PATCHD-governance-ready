@@ -6941,7 +6941,7 @@ def _ao20bc_resolve_route(text: Any, requested_agent: Optional[str] = None, sour
     ]
     orchestration_markers = [
         "orquestracao", "orquestrar", "child_execution_graphs", "dispatch_executed",
-        "orion", "chris", "squad", "subagente", "multiagente", "multi agente",
+        "squad", "subagente", "multiagente", "multi agente",
     ]
     proposal_markers = [
         "proposal_only", "proposal only", "proposta", "patch", "diff preview",
