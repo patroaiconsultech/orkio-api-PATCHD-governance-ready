@@ -39601,6 +39601,187 @@ async def chat_stream(
             elif "@orkio" in _hf4p_raw_msg_l:
                 _hf4p_target = "Orkio"
 
+            # AO43_DIRECT_AGENT_MEMORY_FACT_FASTPATH
+            # Perguntas factuais simples por @mention devem ser respondidas de forma
+            # determinística a partir da thread, antes do runtime pesado. Isto evita
+            # regressão AO46C em perguntas como:
+            #   "@Orion qual foi a palavra-chave desta conversa?"
+            # O guard é estreito: só cobre nome, empresa e palavra-chave já informados
+            # na conversa. Não intercepta GitHub, auditoria, diagnóstico, patch ou deploy.
+            _ao43_memory_fact_terms = (
+                "palavra-chave", "palavra chave",
+                "meu nome", "meu nome?", "nome?",
+                "minha empresa", "empresa?",
+                "qual e meu nome", "qual é meu nome",
+                "qual e o meu nome", "qual é o meu nome",
+                "qual e minha empresa", "qual é minha empresa",
+                "qual e a minha empresa", "qual é a minha empresa",
+            )
+            _ao43_block_terms = (
+                "github", "git hub", "repo", "repositorio", "repositório",
+                "auditoria", "audite", "audit", "diagnostico", "diagnóstico",
+                "patch", "deploy", "commit", "branch", "pull request", " pr ",
+                "runtime", "terminal", "platform_self_audit", "self audit",
+                "leitura executiva", "leitura estrategica", "leitura estratégica",
+                "plano", "proposal", "proposta", "war room",
+            )
+            _ao43_is_memory_fact_request = bool(
+                _hf4p_target
+                and any(_term in _hf4k_norm for _term in _ao43_memory_fact_terms)
+                and not any(_term in _hf4k_norm for _term in _ao43_block_terms)
+                and len(_hf4k_msg) <= 240
+            )
+
+            def _ao43_extract_last_match(patterns: List[str], corpus: str) -> str:
+                value = ""
+                for _pattern in patterns:
+                    try:
+                        _matches = re.findall(_pattern, corpus, flags=re.IGNORECASE | re.UNICODE)
+                    except Exception:
+                        _matches = []
+                    for _m in _matches:
+                        if isinstance(_m, tuple):
+                            _candidate = next((str(x or "").strip() for x in _m if str(x or "").strip()), "")
+                        else:
+                            _candidate = str(_m or "").strip()
+                        _candidate = _candidate.strip(" .,!?:;\n\r\t'\"“”‘’")
+                        if _candidate:
+                            value = _candidate
+                return value.strip()
+
+            def _ao43_memory_fact_fastpath_in_isolated_session() -> Dict[str, Any]:
+                _db43 = SessionLocal()
+                try:
+                    _tid43 = str(tid_seed or "").strip()
+                    if not _tid43:
+                        return {"ok": False, "skip": True}
+
+                    try:
+                        _get_or_create_user_message(
+                            _db43,
+                            org,
+                            _tid43,
+                            user,
+                            message,
+                            client_message_id,
+                        )
+                        _db43.commit()
+                    except Exception:
+                        try:
+                            _db43.rollback()
+                        except Exception:
+                            pass
+
+                    _rows43 = _db43.execute(
+                        select(Message)
+                        .where(
+                            Message.org_slug == org,
+                            Message.thread_id == _tid43,
+                        )
+                        .order_by(Message.created_at.asc())
+                        .limit(120)
+                    ).scalars().all()
+
+                    _corpus43 = "\n".join(
+                        str(getattr(_row, "content", "") or "")
+                        for _row in (_rows43 or [])
+                        if str(getattr(_row, "content", "") or "").strip()
+                    )
+                    _norm43 = _hf4k_norm
+
+                    _keyword43 = _ao43_extract_last_match(
+                        [
+                            r"palavra[-\s]?chave(?:\s+desta\s+conversa)?\s*(?:é|e|foi|:|=)\s*([A-Za-z0-9_\-]{2,64})",
+                            r"keyword(?:\s+desta\s+conversa)?\s*(?:é|e|foi|:|=)\s*([A-Za-z0-9_\-]{2,64})",
+                        ],
+                        _corpus43,
+                    )
+                    _name43 = _ao43_extract_last_match(
+                        [
+                            r"meu\s+nome\s*(?:é|e|:|=)\s*([A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'´`^~\-]*(?:\s+[A-Za-zÀ-ÿ][A-Za-zÀ-ÿ'´`^~\-]*){0,3})",
+                        ],
+                        _corpus43,
+                    )
+                    _company43 = _ao43_extract_last_match(
+                        [
+                            r"minha\s+empresa\s*(?:é|e|:|=)\s*([A-Za-z0-9À-ÿ][A-Za-z0-9À-ÿ&._\-]*(?:\s+[A-Za-z0-9À-ÿ&._\-]+){0,4})",
+                            r"empresa\s*(?:é|e|:|=)\s*([A-Za-z0-9À-ÿ][A-Za-z0-9À-ÿ&._\-]*(?:\s+[A-Za-z0-9À-ÿ&._\-]+){0,4})",
+                        ],
+                        _corpus43,
+                    )
+
+                    _answer43 = ""
+                    if ("palavra-chave" in _norm43 or "palavra chave" in _norm43) and _keyword43:
+                        _answer43 = f"A palavra-chave desta conversa é {_keyword43}."
+                    elif ("empresa" in _norm43) and _company43:
+                        _answer43 = f"Sua empresa é a {_company43}."
+                    elif ("nome" in _norm43) and _name43:
+                        _answer43 = f"Seu nome é {_name43}."
+
+                    if not _answer43:
+                        return {"ok": False, "skip": True}
+
+                    _persisted43 = _persist_assistant_message(
+                        text=_answer43,
+                        thread_id=_tid43,
+                        agent_id=None,
+                        agent_name=_hf4p_target,
+                    )
+                    return {
+                        **_persisted43,
+                        "ok": True,
+                        "answer": _answer43,
+                        "message": _answer43,
+                        "final_text": _answer43,
+                        "content": _answer43,
+                        "text": _answer43,
+                        "agent_id": None,
+                        "agent_name": _hf4p_target,
+                        "service": "ao43_direct_agent_memory_fact_fastpath",
+                        "provider": "platform",
+                        "status": "done",
+                        "runtime_hints": {
+                            "routing": {
+                                "routing_source": "stream_ao43_direct_agent_memory_fact_fastpath",
+                                "route_applied": True,
+                                "execution_lifecycle": "completed",
+                                "target_agent": _hf4p_target,
+                                "final_speaker": _hf4p_target,
+                                "intent": "direct_agent_memory_fact",
+                                "write_executed": False,
+                                "proposal_created": False,
+                                "github_executed": False,
+                            }
+                        },
+                    }
+                finally:
+                    try:
+                        _db43.close()
+                    except Exception:
+                        pass
+
+            if _ao43_is_memory_fact_request:
+                try:
+                    _ao43_payload = await asyncio.to_thread(_ao43_memory_fact_fastpath_in_isolated_session)
+                    if isinstance(_ao43_payload, dict) and _ao43_payload.get("ok") and str(_ao43_payload.get("final_text") or "").strip():
+                        try:
+                            logger.warning(
+                                "AO43_DIRECT_AGENT_MEMORY_FACT_FASTPATH trace_id=%s thread_id=%s target=%s",
+                                trace_id,
+                                tid_seed,
+                                _hf4p_target,
+                            )
+                        except Exception:
+                            pass
+                        async for ev in _emit_result_payload(_ao43_payload, routing_source="stream_ao43_direct_agent_memory_fact_fastpath"):
+                            yield ev
+                        return
+                except Exception:
+                    try:
+                        logger.exception("AO43_DIRECT_AGENT_MEMORY_FACT_FASTPATH_FAILED trace_id=%s thread_id=%s", trace_id, tid_seed)
+                    except Exception:
+                        pass
+
             _hf4p_ping_terms = (
                 "online" in _hf4k_norm
                 or "operacional" in _hf4k_norm
