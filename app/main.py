@@ -39782,6 +39782,195 @@ async def chat_stream(
                     except Exception:
                         pass
 
+            # AO44_GITHUB_READONLY_STATUS_FASTPATH
+            # Pedidos explícitos do Orion para ler/status do repositório GitHub em modo
+            # readonly devem usar a capability real configurada, não o runtime LLM comum.
+            # Isto evita respostas falsas como "não tenho acesso ao GitHub" quando o
+            # backend tem GITHUB_TOKEN/GITHUB_REPO_* configurados.
+            _ao44_github_read_terms = (
+                "github", "git hub",
+                "repo", "repositorio", "repositório",
+                "repository",
+            )
+            _ao44_github_action_terms = (
+                "status", "leia", "ler", "consultar", "consulta",
+                "verifique", "verificar", "audite", "auditoria", "audit",
+                "scan", "mapear", "mapeie",
+            )
+            _ao44_readonly_terms = (
+                "readonly", "read-only", "somente leitura", "modo leitura",
+                "sem escrita", "não escreva", "nao escreva",
+            )
+            _ao44_write_block_terms = (
+                "aplique", "aplicar", "aplica ",
+                "corrija", "corrigir", "altere", "alterar",
+                "edite", "editar", "escreva", "escrever",
+                "commit", "push", "merge", "deploy",
+                "pull request", " pr ", "abrir pr", "open pr",
+                "crie branch", "criar branch",
+            )
+            _ao44_is_github_readonly_status = bool(
+                _hf4p_target == "Orion"
+                and any(_term in _hf4k_norm for _term in _ao44_github_read_terms)
+                and any(_term in _hf4k_norm for _term in _ao44_github_action_terms)
+                and (
+                    any(_term in _hf4k_norm for _term in _ao44_readonly_terms)
+                    or "status" in _hf4k_norm
+                    or "leia" in _hf4k_norm
+                    or "ler" in _hf4k_norm
+                )
+                and not any(_term in _hf4k_norm for _term in _ao44_write_block_terms)
+                and len(_hf4k_msg) <= 420
+            )
+
+            def _ao44_github_status_fastpath_in_isolated_session() -> Dict[str, Any]:
+                _db44 = SessionLocal()
+                try:
+                    _tid44 = str(tid_seed or "").strip()
+                    if not _tid44:
+                        return {"ok": False, "skip": True}
+
+                    try:
+                        _get_or_create_user_message(
+                            _db44,
+                            org,
+                            _tid44,
+                            user,
+                            message,
+                            client_message_id,
+                        )
+                        _db44.commit()
+                    except Exception:
+                        try:
+                            _db44.rollback()
+                        except Exception:
+                            pass
+
+                    _scope44 = _github_guess_scope_from_text(str(message or "")) or "backend"
+                    if _scope44 not in {"backend", "frontend", "repo"}:
+                        _scope44 = "backend"
+                    _repo_target44 = "frontend" if _scope44 == "frontend" else "backend"
+
+                    _diag44 = _github_repo_config_diagnostics(repo_target=_repo_target44)
+                    _token44 = _github_token_value()
+                    _result44: Dict[str, Any]
+                    try:
+                        _result44 = _github_repo_audit_scan_capability(
+                            scope=_scope44,
+                            branch=None,
+                            trace_id=str(trace_id or ""),
+                        )
+                    except Exception as _e44:
+                        _result44 = {
+                            "handled": True,
+                            "success": False,
+                            "provider": "github",
+                            "message": f"Falha técnica ao consultar GitHub readonly: {_e44}",
+                        }
+
+                    _success44 = bool(_result44.get("success"))
+                    _repo44 = str(_result44.get("repo") or _diag44.get("selected_repo") or "").strip()
+                    _branch44 = str(_result44.get("branch") or os.getenv("GITHUB_BRANCH", "main") or "main").strip()
+                    _files44 = list(_result44.get("files_analyzed") or [])
+                    _findings44 = list(_result44.get("findings") or [])
+                    _risks44 = list(_result44.get("risks") or [])
+                    _message44 = str(_result44.get("message") or "").strip()
+
+                    if _success44:
+                        _lines44 = [
+                            "STATUS GITHUB READONLY — BACKEND" if _scope44 == "backend" else "STATUS GITHUB READONLY",
+                            f"- provider: github",
+                            f"- repo: {_repo44 or 'n/d'}",
+                            f"- branch: {_branch44 or 'n/d'}",
+                            f"- access_checked: true",
+                            f"- write_executed: false",
+                            f"- files_analyzed: {', '.join(_files44[:8]) if _files44 else 'nenhum'}",
+                        ]
+                        if _findings44:
+                            _first44 = _findings44[0] if isinstance(_findings44[0], dict) else {}
+                            _lines44.append(f"- first_finding: {str(_first44.get('title') or _first44 or 'n/d')}")
+                        if _risks44:
+                            _lines44.append(f"- risks: {', '.join(str(x) for x in _risks44[:5])}")
+                        _lines44.append("- status: leitura readonly concluída com evidência operacional.")
+                    else:
+                        _lines44 = [
+                            "STATUS GITHUB READONLY — NÃO CONCLUÍDO",
+                            f"- provider: github",
+                            f"- selected_repo: {_diag44.get('selected_repo') or 'n/d'}",
+                            f"- backend_repo_configured: {bool(_diag44.get('backend_repo'))}",
+                            f"- frontend_repo_configured: {bool(_diag44.get('frontend_repo'))}",
+                            f"- token_present: {bool(_token44)}",
+                            f"- write_executed: false",
+                            f"- reason: {_message44 or 'github_readonly_failed'}",
+                        ]
+                    _answer44 = "\n".join(_lines44).strip()
+
+                    _persisted44 = _persist_assistant_message(
+                        text=_answer44,
+                        thread_id=_tid44,
+                        agent_id=None,
+                        agent_name="Orion",
+                    )
+                    return {
+                        **_persisted44,
+                        "ok": True,
+                        "answer": _answer44,
+                        "message": _answer44,
+                        "final_text": _answer44,
+                        "content": _answer44,
+                        "text": _answer44,
+                        "agent_id": None,
+                        "agent_name": "Orion",
+                        "service": "ao44_github_readonly_status_fastpath",
+                        "provider": "github",
+                        "status": "done" if _success44 else "failed",
+                        "runtime_hints": {
+                            "routing": {
+                                "routing_source": "stream_ao44_github_readonly_status_fastpath",
+                                "route_applied": True,
+                                "execution_lifecycle": "completed" if _success44 else "failed",
+                                "target_agent": "Orion",
+                                "final_speaker": "Orion",
+                                "intent": "github_repo_readonly_status",
+                                "capability": "github_repo_read",
+                                "provider": "github",
+                                "repo": _repo44 or _diag44.get("selected_repo") or "",
+                                "scope": _scope44,
+                                "write_executed": False,
+                                "proposal_created": False,
+                                "github_executed": True,
+                                "github_success": _success44,
+                            }
+                        },
+                    }
+                finally:
+                    try:
+                        _db44.close()
+                    except Exception:
+                        pass
+
+            if _ao44_is_github_readonly_status:
+                try:
+                    _ao44_payload = await asyncio.to_thread(_ao44_github_status_fastpath_in_isolated_session)
+                    if isinstance(_ao44_payload, dict) and _ao44_payload.get("ok") and str(_ao44_payload.get("final_text") or "").strip():
+                        try:
+                            logger.warning(
+                                "AO44_GITHUB_READONLY_STATUS_FASTPATH trace_id=%s thread_id=%s target=Orion provider=github status=%s",
+                                trace_id,
+                                tid_seed,
+                                str(_ao44_payload.get("status") or ""),
+                            )
+                        except Exception:
+                            pass
+                        async for ev in _emit_result_payload(_ao44_payload, routing_source="stream_ao44_github_readonly_status_fastpath"):
+                            yield ev
+                        return
+                except Exception:
+                    try:
+                        logger.exception("AO44_GITHUB_READONLY_STATUS_FASTPATH_FAILED trace_id=%s thread_id=%s", trace_id, tid_seed)
+                    except Exception:
+                        pass
+
             _hf4p_ping_terms = (
                 "online" in _hf4k_norm
                 or "operacional" in _hf4k_norm
