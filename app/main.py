@@ -23788,19 +23788,33 @@ def chat(
         except Exception:
             _ao41c_direct_slug = ""
 
+        _ao41d_is_direct_agent_conversation = False
+        try:
+            _ao41d_is_direct_agent_conversation = (
+                bool(locals().get("ao37_skip_heavy_dispatch"))
+                or bool(locals().get("ao01_explicit_agent_conversation"))
+                or (
+                    isinstance(dispatch_routing_receipt, dict)
+                    and bool(dispatch_routing_receipt.get("direct_agent_message"))
+                )
+            )
+        except Exception:
+            _ao41d_is_direct_agent_conversation = bool(locals().get("ao37_skip_heavy_dispatch"))
+
         if (
-            bool(locals().get("ao37_skip_heavy_dispatch"))
+            _ao41d_is_direct_agent_conversation
             and isinstance(direct_runtime_result, dict)
             and bool(direct_runtime_result.get("ok"))
             and bool(str(answer or "").strip())
             and not bool(has_team)
-            and _ao41c_direct_slug == "orkio"
+            and _ao41c_direct_slug in {"orkio", "orion", "chris"}
         ):
             try:
                 logger.warning(
-                    "AO41C_RETURN_AFTER_FINAL_PERSIST_PLAIN_CONVERSATION trace_id=%s thread_id=%s message_id=%s chars=%s",
+                    "AO41D_RETURN_AFTER_FINAL_PERSIST_DIRECT_AGENT_CONVERSATION trace_id=%s thread_id=%s direct_slug=%s message_id=%s chars=%s",
                     ao32_trace_id,
                     tid,
+                    _ao41c_direct_slug,
                     getattr(m_ass, "id", None),
                     len(str(answer or "")),
                 )
