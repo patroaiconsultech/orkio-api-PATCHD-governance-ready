@@ -18072,7 +18072,7 @@ def _github_extract_module_audit_request(user_text: str) -> Optional[Dict[str, s
 
 
 def _github_get_file_content_capability(*, path: str, branch: Optional[str] = None, trace_id: Optional[str] = None) -> Dict[str, Any]:
-    repo, resolved_branch, token = _github_resolve_repo_branch(branch)
+    repo, resolved_branch, token, _repo_kind = _github_resolve_repo_branch(branch)
     if not token or not repo:
         return {"handled": True, "success": False, "provider": "github", "message": "GitHub capability não está habilitada no ambiente."}
     if not _github_safe_path(path):
@@ -18099,7 +18099,7 @@ def _github_get_file_content_capability(*, path: str, branch: Optional[str] = No
 
 
 def _github_read_multiple_files_capability(*, paths: List[str], branch: Optional[str] = None, trace_id: Optional[str] = None) -> Dict[str, Any]:
-    repo, resolved_branch, token = _github_resolve_repo_branch(branch)
+    repo, resolved_branch, token, _repo_kind = _github_resolve_repo_branch(branch)
     if not token or not repo:
         return {"handled": True, "success": False, "provider": "github", "message": "GitHub capability não está habilitada no ambiente."}
     normalized_paths = []
@@ -18145,7 +18145,7 @@ def _github_read_multiple_files_capability(*, paths: List[str], branch: Optional
 
 
 def _github_read_tree_recursive_capability(*, root_path: str = "", branch: Optional[str] = None, trace_id: Optional[str] = None) -> Dict[str, Any]:
-    repo, resolved_branch, token = _github_resolve_repo_branch(branch)
+    repo, resolved_branch, token, _repo_kind = _github_resolve_repo_branch(branch)
     if not token or not repo:
         return {"handled": True, "success": False, "provider": "github", "message": "GitHub capability não está habilitada no ambiente."}
     _github_log("GITHUB_TREE_READ_ATTEMPT", repo=repo, branch=resolved_branch, root_path=root_path or "", trace_id=trace_id or "")
@@ -18169,7 +18169,7 @@ def _github_read_tree_recursive_capability(*, root_path: str = "", branch: Optio
 
 
 def _github_search_code_capability(*, query: str, branch: Optional[str] = None, trace_id: Optional[str] = None) -> Dict[str, Any]:
-    repo, resolved_branch, token = _github_resolve_repo_branch(branch)
+    repo, resolved_branch, token, _repo_kind = _github_resolve_repo_branch(branch)
     if not token or not repo:
         return {"handled": True, "success": False, "provider": "github", "message": "GitHub capability não está habilitada no ambiente."}
     q = (query or "").strip()
@@ -18222,7 +18222,7 @@ def _github_search_code_capability(*, query: str, branch: Optional[str] = None, 
 
 
 def _github_build_code_context_capability(*, paths: Optional[List[str]] = None, query: Optional[str] = None, branch: Optional[str] = None, trace_id: Optional[str] = None) -> Dict[str, Any]:
-    repo, resolved_branch, token = _github_resolve_repo_branch(branch)
+    repo, resolved_branch, token, _repo_kind = _github_resolve_repo_branch(branch)
     if not token or not repo:
         return {"handled": True, "success": False, "provider": "github", "message": "GitHub capability não está habilitada no ambiente."}
     normalized_paths = []
@@ -18286,7 +18286,7 @@ def _github_build_code_context_capability(*, paths: Optional[List[str]] = None, 
 
 
 def _github_repo_audit_scan_capability(*, scope: str = "repo", branch: Optional[str] = None, trace_id: Optional[str] = None) -> Dict[str, Any]:
-    repo, resolved_branch, token = _github_resolve_repo_branch(branch)
+    repo, resolved_branch, token, _repo_kind = _github_resolve_repo_branch(branch)
     if not token or not repo:
         return {"handled": True, "success": False, "provider": "github", "message": "GitHub capability não está habilitada no ambiente."}
     resolved_scope = (scope or "repo").strip().lower() or "repo"
@@ -18359,7 +18359,7 @@ def _github_repo_audit_scan_capability(*, scope: str = "repo", branch: Optional[
 
 
 def _github_module_audit_capability(*, module_name: str, branch: Optional[str] = None, trace_id: Optional[str] = None) -> Dict[str, Any]:
-    repo, resolved_branch, token = _github_resolve_repo_branch(branch)
+    repo, resolved_branch, token, _repo_kind = _github_resolve_repo_branch(branch)
     if not token or not repo:
         return {"handled": True, "success": False, "provider": "github", "message": "GitHub capability não está habilitada no ambiente."}
     module = (module_name or "").strip().strip("/")
