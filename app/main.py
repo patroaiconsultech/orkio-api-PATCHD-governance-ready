@@ -2615,6 +2615,15 @@ class ChangePasswordIn(BaseModel):
     new_password: str = Field(min_length=6, max_length=256)
     new_password_confirm: str = Field(min_length=6, max_length=256)
 
+class BetaWaitlistIn(BaseModel):
+    name: str = Field(min_length=1, max_length=200)
+    company: Optional[str] = Field(default=None, max_length=200)
+    whatsapp: Optional[str] = Field(default=None, max_length=80)
+    email: EmailStr
+    consent: bool = False
+    access_code: str = Field(min_length=4, max_length=64)
+    source: Optional[str] = Field(default="closed_beta_gate", max_length=100)
+
 class FounderHandoffIn(BaseModel):
     thread_id: Optional[str] = None
     interest_type: str = Field(default="general", min_length=1, max_length=64)
@@ -4984,6 +4993,91 @@ def validate_access_code_post(
         "org": org,
     }
 
+@app.post("/api/beta/waitlist")
+def create_beta_waitlist(
+    inp: BetaWaitlistIn,
+    request: Request = None,
+    x_org_slug: Optional[str] = Header(default=None),
+    db: Session = Depends(get_db),
+):
+    org = (get_org(x_org_slug) if x_org_slug else default_tenant()).strip()
+    code = str(inp.access_code or "").strip().upper()
+
+    if code != "EFATAH777":
+        raise HTTPException(status_code=403, detail="Código de acesso inválido.")
+
+    if not inp.consent:
+        raise HTTPException(status_code=400, detail="É necessário autorizar o contato para entrar na lista prioritária.")
+
+    email = str(inp.email or "").strip().lower()
+    ip = request.client.host if request and request.client else "unknown"
+    ip_hash = hashlib.sha256(str(ip).encode("utf-8")).hexdigest()
+
+    try:
+        db.execute(text("""
+            CREATE TABLE IF NOT EXISTS beta_waitlist (
+                id VARCHAR PRIMARY KEY,
+                org_slug VARCHAR NOT NULL,
+                name VARCHAR NOT NULL,
+                company VARCHAR,
+                whatsapp VARCHAR,
+                email VARCHAR NOT NULL UNIQUE,
+                consent BOOLEAN NOT NULL DEFAULT FALSE,
+                access_code VARCHAR,
+                source VARCHAR,
+                user_agent TEXT,
+                ip_hash VARCHAR,
+                created_at BIGINT NOT NULL,
+                updated_at BIGINT NOT NULL
+            )
+        """))
+        db.execute(text("CREATE INDEX IF NOT EXISTS ix_beta_waitlist_org ON beta_waitlist(org_slug)"))
+        db.execute(text("""
+            INSERT INTO beta_waitlist (
+                id, org_slug, name, company, whatsapp, email, consent,
+                access_code, source, user_agent, ip_hash, created_at, updated_at
+            )
+            VALUES (
+                :id, :org_slug, :name, :company, :whatsapp, :email, :consent,
+                :access_code, :source, :user_agent, :ip_hash, :created_at, :updated_at
+            )
+            ON CONFLICT(email) DO UPDATE SET
+                name = excluded.name,
+                company = excluded.company,
+                whatsapp = excluded.whatsapp,
+                consent = excluded.consent,
+                access_code = excluded.access_code,
+                source = excluded.source,
+                user_agent = excluded.user_agent,
+                ip_hash = excluded.ip_hash,
+                updated_at = excluded.updated_at
+        """), {
+            "id": new_id(),
+            "org_slug": org,
+            "name": str(inp.name or "").strip(),
+            "company": str(inp.company or "").strip() or None,
+            "whatsapp": str(inp.whatsapp or "").strip() or None,
+            "email": email,
+            "consent": bool(inp.consent),
+            "access_code": code,
+            "source": str(inp.source or "closed_beta_gate")[:100],
+            "user_agent": str(request.headers.get("user-agent", "") if request else "")[:1000],
+            "ip_hash": ip_hash,
+            "created_at": now_ts(),
+            "updated_at": now_ts(),
+        })
+        db.commit()
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        logger.exception("BETA_WAITLIST_SAVE_FAILED email=%s org=%s", email, org)
+        raise HTTPException(status_code=500, detail="Não foi possível registrar seu interesse agora.")
+
+    return {"ok": True, "message": "Cadastro registrado com sucesso."}
+
+
 
 class SummitSessionStartCompatIn(BaseModel):
     language: Optional[str] = "auto"
@@ -6128,6 +6222,38 @@ def _get_feature_flag(db: Session, org: str, key: str) -> Optional[str]:
         return None
 
 
+# AO-BETA-01 — Closed Beta / Programa de Evolução Controlada.
+# Gate operacional: externos não acessam console; EFATAH777 entra na waitlist.
+def _closed_beta_gate_enabled() -> bool:
+    raw = _clean_env(os.getenv("ORKIO_CLOSED_BETA_GATE", "true"), default="true")
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _closed_beta_internal_emails() -> set:
+    raw = _clean_env(os.getenv("ORKIO_CLOSED_BETA_INTERNAL_EMAILS", ""), default="")
+    return {part.strip().lower() for part in raw.split(",") if part.strip()}
+
+
+def _is_closed_beta_internal_email(email: Optional[str]) -> bool:
+    safe = str(email or "").strip().lower()
+    if not safe:
+        return False
+    if safe in admin_emails():
+        return True
+    if safe in _closed_beta_internal_emails():
+        return True
+    return False
+
+
+def _is_closed_beta_internal_user(u: Optional[User], email: Optional[str] = None) -> bool:
+    safe_email = str(email or getattr(u, "email", "") or "").strip().lower()
+    if _is_closed_beta_internal_email(safe_email):
+        return True
+    if u and str(getattr(u, "role", "") or "").strip().lower() == "admin":
+        return True
+    return False
+
+
 def _is_summit_auto_approved_code(raw_access_code: Optional[str], signup_code_label: Optional[str], signup_source: Optional[str]) -> bool:
     """
     Summit access code EFATAH777 must auto-approve without manual admin approval.
@@ -6178,6 +6304,15 @@ def register(inp: RegisterIn, request: Request = None, x_org_slug: Optional[str]
     org = (get_org(x_org_slug) if x_org_slug else (inp.tenant or default_tenant())).strip()
     email = inp.email.lower().strip()
     is_admin_email = email in admin_emails()
+
+    # AO-BETA-01 — em beta fechado, registro externo não cria conta de console.
+    # EFATAH777 deve ir para waitlist, não para console completo.
+    if _closed_beta_gate_enabled() and not _is_closed_beta_internal_email(email):
+        logger.warning("REGISTER_DENIED reason=closed_beta_hold email=%s org=%s", email, org)
+        raise HTTPException(
+            status_code=403,
+            detail="Acesso antecipado temporariamente restrito. Entre na Lista Prioritária pelo Programa de Evolução Controlada."
+        )
 
     try:
         logger.warning(
@@ -6412,6 +6547,14 @@ def login(inp: LoginIn, x_org_slug: Optional[str] = Header(default=None), db: Se
     except Exception:
         logger.exception("ADMIN_ELEVATE_FAILED")
 
+    # AO-BETA-01 — bloqueio operacional do console para externos.
+    # Apenas admin/equipe allowlist acessa o console completo durante estabilização.
+    if _closed_beta_gate_enabled() and not _is_closed_beta_internal_user(u, email):
+        logger.warning("LOGIN_DENIED reason=closed_beta_hold email=%s org=%s", email, org)
+        raise HTTPException(
+            status_code=403,
+            detail="Acesso antecipado temporariamente restrito. A nova fase do ORKIO OS está em evolução controlada."
+        )
 
     usage_tier = getattr(u, "usage_tier", "summit_standard") or "summit_standard"
 
