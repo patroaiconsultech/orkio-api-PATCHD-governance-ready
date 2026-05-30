@@ -19126,6 +19126,28 @@ def _normalize_orion_runtime_execution_result(raw: Dict[str, Any]) -> Dict[str, 
     ok = bool(data.get("ok"))
     mode = str(data.get("mode") or "").strip()
     event = str(data.get("event") or "").strip()
+
+    # AO01_EXPLICIT_AGENT_CONVERSATION_ESCAPE_PASSTHROUGH:
+    # The Orion internal runtime can explicitly say that the message is a normal
+    # agent conversation and must continue through chat/RAG history. Treating this
+    # as a GitHub failure creates false "Não foi possível concluir..." responses.
+    if (
+        bool(data.get("pass_through"))
+        or bool(data.get("should_continue_chat_runtime"))
+        or mode == "conversation_escape"
+        or event == "ORION_CONVERSATION_ESCAPE"
+    ):
+        return {
+            "handled": False,
+            "success": False,
+            "provider": str(data.get("provider") or "runtime").strip() or "runtime",
+            "mode": mode or "conversation_escape",
+            "event": event or "ORION_CONVERSATION_ESCAPE",
+            "pass_through": True,
+            "should_continue_chat_runtime": True,
+            "message": str(data.get("reason") or data.get("message") or "conversation_pass_through").strip(),
+        }
+
     inferred_provider = "platform" if mode.startswith("platform_") or event.startswith("PLATFORM_") else "github"
     provider = str(data.get("provider") or inferred_provider).strip() or inferred_provider
     backend_repo = str(data.get("backend_repo") or "").strip()
@@ -19361,6 +19383,110 @@ def _should_execute_runtime_from_enrichment(runtime_enrichment: Optional[Dict[st
     }:
         return False
     return bool(intent_package.get("requires_runtime_execution"))
+
+
+def _ao01_is_explicit_agent_conversation(
+    user_text: Any,
+    *,
+    requested_names: Optional[List[Any]] = None,
+    mention_tokens: Optional[List[Any]] = None,
+) -> bool:
+    """Return True only for normal chat questions directed to @Orion/@Chris/@Orkio.
+
+    Safety rule:
+    - @Orion alone is not GitHub/audit/runtime.
+    - Explicit audit/GitHub/runtime/platform/self-heal commands remain executable.
+    """
+    raw = str(user_text or "").strip()
+    if not raw:
+        return False
+
+    low = raw.lower()
+    agent_slugs = {"orion", "chris", "orkio"}
+
+    tokens = set()
+    for value in list(requested_names or []) + list(mention_tokens or []):
+        try:
+            slug = _canonical_dispatch_specialist_slug(value)
+        except Exception:
+            slug = str(value or "").strip().lower().lstrip("@")
+        if slug:
+            tokens.add(str(slug).strip().lower().lstrip("@"))
+
+    has_explicit_agent = bool(tokens & agent_slugs) or any(
+        f"@{slug}" in low for slug in agent_slugs
+    )
+    if not has_explicit_agent:
+        return False
+
+    action_terms = (
+        "auditoria",
+        "audit",
+        "audite",
+        "auditar",
+        "readonly",
+        "read-only",
+        "somente leitura",
+        "diagnóstico",
+        "diagnostico",
+        "diagnosticar",
+        "runtime",
+        "github",
+        "repo",
+        "repositório",
+        "repositorio",
+        "branch",
+        "pull request",
+        " pr ",
+        "patch",
+        "deploy",
+        "scan",
+        "war room",
+        "governança",
+        "governance",
+        "capability",
+        "terminal",
+        "execute",
+        "executar",
+        "aplique",
+        "aplicar",
+        "commit",
+        "push",
+        "platform_self_audit",
+        "self audit",
+        "self-audit",
+        "autoauditoria",
+        "auto auditoria",
+    )
+    if any(term in low for term in action_terms):
+        return False
+
+    conversational_markers = (
+        "?",
+        "qual ",
+        "quem ",
+        "o que ",
+        "oque ",
+        "resuma",
+        "resumir",
+        "explique",
+        "me diga",
+        "diga",
+        "lembra",
+        "lembrar",
+        "guardar",
+        "guardei",
+        "meu nome",
+        "minha empresa",
+        "palavra-chave",
+        "palavra chave",
+        "contexto",
+        "conversa",
+        "conversamos",
+        "falamos",
+        "pedi para guardar",
+    )
+    return any(marker in low for marker in conversational_markers)
 
 
 
@@ -20166,6 +20292,12 @@ def _execute_capability_if_authorized(
         )
         if isinstance(orion_result, dict):
             normalized = _normalize_orion_runtime_execution_result(orion_result)
+            if (
+                normalized.get("pass_through")
+                or normalized.get("should_continue_chat_runtime")
+                or normalized.get("handled") is False
+            ):
+                return None
             if trace_id and not normalized.get("trace_id"):
                 normalized["trace_id"] = trace_id
             if runtime_kind and not normalized.get("runtime_kind"):
@@ -22125,6 +22257,68 @@ def chat(
     except Exception:
         pass
 
+    # AO01_EXPLICIT_AGENT_CONVERSATION_GUARD:
+    # Normal @Orion/@Chris/@Orkio questions must stay in conversational chat with
+    # thread history. They must not be promoted to GitHub/runtime/platform_self_audit.
+    ao01_explicit_agent_conversation = False
+    try:
+        ao01_explicit_agent_conversation = _ao01_is_explicit_agent_conversation(
+            inp.message,
+            requested_names=requested_names,
+            mention_tokens=mention_tokens,
+        )
+    except Exception:
+        ao01_explicit_agent_conversation = False
+
+    if ao01_explicit_agent_conversation and isinstance(runtime_enrichment, dict):
+        try:
+            intent_package_live = (
+                runtime_enrichment.get("intent_package")
+                if isinstance(runtime_enrichment.get("intent_package"), dict)
+                else {}
+            )
+            runtime_operation_live = (
+                intent_package_live.get("runtime_operation")
+                if isinstance(intent_package_live.get("runtime_operation"), dict)
+                else {}
+            )
+
+            intent_package_live["intent"] = "direct_agent_message"
+            intent_package_live["capability_name"] = "direct_agent_message"
+            intent_package_live["requires_runtime_execution"] = False
+
+            runtime_operation_live["kind"] = "conversation"
+            runtime_operation_live["capability_name"] = "direct_agent_message"
+            runtime_operation_live["execution_depth"] = "chat"
+            runtime_operation_live["prepare_only"] = True
+            intent_package_live["runtime_operation"] = runtime_operation_live
+            runtime_enrichment["intent_package"] = intent_package_live
+
+            _ao01_target_name = ""
+            if target_agents:
+                _ao01_target_name = str(getattr(target_agents[0], "name", "") or "").strip()
+            if not _ao01_target_name and requested_names:
+                _ao01_target_name = str(requested_names[0] or "").strip().lstrip("@")
+
+            if _ao01_target_name:
+                dispatch_routing_receipt["direct_agent_message"] = True
+                dispatch_routing_receipt["orchestrator_dispatch"] = False
+                dispatch_routing_receipt["mediated_single_target_delegation"] = False
+                dispatch_routing_receipt["target_agent"] = _ao01_target_name
+                dispatch_routing_receipt["visible_agent"] = _ao01_target_name
+                dispatch_routing_receipt["target_agents"] = [_ao01_target_name]
+                dispatch_routing_receipt["final_speaker"] = _ao01_target_name
+                dispatch_routing_receipt["answer_source"] = "ao01_explicit_agent_conversation"
+
+            logger.warning(
+                "AO01_EXPLICIT_AGENT_CONVERSATION_GUARD_APPLIED trace_id=%s thread_id=%s target=%s",
+                ao32_trace_id,
+                tid,
+                _ao01_target_name or "",
+            )
+        except Exception:
+            pass
+
     # PATCH27_12AJ — execution-first collapse for sync chat
     should_execute_runtime = _should_execute_runtime_from_enrichment(runtime_enrichment)
     try:
@@ -22141,7 +22335,9 @@ def chat(
         )
     except Exception:
         pass
-    if not should_execute_runtime and isinstance(runtime_enrichment, dict):
+    if ao01_explicit_agent_conversation:
+        should_execute_runtime = False
+    elif not should_execute_runtime and isinstance(runtime_enrichment, dict):
         try:
             intent_package_live = runtime_enrichment.get("intent_package") if isinstance(runtime_enrichment.get("intent_package"), dict) else {}
             runtime_operation_live = intent_package_live.get("runtime_operation") if isinstance(intent_package_live.get("runtime_operation"), dict) else {}
@@ -22176,7 +22372,7 @@ def chat(
     except Exception:
         _ao34c_simple_conversational = False
 
-    if _ao34c_simple_conversational and not team_technical_audit:
+    if (ao01_explicit_agent_conversation or _ao34c_simple_conversational) and not team_technical_audit:
         try:
             logger.warning(
                 "AO34C_SIMPLE_CONVERSATION_BYPASS trace_id=%s thread_id=%s should_execute_runtime_before=%s",
