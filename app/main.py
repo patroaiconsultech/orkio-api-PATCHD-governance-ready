@@ -39608,7 +39608,38 @@ async def chat_stream(
                 or "pronto" in _hf4k_norm
                 or "respondendo" in _hf4k_norm
             )
-            _hf4p_agent_ping = bool(_hf4p_target and _hf4p_ping_terms and len(_hf4k_msg) <= 180)
+
+            # AO42_FASTPATH_REAL_INTENT_GUARD
+            # @Orion/@Chris/@Team com intenção real não é ping/status.
+            # Exemplo crítico:
+            #   "@Orion leia o status do repositório backend no GitHub em modo readonly"
+            # contém "status", mas deve seguir para o roteador/GitHub readonly,
+            # não para a presença genérica "Orion está online".
+            _ao42_real_intent_terms = (
+                "github", "git hub",
+                "repo", "repositorio", "repositório",
+                "backend", "frontend", "api",
+                "status do repositorio", "status do repositório",
+                "leia", "ler", "analise", "analisar",
+                "audite", "auditoria", "audit", "diagnostico", "diagnóstico",
+                "trace", "log", "logs",
+                "leitura executiva", "leitura estrategica", "leitura estratégica",
+                "resuma", "resumo", "explique",
+                "qual ", "quem ", "o que ", "oque ",
+                "me diga", "diga apenas",
+                "palavra-chave", "palavra chave",
+                "empresa", "nome", "contexto", "conversa", "conversamos",
+            )
+            _ao42_agent_real_intent = bool(
+                _hf4p_target
+                and any(_term in _hf4k_norm for _term in _ao42_real_intent_terms)
+            )
+            _hf4p_agent_ping = bool(
+                _hf4p_target
+                and _hf4p_ping_terms
+                and not _ao42_agent_real_intent
+                and len(_hf4k_msg) <= 180
+            )
 
             # AO20K-HF4T_SAFE_AGENT_GREETING_FASTPATH
             _hf4t_raw_l = str(_hf4k_msg or "").lower().strip()
@@ -40647,6 +40678,22 @@ async def chat_stream(
                     _ao46b1_words = re.findall(r"[\wÀ-ÿ]+", _ao46b1_plain, flags=re.UNICODE)
                     _ao46b1_short = len(_ao46b1_plain) <= 360 and len(_ao46b1_words) <= 55
 
+                    # AO42_EXPLICIT_TARGET_FASTPATH_GUARD
+                    # A leitura executiva natural AO46B1 é um atalho sem especialista explícito.
+                    # Quando o usuário chama @Chris/@Orion/@Orkio/@Team, o target explícito
+                    # deve vencer e a mensagem deve seguir para AO32/direct_agent_message.
+                    _ao46b1_raw_l = _ao46b1_raw.lower()
+                    _ao46b1_explicit_target = ""
+                    if "@chris" in _ao46b1_raw_l:
+                        _ao46b1_explicit_target = "Chris"
+                    elif "@orion" in _ao46b1_raw_l:
+                        _ao46b1_explicit_target = "Orion"
+                    elif "@orkio" in _ao46b1_raw_l:
+                        _ao46b1_explicit_target = "Orkio"
+                    elif "@team" in _ao46b1_raw_l:
+                        _ao46b1_explicit_target = "Team"
+                    _ao46b1_defer_to_direct_agent = bool(_ao46b1_explicit_target)
+
                     _ao46b1_wants_exec = any(x in _ao46b1_plain for x in (
                         "leitura executiva",
                         "prioridade mais importante",
@@ -40670,7 +40717,12 @@ async def chat_stream(
                         "proposal", "proposta", "dry-run", "dry run",
                     ))
 
-                    if _ao46b1_short and _ao46b1_wants_exec and not _ao46b1_blocked:
+                    if (
+                        _ao46b1_short
+                        and _ao46b1_wants_exec
+                        and not _ao46b1_blocked
+                        and not _ao46b1_defer_to_direct_agent
+                    ):
                         _ao46b1_profile = {}
                         _ao46b1_db = None
                         try:
@@ -40815,6 +40867,16 @@ async def chat_stream(
                     _ao46a_words = re.findall(r"[\wÀ-ÿ]+", _ao46a_plain, flags=re.UNICODE)
                     _ao46a_short = len(_ao46a_plain) <= 180 and len(_ao46a_words) <= 28
 
+                    # AO42_EXPLICIT_TARGET_FASTPATH_GUARD
+                    # Context snapshot local não deve sequestrar @Chris/@Orion/@Orkio/@Team.
+                    _ao46a_raw_l = _ao46a_raw.lower()
+                    _ao46a_defer_to_direct_agent = bool(
+                        "@chris" in _ao46a_raw_l
+                        or "@orion" in _ao46a_raw_l
+                        or "@orkio" in _ao46a_raw_l
+                        or "@team" in _ao46a_raw_l
+                    )
+
                     _ao46a_is_context = any(x in _ao46a_plain for x in (
                         "qual e meu contexto", "qual é meu contexto",
                         "qual e o meu contexto", "qual é o meu contexto",
@@ -40839,7 +40901,12 @@ async def chat_stream(
                         "traceback", "exception",
                     ))
 
-                    if _ao46a_short and not _ao46a_blocked and (_ao46a_is_context or _ao46a_is_next):
+                    if (
+                        _ao46a_short
+                        and not _ao46a_blocked
+                        and not _ao46a_defer_to_direct_agent
+                        and (_ao46a_is_context or _ao46a_is_next)
+                    ):
                         _ao46a_profile = {}
                         _ao46a_db = None
 
