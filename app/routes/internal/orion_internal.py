@@ -3652,6 +3652,57 @@ def orion_runtime_execute(inp: "OrionRuntimeIn") -> Dict[str, Any]:
     effective_message = str(effective.get("message") or message or "")
     lowered = effective_message.lower()
     visible_agent = _resolve_visible_agent(effective_message, default="orion")
+
+    # AO01_ORION_CONVERSATION_ESCAPE_V2:
+    # O endpoint interno do Orion é voltado a auditoria/capabilities.
+    # Perguntas conversacionais comuns com @Orion devem voltar ao runtime normal de chat,
+    # onde há histórico da thread, RAG e memória conversacional.
+    #
+    # Exemplo que deve escapar daqui:
+    #   @Orion qual foi a palavra-chave que pedi para guardar nesta conversa?
+    #
+    # Exemplo que NÃO deve escapar:
+    #   @Orion faça uma auditoria readonly do runtime
+    _ao01_text = str(effective_message or "")
+    _ao01_lowered = _ao01_text.lower()
+    _ao01_audit_or_runtime_terms = (
+        "auditoria", "audit", "audite", "auditar",
+        "diagnóstico", "diagnostico", "diagnosticar",
+        "runtime", "github", "repo", "repositório", "repositorio",
+        "branch", "pull request", "patch", "deploy", "scan",
+        "war room", "governança", "governance", "capability",
+        "continuous audit", "auditoria contínua", "auditoria continua",
+        "squad", "especialista", "especialistas", "read only", "readonly",
+        "somente leitura", "plano técnico", "plano tecnico", "plano de patch",
+    )
+    _ao01_conversation_question = bool(
+        "?" in _ao01_text
+        and not any(term in _ao01_lowered for term in _ao01_audit_or_runtime_terms)
+    )
+    if _ao01_conversation_question:
+        return {
+            "ok": False,
+            "service": "orion_internal",
+            "mode": "conversation_escape",
+            "provider": "runtime",
+            "event": "ORION_CONVERSATION_ESCAPE",
+            "status": "pass_through",
+            "pass_through": True,
+            "bypass_internal_audit": True,
+            "skip_internal_audit": True,
+            "suppress_platform_self_audit": True,
+            "should_continue_chat_runtime": True,
+            "capability_name": "direct_agent_message",
+            "intent": "direct_agent_message",
+            "visible_agent": visible_agent,
+            "message": "",
+            "answer": "",
+            "final_text": "",
+            "technical_summary": "",
+            "reason": "Pergunta conversacional detectada; usar runtime normal de chat com histórico da thread.",
+            "generated_at": _now_ts(),
+        }
+
     single_target = _orchestrator_single_target_specialist(effective_message)
     orchestrator_host = _extract_orchestrator_host(effective_message)
     audit_op = _continuous_audit_operation_kind(message or effective_message)
@@ -3709,19 +3760,39 @@ def orion_runtime_execute(inp: "OrionRuntimeIn") -> Dict[str, Any]:
     if _looks_like_github_runtime_request(effective_message):
         return github_execute(inp)
 
-    # AO01_ORION_INTERNAL_CONVERSATION_ESCAPE:
-    # Perguntas comuns para @Orion não podem virar PLATFORM_SELF_AUDIT_READY.
-    # Este endpoint interno é de auditoria; conversa normal deve voltar ao runtime de chat.
+    # AO01_ORION_INTERNAL_CONVERSATION_ESCAPE_V2_FALLBACK:
+    # Segunda trava de segurança antes do fallback universal de auditoria.
     if "?" in str(effective_message or "") and not any(term in lowered for term in (
-        "auditoria", "audit", "diagnóstico", "diagnostico", "runtime", "github",
-        "repo", "branch", "pr", "patch", "deploy", "scan", "war room"
+        "auditoria", "audit", "audite", "auditar",
+        "diagnóstico", "diagnostico", "diagnosticar",
+        "runtime", "github", "repo", "repositório", "repositorio",
+        "branch", "pull request", "patch", "deploy", "scan",
+        "war room", "governança", "governance", "capability",
+        "continuous audit", "auditoria contínua", "auditoria continua",
+        "squad", "especialista", "especialistas", "read only", "readonly",
+        "somente leitura", "plano técnico", "plano tecnico", "plano de patch"
     )):
         return {
             "ok": False,
             "service": "orion_internal",
-            "event": "ORION_INTERNAL_NOT_AUDIT",
+            "mode": "conversation_escape_fallback",
+            "provider": "runtime",
+            "event": "ORION_CONVERSATION_ESCAPE",
             "status": "pass_through",
-            "message": "Pergunta conversacional detectada; não executar platform_self_audit.",
+            "pass_through": True,
+            "bypass_internal_audit": True,
+            "skip_internal_audit": True,
+            "suppress_platform_self_audit": True,
+            "should_continue_chat_runtime": True,
+            "capability_name": "direct_agent_message",
+            "intent": "direct_agent_message",
+            "visible_agent": visible_agent,
+            "message": "",
+            "answer": "",
+            "final_text": "",
+            "technical_summary": "",
+            "reason": "Pergunta conversacional detectada no fallback; não executar platform_self_audit.",
+            "generated_at": _now_ts(),
         }
 
     return _platform_self_audit_detached(inp)
