@@ -2457,6 +2457,29 @@ Typical response length: 2–4 short paragraphs or a structured technical analys
         is_default=False,
     )
 
+    # ARQUITECH_STANDALONE_AGENT_V1:
+    # ARIA is the single standalone agent for the Arquitech module.
+    # No orchestration. No default replacement. No changes to existing agents.
+    try:
+        from app.aria_profile import (
+            ARIA_ALIASES,
+            ARIA_CANONICAL_NAME,
+            ARIA_DESCRIPTION,
+            ARIA_SYSTEM_PROMPT,
+            ARIA_VOICE_ID,
+        )
+
+        upsert(
+            canonical_name=ARIA_CANONICAL_NAME,
+            aliases=ARIA_ALIASES,
+            description=ARIA_DESCRIPTION,
+            system_prompt=ARIA_SYSTEM_PROMPT,
+            voice_id=ARIA_VOICE_ID,
+            is_default=False,
+        )
+    except Exception:
+        logger.exception("ARIA_STANDALONE_AGENT_SEED_FAILED org=%s", org)
+
 
 
 
@@ -2694,6 +2717,11 @@ class ChatIn(BaseModel):
     client_message_id: Optional[str] = None  # idempotency key (frontend-generated UUID)
     top_k: int = 6
     trace_id: Optional[str] = None  # V2V: propagado pelo frontend para correlação de logs
+    # ARQUITECH_STANDALONE_HARDLOCK_V1:
+    # Explicit product/source flags allow the backend to normalize the Arquitech
+    # experience to ARIA only, without changing the normal Orkio multi-agent flow.
+    source: Optional[str] = None
+    product: Optional[str] = None
 
 class ChatOut(BaseModel):
     thread_id: str
@@ -2705,6 +2733,139 @@ class ChatOut(BaseModel):
     voice_id: Optional[str] = None
     avatar_url: Optional[str] = None
     runtime_hints: Optional[Dict[str, Any]] = None
+
+
+def _arquitech_standalone_requested(inp: Any) -> bool:
+    """Return True only when the request explicitly belongs to Arquitech.
+
+    This intentionally does not activate merely because the text mentions BIM,
+    CAD, architecture or Arquitech. The Orkio general console must remain free
+    for normal multi-agent use unless the frontend marks the request as
+    source/product Arquitech or targets ARIA directly.
+    """
+    try:
+        source = str(getattr(inp, "source", "") or "").strip().lower()
+        product = str(getattr(inp, "product", "") or "").strip().lower()
+        visible = str(getattr(inp, "visible_agent", "") or "").strip().lower()
+        target = str(getattr(inp, "target_agent_slug", "") or "").strip().lower()
+        names = getattr(inp, "requested_agent_names", None)
+        requested = " ".join(str(x or "") for x in names) if isinstance(names, list) else str(names or "")
+        requested = requested.lower()
+        return bool(
+            source == "arquitech"
+            or product == "arquitech"
+            or visible in {"aria", "aria arquitech", "aria (arquitech)", "arquitech"}
+            or target in {"aria", "aria arquitech", "aria (arquitech)", "arquitech"}
+            or "aria" in requested
+        )
+    except Exception:
+        return False
+
+
+def _resolve_aria_agent_for_arquitech(db: Session, org: str) -> Optional[Agent]:
+    """Find ARIA after ensuring core agents.
+
+    Best-effort and narrow: failure must not break the main Orkio runtime.
+    """
+    try:
+        ensure_core_agents(db, org)
+    except Exception:
+        try:
+            logger.exception("ARQUITECH_ENSURE_CORE_AGENTS_FAILED org=%s", org)
+        except Exception:
+            pass
+
+    try:
+        row = (
+            db.execute(
+                select(Agent)
+                .where(Agent.org_slug == org)
+                .where(func.lower(Agent.name) == "aria")
+                .limit(1)
+            )
+            .scalars()
+            .first()
+        )
+        if row:
+            return row
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    try:
+        return (
+            db.execute(
+                select(Agent)
+                .where(Agent.org_slug == org)
+                .where(Agent.name.ilike("%ARIA%"))
+                .order_by(Agent.created_at.asc())
+                .limit(1)
+            )
+            .scalars()
+            .first()
+        )
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return None
+
+
+def _apply_arquitech_standalone_lock(inp: Any, db: Session, org: str) -> Dict[str, Any]:
+    """Force Arquitech requests to ARIA only.
+
+    This is the backend hardlock for the Arquitech standalone scope:
+    - no Team;
+    - no multi-agent;
+    - no requested_agent_names;
+    - no handoff by payload;
+    - preserve normal Orkio behavior outside explicit Arquitech context.
+    """
+    if not _arquitech_standalone_requested(inp):
+        return {"applied": False}
+
+    aria = _resolve_aria_agent_for_arquitech(db, org)
+
+    try:
+        raw_message = str(getattr(inp, "message", "") or "")
+        cleaned_message = re.sub(
+            r"@([A-Za-z0-9_\-/]+(?:\s+[A-Za-z0-9_\-/]+){0,2})(?=(?:\s*[,.:;!?])|(?:\s+@)|$)",
+            "",
+            raw_message,
+            flags=re.IGNORECASE,
+        )
+        cleaned_message = re.sub(r"\s{2,}", " ", cleaned_message).strip()
+        if cleaned_message:
+            setattr(inp, "message", cleaned_message)
+
+        setattr(inp, "source", "arquitech")
+        setattr(inp, "product", "arquitech")
+        setattr(inp, "dest_mode", "single")
+        setattr(inp, "agent_ids", [])
+        setattr(inp, "requested_agent_names", [])
+        setattr(inp, "visible_agent", "ARIA")
+        if aria is not None:
+            setattr(inp, "agent_id", getattr(aria, "id", None))
+            # Current frontend/backend contract accepts this field as a concrete
+            # target identifier even though the historical name says "slug".
+            setattr(inp, "target_agent_slug", getattr(aria, "id", None))
+        else:
+            setattr(inp, "agent_id", None)
+            setattr(inp, "target_agent_slug", "aria")
+    except Exception:
+        try:
+            logger.exception("ARQUITECH_STANDALONE_LOCK_MUTATION_FAILED org=%s", org)
+        except Exception:
+            pass
+
+    return {
+        "applied": True,
+        "agent_id": getattr(aria, "id", None) if aria is not None else None,
+        "agent_name": getattr(aria, "name", "ARIA") if aria is not None else "ARIA",
+    }
 
 
 class GovernanceApprovePatchIn(BaseModel):
@@ -21436,6 +21597,20 @@ def chat(
     if db_user.role != "admin" and auth_status == "pending_approval":
         raise HTTPException(status_code=403, detail="User pending approval")
 
+    try:
+        _arquitech_lock_receipt = _apply_arquitech_standalone_lock(inp, db, org)
+        if _arquitech_lock_receipt.get("applied"):
+            logger.warning(
+                "ARQUITECH_STANDALONE_LOCK_APPLIED route=chat org=%s agent_id=%s",
+                org,
+                _arquitech_lock_receipt.get("agent_id"),
+            )
+    except Exception:
+        try:
+            logger.exception("ARQUITECH_STANDALONE_LOCK_FAILED route=chat org=%s", org)
+        except Exception:
+            pass
+
     uid = user.get("sub")
 
     # AO-32_RUNTIME_CHAT_OBSERVABILITY
@@ -32729,6 +32904,21 @@ async def chat_stream(
     message = (inp.message or "").strip()
     if not message:
         raise HTTPException(400, "message required")
+
+    try:
+        _arquitech_lock_receipt = _apply_arquitech_standalone_lock(inp, db, org)
+        if _arquitech_lock_receipt.get("applied"):
+            message = (inp.message or "").strip()
+            logger.warning(
+                "ARQUITECH_STANDALONE_LOCK_APPLIED route=chat_stream org=%s agent_id=%s",
+                org,
+                _arquitech_lock_receipt.get("agent_id"),
+            )
+    except Exception:
+        try:
+            logger.exception("ARQUITECH_STANDALONE_LOCK_FAILED route=chat_stream org=%s", org)
+        except Exception:
+            pass
 
     route_plan = _ao20bc_resolve_route(
         message,
