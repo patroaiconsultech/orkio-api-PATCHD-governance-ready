@@ -1405,7 +1405,7 @@ def _summit_access_expired(payload_or_user: Any) -> bool:
         if role == "admin":
             return False
         usage_tier = (payload_or_user.get("usage_tier") if isinstance(payload_or_user, dict) else getattr(payload_or_user, "usage_tier", None)) or "summit_standard"
-        if usage_tier in ("summit_vip", "summit_investor", "arquitech_free_trial", "arquitech_standalone"):
+        if usage_tier in ("summit_vip", "summit_investor"):
             return False
         return now_ts() > int(SUMMIT_EXPIRES_AT)
     except Exception:
@@ -2457,6 +2457,29 @@ Typical response length: 2–4 short paragraphs or a structured technical analys
         is_default=False,
     )
 
+    # ARQUITECH_STANDALONE_AGENT_V1:
+    # ARIA is the single standalone agent for the Arquitech module.
+    # No orchestration. No default replacement. No changes to existing agents.
+    try:
+        from app.aria_profile import (
+            ARIA_ALIASES,
+            ARIA_CANONICAL_NAME,
+            ARIA_DESCRIPTION,
+            ARIA_SYSTEM_PROMPT,
+            ARIA_VOICE_ID,
+        )
+
+        upsert(
+            canonical_name=ARIA_CANONICAL_NAME,
+            aliases=ARIA_ALIASES,
+            description=ARIA_DESCRIPTION,
+            system_prompt=ARIA_SYSTEM_PROMPT,
+            voice_id=ARIA_VOICE_ID,
+            is_default=False,
+        )
+    except Exception:
+        logger.exception("ARIA_STANDALONE_AGENT_SEED_FAILED org=%s", org)
+
 
 
 
@@ -2581,25 +2604,12 @@ class RegisterIn(BaseModel):
     turnstile_token: Optional[str] = None
     accept_terms: bool = False
     marketing_consent: bool = False
-    # ARQUITECH_REGISTER_ALLOW_01:
-    # Optional context fields allow the Arquitech frontend to open a controlled
-    # standalone registration path without disabling the closed beta gate for Orkio.
-    source: Optional[str] = None
-    product: Optional[str] = None
-    agent: Optional[str] = None
 
 class LoginIn(BaseModel):
     tenant: str = Field(default_tenant(), min_length=1)
     email: EmailStr
     password: str
     turnstile_token: Optional[str] = None
-    # ARQUITECH_REGISTER_ALLOW_01:
-    # Optional context/access fields keep the Arquitech login path isolated from
-    # the general Orkio closed beta gate.
-    access_code: Optional[str] = None
-    source: Optional[str] = None
-    product: Optional[str] = None
-    agent: Optional[str] = None
 
 # PATCH0100_28: Summit Pydantic models
 class OtpRequestIn(BaseModel):
@@ -2707,6 +2717,11 @@ class ChatIn(BaseModel):
     client_message_id: Optional[str] = None  # idempotency key (frontend-generated UUID)
     top_k: int = 6
     trace_id: Optional[str] = None  # V2V: propagado pelo frontend para correlação de logs
+    # ARQUITECH_STANDALONE_HARDLOCK_V1:
+    # Explicit product/source flags allow the backend to normalize the Arquitech
+    # experience to ARIA only, without changing the normal Orkio multi-agent flow.
+    source: Optional[str] = None
+    product: Optional[str] = None
 
 class ChatOut(BaseModel):
     thread_id: str
@@ -2718,6 +2733,202 @@ class ChatOut(BaseModel):
     voice_id: Optional[str] = None
     avatar_url: Optional[str] = None
     runtime_hints: Optional[Dict[str, Any]] = None
+
+
+def _arquitech_standalone_requested(inp: Any) -> bool:
+    """Return True only when the request explicitly belongs to Arquitech.
+
+    This intentionally does not activate merely because the text mentions BIM,
+    CAD, architecture or Arquitech. The Orkio general console must remain free
+    for normal multi-agent use unless the frontend marks the request as
+    source/product Arquitech or targets ARIA directly.
+    """
+    try:
+        source = str(getattr(inp, "source", "") or "").strip().lower()
+        product = str(getattr(inp, "product", "") or "").strip().lower()
+        visible = str(getattr(inp, "visible_agent", "") or "").strip().lower()
+        target = str(getattr(inp, "target_agent_slug", "") or "").strip().lower()
+        names = getattr(inp, "requested_agent_names", None)
+        requested = " ".join(str(x or "") for x in names) if isinstance(names, list) else str(names or "")
+        requested = requested.lower()
+        return bool(
+            source == "arquitech"
+            or product == "arquitech"
+            or visible in {"aria", "aria arquitech", "aria (arquitech)", "arquitech"}
+            or target in {"aria", "aria arquitech", "aria (arquitech)", "arquitech"}
+            or "aria" in requested
+        )
+    except Exception:
+        return False
+
+
+def _resolve_aria_agent_for_arquitech(db: Session, org: str) -> Optional[Agent]:
+    """Find ARIA after ensuring core agents.
+
+    Best-effort and narrow: failure must not break the main Orkio runtime.
+    """
+    try:
+        ensure_core_agents(db, org)
+    except Exception:
+        try:
+            logger.exception("ARQUITECH_ENSURE_CORE_AGENTS_FAILED org=%s", org)
+        except Exception:
+            pass
+
+    try:
+        row = (
+            db.execute(
+                select(Agent)
+                .where(Agent.org_slug == org)
+                .where(func.lower(Agent.name) == "aria")
+                .limit(1)
+            )
+            .scalars()
+            .first()
+        )
+        if row:
+            return row
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+
+    try:
+        return (
+            db.execute(
+                select(Agent)
+                .where(Agent.org_slug == org)
+                .where(Agent.name.ilike("%ARIA%"))
+                .order_by(Agent.created_at.asc())
+                .limit(1)
+            )
+            .scalars()
+            .first()
+        )
+    except Exception:
+        try:
+            db.rollback()
+        except Exception:
+            pass
+        return None
+
+
+
+def _build_aria_standalone_stream_answer(user_text: str) -> str:
+    """Deterministic ARIA fallback for the Arquitech standalone stream.
+
+    This guard exists only to prevent legacy Orkio/Team fast-paths from answering
+    inside the Arquitech product scope. It does not call other agents and it does
+    not perform orchestration.
+    """
+    raw = str(user_text or "").strip()
+    low = raw.lower()
+
+    greeting_terms = {"oi", "olá", "ola", "hello", "hi", "bom dia", "boa tarde", "boa noite"}
+    is_short_greeting = bool(low in greeting_terms or (len(low) <= 24 and any(t in low for t in greeting_terms)))
+
+    if is_short_greeting:
+        return (
+            "Olá, eu sou a ARIA, superagente standalone da Arquitech.\n\n"
+            "Posso te ajudar a organizar briefing, escopo, documentos, riscos, cronograma, proposta e próximos passos do seu projeto ou obra.\n\n"
+            "Para começarmos bem, me diga: qual é o tipo de projeto, em que fase ele está e qual entrega você precisa agora?"
+        )
+
+    if any(term in low for term in ("bim", "cad", "integra", "integração", "integracao", "sistema", "erp", "crm")):
+        return (
+            "Sou a ARIA, e vou tratar isso pela lógica da Arquitech: acima do BIM, a camada de decisão.\n\n"
+            "A Arquitech não substitui BIM, CAD ou sistemas técnicos. Ela organiza contexto, decisões, documentos, riscos, escopos e integrações para que o escritório tenha mais clareza operacional.\n\n"
+            "Próximo passo: me diga quais sistemas, documentos ou fluxos você quer conectar, e eu estruturo uma matriz inicial de integração e prioridade."
+        )
+
+    if any(term in low for term in ("shopping", "loja", "obra", "clínica", "clinica", "consultório", "consultorio", "reforma", "projeto")):
+        return (
+            "Vou organizar isso como ARIA, dentro da Arquitech.\n\n"
+            "1. Diagnóstico inicial\n"
+            "Seu pedido parece envolver projeto, obra ou operação arquitetônica. A primeira etapa é separar contexto, fase atual, responsáveis, documentos disponíveis e risco principal.\n\n"
+            "2. O que preciso confirmar\n"
+            "- tipo de obra ou projeto;\n"
+            "- área aproximada;\n"
+            "- cidade/local;\n"
+            "- fase atual;\n"
+            "- documentos existentes;\n"
+            "- entrega desejada agora.\n\n"
+            "3. Próximo passo recomendado\n"
+            "Me envie esses dados em poucas linhas e eu devolvo um briefing estruturado, checklist inicial e rota segura de trabalho."
+        )
+
+    return (
+        "Entendi. Vou responder como ARIA, a superagente standalone da Arquitech.\n\n"
+        "1. Diagnóstico inicial\n"
+        "Vou organizar seu pedido em contexto, objetivo, informações faltantes, riscos e próximo passo operacional.\n\n"
+        "2. O que já está claro\n"
+        f"- Mensagem recebida: {raw}\n\n"
+        "3. O que ainda falta\n"
+        "- tipo de projeto ou obra;\n"
+        "- fase atual;\n"
+        "- área aproximada;\n"
+        "- local;\n"
+        "- documento ou referência disponível;\n"
+        "- entrega que você quer gerar agora.\n\n"
+        "4. Próximo passo recomendado\n"
+        "Me envie esses dados e eu monto o primeiro diagnóstico Arquitech com briefing, checklist e rota de decisão."
+    )
+
+
+
+def _apply_arquitech_standalone_lock(inp: Any, db: Session, org: str) -> Dict[str, Any]:
+    """Force Arquitech requests to ARIA only.
+
+    This is the backend hardlock for the Arquitech standalone scope:
+    - no Team;
+    - no multi-agent;
+    - no requested_agent_names;
+    - no handoff by payload;
+    - preserve normal Orkio behavior outside explicit Arquitech context.
+    """
+    if not _arquitech_standalone_requested(inp):
+        return {"applied": False}
+
+    aria = _resolve_aria_agent_for_arquitech(db, org)
+
+    try:
+        raw_message = str(getattr(inp, "message", "") or "")
+        cleaned_message = re.sub(
+            r"@([A-Za-z0-9_\-/]+(?:\s+[A-Za-z0-9_\-/]+){0,2})(?=(?:\s*[,.:;!?])|(?:\s+@)|$)",
+            "",
+            raw_message,
+            flags=re.IGNORECASE,
+        )
+        cleaned_message = re.sub(r"\s{2,}", " ", cleaned_message).strip()
+        if cleaned_message:
+            setattr(inp, "message", cleaned_message)
+
+        setattr(inp, "source", "arquitech")
+        setattr(inp, "product", "arquitech")
+        setattr(inp, "dest_mode", "single")
+        setattr(inp, "agent_ids", [])
+        setattr(inp, "requested_agent_names", [])
+        setattr(inp, "visible_agent", "ARIA")
+        if aria is not None:
+            setattr(inp, "agent_id", getattr(aria, "id", None))
+            # Current frontend/backend contract accepts this field as a concrete
+            # target identifier even though the historical name says "slug".
+            setattr(inp, "target_agent_slug", getattr(aria, "id", None))
+        else:
+            setattr(inp, "agent_id", None)
+            setattr(inp, "target_agent_slug", "aria")
+    except Exception:
+        try:
+            logger.exception("ARQUITECH_STANDALONE_LOCK_MUTATION_FAILED org=%s", org)
+        except Exception:
+            pass
+
+    return {
+        "applied": True,
+        "agent_id": getattr(aria, "id", None) if aria is not None else None,
+        "agent_name": getattr(aria, "name", "ARIA") if aria is not None else "ARIA",
+    }
 
 
 class GovernanceApprovePatchIn(BaseModel):
@@ -6267,67 +6478,6 @@ def _is_closed_beta_internal_user(u: Optional[User], email: Optional[str] = None
     return False
 
 
-# ARQUITECH_REGISTER_ALLOW_01 — isolated signup/login release for Arquitech.
-# This does NOT disable the Orkio closed beta gate. It only permits the
-# standalone Arquitech funnel when the request carries the Arquitech context
-# and the dedicated Arquitech access code.
-def _normalize_gate_value(value: Optional[str]) -> str:
-    return str(value or "").strip().lower()
-
-
-def _normalize_gate_code(value: Optional[str]) -> str:
-    return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
-
-
-def _arquitech_register_code() -> str:
-    raw = _clean_env(os.getenv("ARQUITECH_REGISTER_CODE", "ARQUITECH777"), default="ARQUITECH777")
-    return _normalize_gate_code(raw or "ARQUITECH777")
-
-
-def _is_arquitech_access_code(value: Optional[str]) -> bool:
-    return _normalize_gate_code(value) == _arquitech_register_code()
-
-
-def _is_arquitech_request_context(
-    source: Optional[str] = None,
-    product: Optional[str] = None,
-    agent: Optional[str] = None,
-    access_code: Optional[str] = None,
-) -> bool:
-    src = _normalize_gate_value(source)
-    prod = _normalize_gate_value(product)
-    ag = _normalize_gate_value(agent)
-
-    if "arquitech" in src or "arquitech" in prod:
-        return True
-    if ag in {"aria", "arquitech", "aria-arquitech"}:
-        return True
-    if _is_arquitech_access_code(access_code):
-        return True
-    return False
-
-
-def _is_arquitech_user(u: Optional[User]) -> bool:
-    if not u:
-        return False
-
-    values = [
-        getattr(u, "signup_source", None),
-        getattr(u, "signup_code_label", None),
-        getattr(u, "usage_tier", None),
-        getattr(u, "product_scope", None),
-        getattr(u, "approved_via", None),
-        getattr(u, "access_code_used", None),
-    ]
-    normalized = " ".join(_normalize_gate_value(v) for v in values if v is not None)
-
-    if "arquitech" in normalized or "aria" in normalized:
-        return True
-    if _is_arquitech_access_code(getattr(u, "access_code_used", None)):
-        return True
-    return False
-
-
 def _is_summit_auto_approved_code(raw_access_code: Optional[str], signup_code_label: Optional[str], signup_source: Optional[str]) -> bool:
     """
     Summit access code EFATAH777 must auto-approve without manual admin approval.
@@ -6378,18 +6528,10 @@ def register(inp: RegisterIn, request: Request = None, x_org_slug: Optional[str]
     org = (get_org(x_org_slug) if x_org_slug else (inp.tenant or default_tenant())).strip()
     email = inp.email.lower().strip()
     is_admin_email = email in admin_emails()
-    is_arquitech_signup = _is_arquitech_request_context(
-        getattr(inp, "source", None),
-        getattr(inp, "product", None),
-        getattr(inp, "agent", None),
-        getattr(inp, "access_code", None),
-    )
 
     # AO-BETA-01 — em beta fechado, registro externo não cria conta de console.
     # EFATAH777 deve ir para waitlist, não para console completo.
-    # ARQUITECH_REGISTER_ALLOW_01: the Arquitech standalone funnel is allowed
-    # only when it carries ARQUITECH777/Arquitech context. Orkio remains closed.
-    if _closed_beta_gate_enabled() and not _is_closed_beta_internal_email(email) and not is_arquitech_signup:
+    if _closed_beta_gate_enabled() and not _is_closed_beta_internal_email(email):
         logger.warning("REGISTER_DENIED reason=closed_beta_hold email=%s org=%s", email, org)
         raise HTTPException(
             status_code=403,
@@ -6416,17 +6558,7 @@ def register(inp: RegisterIn, request: Request = None, x_org_slug: Optional[str]
     usage_tier = "summit_investor"
     product_scope = "full"
 
-    if is_arquitech_signup and not is_admin_email:
-        if not _is_arquitech_access_code(inp.access_code):
-            logger.warning("REGISTER_DENIED reason=invalid_arquitech_code ip=%s org=%s", ip, org)
-            raise HTTPException(status_code=403, detail="Código Arquitech inválido ou ausente.")
-
-        signup_code_label = "ARQUITECH777"
-        signup_source = "arquitech"
-        usage_tier = "arquitech_free_trial"
-        product_scope = "arquitech"
-
-    elif SUMMIT_MODE and not is_admin_email:
+    if SUMMIT_MODE and not is_admin_email:
         if not inp.access_code:
             logger.warning("REGISTER_DENIED reason=missing_code ip=%s org=%s", ip, org)
             raise HTTPException(status_code=403, detail="Access code is required in Summit mode.")
@@ -6482,7 +6614,7 @@ def register(inp: RegisterIn, request: Request = None, x_org_slug: Optional[str]
         usage_tier = usage_tier or "summit_investor"
         product_scope = "full"
 
-    approved_at_value = now_ts() if (is_admin_email or is_arquitech_signup or (SUMMIT_MODE and not is_admin_email) or tester_billing_bypass_access) else None
+    approved_at_value = now_ts() if (is_admin_email or (SUMMIT_MODE and not is_admin_email) or tester_billing_bypass_access) else None
 
     salt = new_salt()
     pw_hash = pbkdf2_hash(inp.password, salt)
@@ -6498,7 +6630,7 @@ def register(inp: RegisterIn, request: Request = None, x_org_slug: Optional[str]
         created_at=now_ts(),
         approved_at=approved_at_value,
         signup_code_label=signup_code_label,
-        signup_source=signup_source or ("arquitech" if is_arquitech_signup and not is_admin_email else ("investor" if SUMMIT_MODE and not is_admin_email else None)),
+        signup_source=signup_source or ("investor" if SUMMIT_MODE and not is_admin_email else None),
         usage_tier=usage_tier,
         terms_accepted_at=(now_ts() if inp.accept_terms else None),
         terms_version=(TERMS_VERSION if inp.accept_terms else None),
@@ -6507,7 +6639,7 @@ def register(inp: RegisterIn, request: Request = None, x_org_slug: Optional[str]
     )
 
     try:
-        if SUMMIT_MODE and not is_admin_email and not is_arquitech_signup:
+        if SUMMIT_MODE and not is_admin_email:
             # HARD ENFORCEMENT FOR INVESTOR-ONLY SUMMIT
             usage_tier = "summit_investor"
             signup_source = "investor" if not signup_source else signup_source
@@ -6520,11 +6652,9 @@ def register(inp: RegisterIn, request: Request = None, x_org_slug: Optional[str]
             if hasattr(u, "product_scope"):
                 setattr(u, "product_scope", "full")
 
-        if hasattr(u, "approved_via") and is_arquitech_signup and not is_admin_email:
-            setattr(u, "approved_via", "arquitech_access_code")
-        elif hasattr(u, "approved_via") and SUMMIT_MODE and not is_admin_email:
+        if hasattr(u, "approved_via") and SUMMIT_MODE and not is_admin_email:
             setattr(u, "approved_via", "access_code")
-        if hasattr(u, "access_code_used") and (is_arquitech_signup or (SUMMIT_MODE and not is_admin_email)):
+        if hasattr(u, "access_code_used") and SUMMIT_MODE and not is_admin_email:
             setattr(u, "access_code_used", (inp.access_code or "").strip().upper())
         if hasattr(u, "status"):
             setattr(u, "status", "active")
@@ -6622,12 +6752,6 @@ def login(inp: LoginIn, x_org_slug: Optional[str] = Header(default=None), db: Se
 
     org = (get_org(x_org_slug) if x_org_slug else (inp.tenant or default_tenant())).strip()
     email = inp.email.lower().strip()
-    is_arquitech_login_context = _is_arquitech_request_context(
-        getattr(inp, "source", None),
-        getattr(inp, "product", None),
-        getattr(inp, "agent", None),
-        getattr(inp, "access_code", None),
-    )
     u = db.execute(select(User).where(User.org_slug == org, User.email == email)).scalar_one_or_none()
     if not u or not verify_password(inp.password, u.salt, u.pw_hash):
         raise HTTPException(status_code=401, detail="Invalid credentials")
@@ -6649,7 +6773,7 @@ def login(inp: LoginIn, x_org_slug: Optional[str] = Header(default=None), db: Se
 
     # AO-BETA-01 — bloqueio operacional do console para externos.
     # Apenas admin/equipe allowlist acessa o console completo durante estabilização.
-    if _closed_beta_gate_enabled() and not _is_closed_beta_internal_user(u, email) and not (is_arquitech_login_context or _is_arquitech_user(u)):
+    if _closed_beta_gate_enabled() and not _is_closed_beta_internal_user(u, email):
         logger.warning("LOGIN_DENIED reason=closed_beta_hold email=%s org=%s", email, org)
         raise HTTPException(
             status_code=403,
@@ -21536,6 +21660,20 @@ def chat(
     if db_user.role != "admin" and auth_status == "pending_approval":
         raise HTTPException(status_code=403, detail="User pending approval")
 
+    try:
+        _arquitech_lock_receipt = _apply_arquitech_standalone_lock(inp, db, org)
+        if _arquitech_lock_receipt.get("applied"):
+            logger.warning(
+                "ARQUITECH_STANDALONE_LOCK_APPLIED route=chat org=%s agent_id=%s",
+                org,
+                _arquitech_lock_receipt.get("agent_id"),
+            )
+    except Exception:
+        try:
+            logger.exception("ARQUITECH_STANDALONE_LOCK_FAILED route=chat org=%s", org)
+        except Exception:
+            pass
+
     uid = user.get("sub")
 
     # AO-32_RUNTIME_CHAT_OBSERVABILITY
@@ -32830,6 +32968,23 @@ async def chat_stream(
     if not message:
         raise HTTPException(400, "message required")
 
+    _arquitech_lock_receipt = {"applied": False}
+
+    try:
+        _arquitech_lock_receipt = _apply_arquitech_standalone_lock(inp, db, org)
+        if _arquitech_lock_receipt.get("applied"):
+            message = (inp.message or "").strip()
+            logger.warning(
+                "ARQUITECH_STANDALONE_LOCK_APPLIED route=chat_stream org=%s agent_id=%s",
+                org,
+                _arquitech_lock_receipt.get("agent_id"),
+            )
+    except Exception:
+        try:
+            logger.exception("ARQUITECH_STANDALONE_LOCK_FAILED route=chat_stream org=%s", org)
+        except Exception:
+            pass
+
     route_plan = _ao20bc_resolve_route(
         message,
         requested_agent=(
@@ -40754,7 +40909,19 @@ async def chat_stream(
                 and not any(_term in _ao01_norm for _term in _hf6r3b_approval_terms)
             )
 
-            if _hf6r3b_mutation_without_approval:
+            _arquitech_aria_stream_mode = bool(
+                (_arquitech_lock_receipt or {}).get("applied")
+                or str(getattr(inp, "source", "") or "").strip().lower() == "arquitech"
+                or str(getattr(inp, "product", "") or "").strip().lower() == "arquitech"
+                or str(getattr(inp, "target_agent_slug", "") or "").strip().lower() in {"aria", "arquitech"}
+                or str(getattr(inp, "visible_agent", "") or "").strip().lower() in {"aria", "arquitech"}
+            )
+
+            if _arquitech_aria_stream_mode:
+                _hf4k_kind = "arquitech_aria_standalone"
+                _hf4k_final_text = _build_aria_standalone_stream_answer(message)
+
+            elif _hf6r3b_mutation_without_approval:
                 _hf4k_kind = "mutation_without_approval_blocked"
                 _hf4k_final_text = (
                     "ORKIO — EXECUÇÃO BLOQUEADA SEM APROVAÇÃO\n\n"
@@ -41651,7 +41818,9 @@ async def chat_stream(
             # AO20K-HF4U_AGENT_FASTPATH_DISPLAY_NAME
             _hf4k_agent_name = "Orkio"
             try:
-                if _hf4k_kind == "safe_agent_ping":
+                if _hf4k_kind == "arquitech_aria_standalone":
+                    _hf4k_agent_name = "ARIA"
+                elif _hf4k_kind == "safe_agent_ping":
                     _hf4k_agent_name = str(_hf4p_target or "Orkio").strip() or "Orkio"
                 elif _hf4k_kind == "safe_agent_greeting":
                     _hf4k_agent_name = str(_hf4t_target or "Orkio").strip() or "Orkio"
@@ -41688,6 +41857,7 @@ async def chat_stream(
                 "memory_lookup_readonly": "memory_lookup_readonly",
                 "premium_context_snapshot": "context_snapshot_fastpath",
                 "natural_executive_reading": "natural_executive_reading_fastpath",
+                "arquitech_aria_standalone": "arquitech_aria_standalone",
             }.get(str(_hf4k_kind or ""), "safe_fastpath_coverage")
 
             _hf6r1_route_priority = {
@@ -41709,6 +41879,7 @@ async def chat_stream(
                 "simple_status": 120,
                 "premium_context_snapshot": 65,
                 "natural_executive_reading": 64,
+                "arquitech_aria_standalone": 1,
             }.get(str(_hf4k_kind or ""), 999)
 
             if _hf4k_kind and _hf4k_final_text:
@@ -41716,7 +41887,7 @@ async def chat_stream(
                     _persist_assistant_message,
                     text=_hf4k_final_text,
                     thread_id=tid_seed,
-                    agent_id=None,
+                    agent_id=((_arquitech_lock_receipt or {}).get("agent_id") if _hf4k_kind == "arquitech_aria_standalone" else None),
                     agent_name=_hf4k_agent_name,
                 )
 
@@ -41726,7 +41897,7 @@ async def chat_stream(
                     "answer": _hf4k_final_text,
                     "message": _hf4k_final_text,
                     "final_text": _hf4k_final_text,
-                    "agent_id": None,
+                    "agent_id": (_arquitech_lock_receipt or {}).get("agent_id") if _hf4k_kind == "arquitech_aria_standalone" else None,
                     "agent_name": _hf4k_agent_name,
                     "final_speaker": _hf4k_agent_name,
                     "runtime_hints": {
