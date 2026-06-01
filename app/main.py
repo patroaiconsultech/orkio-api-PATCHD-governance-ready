@@ -51,6 +51,11 @@ from .summit_prompt import build_summit_instructions
 from .summit_metrics import assess_realtime_session, merge_human_review
 from .runtime import get_capability_registry, build_intent_package, build_first_win_plan, build_continuity_hints, build_arcangelic_chain, build_system_overlay, build_runtime_hints, build_trial_hints, build_planner_snapshot, score_memory_candidate, build_memory_snapshot, build_trial_analytics, build_dag_execution_snapshot
 from .runtime.capability_registry import get_team_roster, get_full_agent_roster, get_agent_roster, format_team_roster_answer, is_team_roster_question_text, is_presence_status_question_text, is_war_room_readonly_architecture_plan_text, is_readonly_implementation_plan_text
+from .runtime.public_orkio_policy import (
+    build_public_orkio_policy_decision,
+    build_public_orkio_stream_payload,
+    append_orkio_ceo_scope_overlay,
+)
 from .numerology.schemas import NumerologyProfileIn, NumerologyProfileOut
 from .numerology.engine import generate_numerology_profile
 from .routes.user import router as user_router
@@ -105,56 +110,9 @@ RESEND_FROM = _clean_env(os.getenv("RESEND_FROM", "Orkio <no-reply@orkio.ai>"), 
 RESEND_INTERNAL_TO = _clean_env(os.getenv("RESEND_INTERNAL_TO", "daniel@patroai.com"), default="daniel@patroai.com")
 
 # ================================
-# ORKIO PUBLIC CEO MODE / COMMERCIAL CTA
+# ORKIO PUBLIC CEO MODE
+# Moved to app.runtime.public_orkio_policy to reduce app/main.py fragility.
 # ================================
-ORKIO_TEAM_WHATSAPP_NUMBER = "+5551989697605"
-ORKIO_TEAM_WHATSAPP_URL = (
-    "https://wa.me/5551989697605"
-    "?text=Ol%C3%A1%2C%20quero%20conversar%20com%20a%20equipe%20ORKIO%2FPATROAI%20"
-    "sobre%20agentes%20personalizados%20para%20minha%20empresa."
-)
-
-ORKIO_CEO_SCOPE_OVERLAY = f"""
-ORKIO_PUBLIC_CEO_MODE — contrato de resposta pública e comercial
-
-Você é Orkio, o agente principal e CEO digital da plataforma ORKIO OS / PATROAI.
-Sua função pública é entender dores reais de empreendedores, empresários, executivos e investidores,
-organizar essas dores em uma visão executiva e sugerir uma primeira arquitetura de agentes personalizados.
-
-Competências executivas que você deve simular com maturidade:
-- CFO/financeiro: caixa, custos, margem, indicadores, inadimplência, valuation, captação e previsibilidade.
-- Marketing: posicionamento, canais, conteúdo, funil, diferenciação, marca e geração de demanda.
-- Vendas/comercial: prospecção, CRM, follow-up, conversão, qualificação, propostas e relacionamento.
-- Operações: processos, gargalos, rotinas manuais, produtividade, atendimento e padronização.
-- Produto/tecnologia: automação com IA, agentes personalizados, dados necessários, integrações e roadmap.
-- Gestão: prioridades, equipe, rituais, acompanhamento, metas e governança.
-
-Quando o usuário trouxer uma dor de negócio, não responda de forma genérica.
-Entregue um ESCOPO INICIAL claro, curto e útil, preferencialmente com:
-1. Dor identificada
-2. Impacto provável no negócio
-3. Agentes personalizados recomendados
-4. Dados/processos que precisaríamos mapear
-5. Primeiro passo sugerido
-
-Sempre que houver demanda concreta, interesse comercial, necessidade de automação, criação de agentes,
-diagnóstico empresarial ou pedido de implantação, indique contato humano com a equipe ORKIO/PATROAI.
-
-CTA obrigatório quando houver oportunidade real:
-"Para transformar esse escopo em um projeto sob medida, fale com nossa equipe pelo WhatsApp:
-{ORKIO_TEAM_WHATSAPP_URL}"
-
-Regras de verdade operacional:
-- Não diga que todos os especialistas multiagente estão plenamente liberados para o público.
-- Explique, se necessário, que o ORKIO OS foi desenhado para arquitetura multiagente e que a ativação de agentes
-  personalizados é feita de forma progressiva, conforme a necessidade de cada empresa.
-- Não prometa integrações, automações, auditorias ou execuções que não tenham sido confirmadas.
-- Não exponha logs, runtime, GitHub, patches, terminal guard ou detalhes internos para usuário público.
-- Fale em pt-BR, com tom premium, claro, humano, executivo e confiante.
-- Seja consultivo: entenda, estruture e conduza para o próximo passo.
-""".strip()
-
-
 
 # ================================
 # PROVIDER BILLING / ENTITLEMENTS
@@ -8251,23 +8209,16 @@ def _append_orkio_ceo_scope_overlay(
 ) -> str:
     """
     ORKIO_PUBLIC_CEO_MODE:
-    Runtime overlay for Orkio as public CEO/consultative host.
+    Delegate public CEO overlay to app.runtime.public_orkio_policy.
 
-    This is intentionally additive. It does not alter routing, runtime execution,
-    GitHub, Orion, Chris or Team behavior. It only strengthens Orkio's public
-    response contract when Orkio is the actual responding agent.
+    Keeping this wrapper preserves existing callers while moving policy content
+    out of app/main.py.
     """
-    base = str(system_prompt or "").strip()
-    names = [
-        str(agent_name or "").strip().lower(),
-        str(final_speaker or "").strip().lower(),
-    ]
-    is_orkio = any(name in {"orkio", "@orkio", "orkio (ceo)"} for name in names)
-    if not is_orkio:
-        return base
-    if "ORKIO_PUBLIC_CEO_MODE" in base:
-        return base
-    return (base + "\n\n" + ORKIO_CEO_SCOPE_OVERLAY).strip() if base else ORKIO_CEO_SCOPE_OVERLAY
+    return append_orkio_ceo_scope_overlay(
+        system_prompt,
+        agent_name=agent_name,
+        final_speaker=final_speaker,
+    )
 
 def _extract_readonly_squad_requested_raw_from_message(message: Any) -> List[str]:
     """
@@ -39288,6 +39239,46 @@ async def chat_stream(
                 except Exception:
                     pass
                 # If this fast-path fails, existing guarded rails still protect the UI.
+
+        # ORKIO_PUBLIC_POLICY_MODULE_FASTPATH
+        # Public Orkio CEO/product behavior lives in app.runtime.public_orkio_policy.
+        # Keep this hook small: decide -> persist -> emit.
+        try:
+            _public_orkio_decision = build_public_orkio_policy_decision(
+                message,
+                visible_agent=getattr(inp, "visible_agent", None),
+                target_agent_slug=getattr(inp, "target_agent_slug", None),
+                dest_mode=getattr(inp, "dest_mode", None),
+                route_plan=route_plan if isinstance(route_plan, dict) else None,
+            )
+        except Exception:
+            _public_orkio_decision = {"handled": False, "reason": "policy_exception"}
+
+        if isinstance(_public_orkio_decision, dict) and _public_orkio_decision.get("handled"):
+            try:
+                final_text = str(_public_orkio_decision.get("answer") or "").strip()
+                persisted = await asyncio.to_thread(
+                    _persist_assistant_message,
+                    text=final_text,
+                    thread_id=tid_seed,
+                    agent_id=None,
+                    agent_name="Orkio",
+                )
+                payload = build_public_orkio_stream_payload(_public_orkio_decision, persisted=persisted)
+                logger.warning(
+                    "ORKIO_PUBLIC_POLICY_MODULE_FASTPATH trace_id=%s thread_id=%s reason=%s",
+                    trace_id,
+                    tid_seed,
+                    _public_orkio_decision.get("reason"),
+                )
+                async for ev in _emit_result_payload(payload, routing_source="public_orkio_policy_module"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("ORKIO_PUBLIC_POLICY_MODULE_FASTPATH_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
 
         # AO20K-HF4B_ABSOLUTE_TOP_OF_GEN_RUNTIME_MARKER_GUARD
         # This guard intentionally runs before route_resolved, @Orkio orchestration_audit,
