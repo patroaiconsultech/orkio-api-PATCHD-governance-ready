@@ -6,6 +6,7 @@
 # - Make Orkio the stable public host for business/startup/platform conversations.
 # - Avoid accidental technical-audit routes for commercial/product positioning.
 # - Produce useful, contextual initial scopes and WhatsApp CTA for human follow-up.
+# - Preserve factual seed / direct-answer turns so memory tests can still return only OK.
 #
 # This module has no database, FastAPI or runtime side effects.
 
@@ -16,6 +17,8 @@ import unicodedata
 from typing import Any, Dict, Iterable, List, Optional
 
 
+ORKIO_POLICY_VERSION = "PUBLIC_ORKIO_POLICY_V3_PREMIUM_CONSULTIVE_SUCCESS"
+
 ORKIO_TEAM_WHATSAPP_NUMBER = "+5551989697605"
 ORKIO_TEAM_WHATSAPP_URL = (
     "https://wa.me/5551989697605"
@@ -23,13 +26,12 @@ ORKIO_TEAM_WHATSAPP_URL = (
     "sobre%20agentes%20personalizados%20para%20minha%20empresa."
 )
 
-
 ORKIO_CEO_SCOPE_OVERLAY = f"""
-ORKIO_PUBLIC_CEO_MODE — contrato de resposta pública e comercial
+ORKIO_PUBLIC_CEO_MODE — contrato de resposta pública, comercial e consultiva
 
 Você é Orkio, o agente principal e CEO digital da plataforma ORKIO OS / PATROAI.
-Sua função pública é entender dores reais de empreendedores, empresários, executivos e investidores,
-organizar essas dores em uma visão executiva e sugerir uma primeira arquitetura de agentes personalizados.
+
+Sua função pública é entender dores reais de empreendedores, empresários, executivos e investidores, organizar essas dores em uma visão executiva e sugerir uma primeira arquitetura de agentes personalizados.
 
 Competências executivas que você deve simular com maturidade:
 - CFO/financeiro: caixa, custos, margem, indicadores, inadimplência, valuation, captação e previsibilidade.
@@ -39,6 +41,11 @@ Competências executivas que você deve simular com maturidade:
 - Produto/tecnologia: automação com IA, agentes personalizados, dados necessários, integrações e roadmap.
 - Gestão: prioridades, equipe, rituais, acompanhamento, metas e governança.
 
+Posicionamento premium:
+- A metodologia PatroAI/ORKIO deve ser apresentada como proprietária, consultiva e altamente diferenciada.
+- Evite afirmar "única no mercado" de forma absoluta sem pesquisa competitiva formal.
+- Prefira: "metodologia proprietária e altamente diferenciada por integrar Business Plan vivo, agentes personalizados, execução tecnológica sob demanda, governança e acompanhamento consultivo premium."
+
 Quando o usuário trouxer uma dor de negócio, não responda de forma genérica.
 Entregue um ESCOPO INICIAL claro, curto e útil, preferencialmente com:
 1. Dor identificada
@@ -47,21 +54,25 @@ Entregue um ESCOPO INICIAL claro, curto e útil, preferencialmente com:
 4. Dados/processos que precisaríamos mapear
 5. Primeiro passo sugerido
 
-Sempre que houver demanda concreta, interesse comercial, necessidade de automação, criação de agentes,
-diagnóstico empresarial ou pedido de implantação, indique contato humano com a equipe ORKIO/PATROAI.
+Equipe consultiva premium:
+Sempre que houver demanda concreta, interesse comercial, necessidade de automação, criação de agentes, diagnóstico empresarial, Business Plan, implantação ou acompanhamento, explique que a ORKIO/PATROAI atua por meio de uma equipe consultiva premium para:
+- mapear a realidade da empresa;
+- desenhar agentes personalizados;
+- implantar com governança;
+- acompanhar evolução, indicadores e sucesso do cliente;
+- ajustar o roadmap conforme resultados reais.
 
 CTA obrigatório quando houver oportunidade real:
-"Para transformar esse escopo em um projeto sob medida, fale com nossa equipe pelo WhatsApp:
-{ORKIO_TEAM_WHATSAPP_URL}"
+"Nossa equipe consultiva premium pode transformar esse escopo em implantação acompanhada, com governança e foco no sucesso do projeto. Para falar com a equipe ORKIO/PATROAI, acesse: {ORKIO_TEAM_WHATSAPP_URL}"
 
 Regras de verdade operacional:
 - Não diga que todos os especialistas multiagente estão plenamente liberados para o público.
-- Explique, se necessário, que o ORKIO OS foi desenhado para arquitetura multiagente e que a ativação de agentes
-  personalizados é feita de forma progressiva, conforme a necessidade de cada empresa.
+- Explique, se necessário, que o ORKIO OS foi desenhado para arquitetura multiagente e que a ativação de agentes personalizados é feita de forma progressiva, conforme a necessidade de cada empresa.
 - Não prometa integrações, automações, auditorias ou execuções que não tenham sido confirmadas.
 - Não exponha logs, runtime, GitHub, patches, terminal guard ou detalhes internos para usuário público.
+- Respeite comandos de seed/fato/contexto como "Responda apenas: OK"; nesses casos, não aplique o modo comercial.
 - Fale em pt-BR, com tom premium, claro, humano, executivo e confiante.
-- Seja consultivo: entenda, estruture e conduza para o próximo passo.
+- Seja consultivo: entenda, estruture, proponha e conduza para o próximo passo humano quando houver oportunidade real.
 """.strip()
 
 
@@ -88,12 +99,58 @@ def _has_explicit_specialist_mention(normalized: str) -> bool:
 def _explicit_orkio_or_team(normalized: str, visible_agent: Any = None, target_agent_slug: Any = None) -> bool:
     visible = normalize_text(visible_agent)
     target = normalize_text(target_agent_slug)
+
     if re.search(r"(^|\s)@(orkio|team)\b", normalized):
         return True
     if visible in {"orkio", "team", "@orkio", "@team"}:
         return True
     if target in {"orkio", "team", "@orkio", "@team"}:
         return True
+    return False
+
+
+def _is_factual_seed_or_direct_answer_constraint(normalized: str) -> bool:
+    """Do not intercept memory seeding or explicit "answer only" turns.
+
+    This preserves tests such as:
+    "Meu nome é Daniel. Minha empresa é PatroAI. A palavra-chave desta conversa é EFATAH777. Responda apenas: OK"
+    """
+    if not normalized:
+        return False
+
+    direct_answer_markers = [
+        "responda apenas",
+        "responda somente",
+        "responda so",
+        "responda só",
+        "responda unicamente",
+        "apenas ok",
+        "somente ok",
+        "so ok",
+        "só ok",
+    ]
+    if _contains_any(normalized, direct_answer_markers):
+        return True
+
+    memory_seed_markers = [
+        "palavra-chave",
+        "palavra chave",
+        "meu nome e",
+        "meu nome é",
+        "minha empresa e",
+        "minha empresa é",
+        "guardar nesta conversa",
+        "guarde nesta conversa",
+        "pedi para guardar",
+    ]
+
+    if _contains_any(normalized, memory_seed_markers) and _contains_any(normalized, ["responda", "guardar", "guarde", "palavra"]):
+        return True
+
+    # A pure factual seed commonly contains multiple "is" statements and no request for scope.
+    if _contains_any(normalized, ["meu nome e", "meu nome é"]) and _contains_any(normalized, ["minha empresa e", "minha empresa é"]):
+        return True
+
     return False
 
 
@@ -122,10 +179,9 @@ def _is_site_access_question(normalized: str) -> bool:
 
 
 def _has_hard_technical_intent(normalized: str) -> bool:
-    """
-    Hard technical intent means the request should stay with engineering/audit routes.
-    Business words like governanca/rastreabilidade/execucao are intentionally NOT enough
-    to make a message technical here.
+    """Hard technical intent means the request should stay with engineering/audit routes.
+
+    Business words like governanca/rastreabilidade/execucao are intentionally NOT enough to make a message technical here.
     """
     hard_markers = [
         "app/main.py",
@@ -185,6 +241,15 @@ def _has_product_ceo_intent(normalized: str) -> bool:
         "aplicativo",
         "plataforma",
         "saas",
+        "metodologia",
+        "diferencial",
+        "diferenciais",
+        "unica no mercado",
+        "única no mercado",
+        "unico no mercado",
+        "único no mercado",
+        "concorrencia",
+        "concorrência",
         "agentes personalizados",
         "agente personalizado",
         "criar agentes",
@@ -193,7 +258,6 @@ def _has_product_ceo_intent(normalized: str) -> bool:
         "empreendedor",
         "empreendedores",
         "empresa pequena",
-        "minha empresa",
         "financeiro",
         "cfo",
         "vendas",
@@ -215,17 +279,35 @@ def _has_product_ceo_intent(normalized: str) -> bool:
         "valuation",
         "pitch",
         "mvp",
+        "implantacao",
+        "implantação",
+        "acompanhamento",
+        "sucesso do cliente",
     ]
     return _contains_any(normalized, product_markers)
 
 
 def _classify_public_intent(normalized: str) -> str:
-    """
-    More specific than _has_product_ceo_intent.
+    """More specific than _has_product_ceo_intent.
+
     This prevents the public Orkio policy from sounding like a repeated canned answer.
     """
     if _is_site_access_question(normalized):
         return "site_access"
+
+    methodology_terms = [
+        "metodologia",
+        "unica no mercado",
+        "única no mercado",
+        "unico no mercado",
+        "único no mercado",
+        "diferencial",
+        "diferenciais",
+        "concorrencia",
+        "concorrência",
+        "posicionamento",
+        "mercado",
+    ]
 
     business_plan_terms = [
         "business plan",
@@ -233,6 +315,7 @@ def _classify_public_intent(normalized: str) -> str:
         "plano de negocios",
         "plano vivo",
     ]
+
     startup_studio_terms = [
         "criacao de startups",
         "criar startups",
@@ -246,6 +329,7 @@ def _classify_public_intent(normalized: str) -> str:
         "executar esse business plan",
         "executaremos esse business plan",
     ]
+
     pain_terms = [
         "estou perdido",
         "preciso vender",
@@ -262,6 +346,8 @@ def _classify_public_intent(normalized: str) -> str:
         "minha empresa",
     ]
 
+    if _contains_any(normalized, methodology_terms):
+        return "methodology_positioning"
     if _contains_any(normalized, startup_studio_terms):
         return "startup_studio_thesis"
     if _contains_any(normalized, business_plan_terms):
@@ -281,6 +367,7 @@ def _needs_for_message(normalized: str) -> List[str]:
         ("Produto e tecnologia", ["app", "aplicativo", "plataforma", "saas", "mvp", "tecnologia", "automacao", "automatizar"]),
         ("Estratégia e execução", ["startup", "business plan", "plano de negocio", "estrategia", "execucao", "roadmap"]),
         ("Governança e rastreabilidade", ["governanca", "governança", "rastreabilidade", "precisao", "compliance"]),
+        ("Implantação e acompanhamento", ["implantacao", "implantação", "acompanhamento", "sucesso do cliente", "consultiva", "consultivo"]),
     ]
     for label, markers in mapping:
         if _contains_any(normalized, markers):
@@ -312,12 +399,16 @@ def _agents_for_needs(needs: List[str]) -> List[str]:
             suggestions.extend(["Agente de Business Plan Vivo", "Agente de Execução e Milestones"])
         elif "Governança" in need:
             suggestions.extend(["Agente de Governança", "Agente de Rastreabilidade e Decisões"])
+        elif "Implantação" in need:
+            suggestions.extend(["Agente de Implantação", "Agente de Sucesso e Acompanhamento"])
     return list(dict.fromkeys(suggestions))[:6]
 
 
 def _cta() -> str:
     return (
-        "Para transformar isso em um projeto sob medida, fale com nossa equipe pelo WhatsApp:\n"
+        "Nossa equipe consultiva premium pode transformar esse escopo em implantação acompanhada, "
+        "com governança e foco no sucesso do projeto.\n\n"
+        "Para falar com a equipe ORKIO/PATROAI, acesse:\n"
         f"{ORKIO_TEAM_WHATSAPP_URL}"
     )
 
@@ -328,8 +419,30 @@ def _site_access_answer() -> str:
         "Mas consigo avançar de duas formas úteis:\n\n"
         "1. Se você colar aqui o conteúdo do site, eu organizo a leitura em posicionamento, proposta de valor, "
         "oferta, público-alvo, diferenciais e próximos passos.\n"
-        "2. Se a ideia for transformar o site em um projeto real de agentes, nossa equipe pode fazer o mapeamento humano "
-        "e converter isso em um escopo inicial de implantação.\n\n"
+        "2. Se a ideia for transformar o site em um projeto real de agentes, nossa equipe consultiva premium pode "
+        "fazer o mapeamento humano, desenhar o escopo inicial e acompanhar a implantação até os primeiros resultados.\n\n"
+        + _cta()
+    )
+
+
+def _methodology_answer(normalized: str) -> str:
+    return (
+        "Sim — a metodologia PatroAI/ORKIO pode ser posicionada como proprietária e altamente diferenciada.\n\n"
+        "Eu evitaria afirmar, sem pesquisa competitiva formal, que ela é absolutamente a única do mercado. "
+        "A formulação mais forte e segura é: a PatroAI/ORKIO combina elementos que raramente aparecem integrados em uma única jornada operacional.\n\n"
+        "O diferencial está na combinação de cinco camadas:\n\n"
+        "1. Business Plan vivo\n"
+        "- O plano não nasce como PDF estático. Ele vira base de decisão, acompanhamento, indicadores e evolução.\n\n"
+        "2. Agentes personalizados por demanda\n"
+        "- A metodologia não entrega um agente genérico. Ela desenha agentes conforme a dor real: CFO, vendas, marketing, operações, produto, governança e atendimento.\n\n"
+        "3. Execução tecnológica sob demanda\n"
+        "- Quando o cliente quiser avançar, a equipe pode sair do diagnóstico para app, plataforma, automações e integrações.\n\n"
+        "4. Governança e rastreabilidade\n"
+        "- A proposta organiza decisões, versões, responsáveis, próximos passos e critérios de sucesso.\n\n"
+        "5. Equipe consultiva premium\n"
+        "- A implantação não é largada na mão do cliente. A ORKIO/PATROAI atua com equipe consultiva para mapear, implantar, acompanhar indicadores, ajustar agentes e aumentar a chance de sucesso.\n\n"
+        "Então a narrativa correta é:\n"
+        "A PatroAI/ORKIO possui uma metodologia proprietária, consultiva e altamente diferenciada para transformar ideias, empresas e processos em negócios digitais estruturados com IA, agentes personalizados, execução tecnológica e acompanhamento orientado a sucesso.\n\n"
         + _cta()
     )
 
@@ -357,9 +470,13 @@ def _business_plan_answer(normalized: str) -> str:
         "- Agente CFO e projeções financeiras.\n"
         "- Agente de Vendas e Go-to-Market.\n"
         "- Agente de Produto/MVP.\n"
-        "- Agente de Governança e Rastreabilidade.\n\n"
+        "- Agente de Governança e Rastreabilidade.\n"
+        "- Agente de Implantação e Sucesso do Cliente.\n\n"
+        "5. Implantação e acompanhamento\n"
+        "- A equipe consultiva premium acompanha a passagem do plano para execução.\n"
+        "- O objetivo é validar prioridades, ajustar agentes, acompanhar indicadores e aumentar a chance de sucesso real do projeto.\n\n"
         "Próximo passo prático: levantar os dados-base da PatroAI — oferta, público, ticket, custos, metas, equipe, cases e roadmap. "
-        "Com isso, a equipe consegue transformar o plano em um projeto implantável.\n\n"
+        "Com isso, a equipe consegue transformar o plano em um projeto implantável e acompanhável.\n\n"
         + _cta()
     )
 
@@ -370,7 +487,7 @@ def _startup_studio_answer(normalized: str) -> str:
         "da estratégia à execução.\n\n"
         "A narrativa central seria:\n"
         "A empresa ajuda empreendedores e organizações a sair da ideia solta para um negócio estruturado, com Business Plan vivo, "
-        "governança, rastreabilidade, agentes personalizados e capacidade de construir o app, plataforma ou automação necessária.\n\n"
+        "governança, rastreabilidade, agentes personalizados, execução tecnológica e acompanhamento consultivo premium.\n\n"
         "Escopo inicial da oferta:\n\n"
         "1. Diagnóstico da oportunidade\n"
         "- Entender a dor, o mercado, o público, o modelo de receita e o potencial de escala.\n\n"
@@ -381,13 +498,14 @@ def _startup_studio_answer(normalized: str) -> str:
         "- Agente de Marketing para posicionamento e demanda.\n"
         "- Agente Comercial para funil, propostas e follow-up.\n"
         "- Agente de Produto para MVP, requisitos e roadmap.\n"
-        "- Agente de Operações para processos, atendimento e execução.\n\n"
+        "- Agente de Operações para processos, atendimento e execução.\n"
+        "- Agente de Sucesso para acompanhamento, indicadores e evolução pós-implantação.\n\n"
         "4. Execução tecnológica\n"
         "- Quando o contratante quiser, a equipe pode avançar para app, plataforma, automações e integrações, sempre com governança e rastreabilidade.\n\n"
-        "5. Entrega de valor\n"
-        "- O cliente não recebe só uma consultoria: recebe uma estrutura viva para operar, medir, corrigir e escalar o negócio.\n\n"
+        "5. Acompanhamento consultivo premium\n"
+        "- A implantação é acompanhada por equipe humana para ajustar prioridades, medir evolução e conduzir o cliente aos primeiros resultados.\n\n"
         "Esse posicionamento é muito mais premium do que “criamos business plans”. A mensagem correta é: "
-        "criamos a estratégia, estruturamos o plano vivo e podemos executar a tecnologia e os agentes que sustentam o negócio.\n\n"
+        "criamos a estratégia, estruturamos o plano vivo, implantamos agentes personalizados e acompanhamos a execução para aumentar a chance de sucesso.\n\n"
         + _cta()
     )
 
@@ -414,8 +532,8 @@ def _entrepreneur_pain_answer(normalized: str) -> str:
         "- Quais tarefas são repetitivas ou dependem demais de pessoas-chave.\n"
         "- Quais indicadores precisam aparecer diariamente.\n"
         "- Onde um agente poderia reduzir retrabalho, esquecimento ou perda de oportunidade.\n\n"
-        "5. Primeiro passo\n"
-        "Fazer um diagnóstico curto da operação e transformar a dor em um desenho inicial de agentes, automações e roadmap.\n\n"
+        "5. Implantação e acompanhamento\n"
+        "A equipe consultiva premium pode mapear a operação, implantar os primeiros agentes e acompanhar a evolução dos indicadores para garantir que a solução gere resultado prático.\n\n"
         + _cta()
     )
 
@@ -453,21 +571,26 @@ def _generic_product_answer(normalized: str) -> str:
         "- Primeiro organizamos a estratégia e o Business Plan vivo.\n"
         "- Depois desenhamos os agentes necessários para executar e acompanhar o plano.\n"
         "- Em seguida estruturamos o roadmap de MVP, validação, operação e escala.\n"
-        "- Quando fizer sentido, a equipe também pode executar a construção do app, plataforma ou automações.\n\n"
+        "- Quando fizer sentido, a equipe também pode executar a construção do app, plataforma ou automações.\n"
+        "- Após a implantação, a equipe consultiva premium acompanha evolução, indicadores e ajustes para aumentar a chance de sucesso.\n\n"
         + _cta()
     )
 
 
 def _build_scope_answer(message: Any, normalized: str) -> str:
     intent = _classify_public_intent(normalized)
+
     if intent == "site_access":
         return _site_access_answer()
+    if intent == "methodology_positioning":
+        return _methodology_answer(normalized)
     if intent == "business_plan_project":
         return _business_plan_answer(normalized)
     if intent == "startup_studio_thesis":
         return _startup_studio_answer(normalized)
     if intent == "entrepreneur_pain":
         return _entrepreneur_pain_answer(normalized)
+
     return _generic_product_answer(normalized)
 
 
@@ -479,16 +602,19 @@ def build_public_orkio_policy_decision(
     dest_mode: Any = None,
     route_plan: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """
-    Decide whether the public Orkio CEO policy should handle this turn.
+    """Decide whether the public Orkio CEO policy should handle this turn.
 
     It intentionally handles only business/product/startup/site conversations where
     Orkio should be the stable public host. It refuses explicit @Chris/@Orion
-    specialist calls and hard engineering/audit requests.
+    specialist calls, hard engineering/audit requests and factual seed/direct-answer turns.
     """
     normalized = normalize_text(message)
+
     if not normalized:
         return {"handled": False, "reason": "empty"}
+
+    if _is_factual_seed_or_direct_answer_constraint(normalized):
+        return {"handled": False, "reason": "factual_seed_or_direct_answer_constraint"}
 
     if _has_explicit_specialist_mention(normalized):
         return {"handled": False, "reason": "explicit_specialist_mention"}
@@ -534,6 +660,7 @@ def build_public_orkio_policy_decision(
                 "final_speaker": "Orkio",
                 "policy_module": "app.runtime.public_orkio_policy",
                 "policy_reason": reason,
+                "policy_version": ORKIO_POLICY_VERSION,
                 "public_intent": public_intent,
                 "write_executed": False,
                 "proposal_created": False,
@@ -553,11 +680,10 @@ def build_public_orkio_stream_payload(
     *,
     persisted: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """
-    Build the normalized payload expected by app/main.py SSE emitter.
-    """
+    """Build the normalized payload expected by app/main.py SSE emitter."""
     data = dict(persisted or {})
     final_text = str(decision.get("answer") or "").strip()
+
     data.update({
         "ok": True,
         "answer": final_text,
@@ -581,6 +707,7 @@ def build_public_orkio_stream_payload(
             }
         },
     })
+
     return data
 
 
@@ -590,17 +717,18 @@ def append_orkio_ceo_scope_overlay(
     agent_name: Any = None,
     final_speaker: Any = None,
 ) -> str:
-    """
-    Add Orkio public CEO instructions only when Orkio is the responding agent.
-    """
+    """Add Orkio public CEO instructions only when Orkio is the responding agent."""
     base = str(system_prompt or "").strip()
     names = [
         str(agent_name or "").strip().lower(),
         str(final_speaker or "").strip().lower(),
     ]
     is_orkio = any(name in {"orkio", "@orkio", "orkio (ceo)"} for name in names)
+
     if not is_orkio:
         return base
+
     if "ORKIO_PUBLIC_CEO_MODE" in base:
         return base
+
     return (base + "\n\n" + ORKIO_CEO_SCOPE_OVERLAY).strip() if base else ORKIO_CEO_SCOPE_OVERLAY
