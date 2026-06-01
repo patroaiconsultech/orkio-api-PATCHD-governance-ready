@@ -4,14 +4,22 @@ import re
 import unicodedata
 from typing import Any, Dict, Optional
 
+from .business_self_improvement import (
+    render_business_improvement_diagnosis,
+    render_business_plan_vivo_brief,
+    render_business_priority_plan,
+    render_business_specialist_assignment,
+)
 from .runtime_feature_flags import (
     get_consultive_team_label,
+    is_business_self_improvement_enabled,
+    is_chris_business_squad_enabled,
     is_consultive_success_enabled,
     is_public_chris_policy_enabled,
 )
 
 
-CHRIS_POLICY_VERSION = "PUBLIC_CHRIS_POLICY_V2_FEATURE_FLAGS_EXECUTIVE_PREMIUM"
+CHRIS_POLICY_VERSION = "PUBLIC_CHRIS_POLICY_V3_BUSINESS_SQUAD_PREMIUM"
 
 _FORBIDDEN_NEGATIVE_FRAMES = (
     "não está madura",
@@ -67,18 +75,75 @@ def _target_is_chris(
 def _classify_chris_intent(message: Any) -> str:
     text = _norm(message)
 
+    if any(k in text for k in (
+        "o que o negocio precisa melhorar",
+        "o que o negócio precisa melhorar",
+        "melhorar comercialmente",
+        "melhorar como negocio",
+        "melhorar como negócio",
+        "diagnostico de negocio",
+        "diagnóstico de negócio",
+        "evolucao de negocio",
+        "evolução de negócio",
+        "auto reconhecer oportunidades",
+        "oportunidades de negocio",
+        "oportunidades de negócio",
+    )):
+        return "business_improvement_diagnosis"
+
+    if any(k in text for k in (
+        "plano de evolucao de negocio",
+        "plano de evolução de negócio",
+        "prioridades de negocio",
+        "prioridades de negócio",
+        "plano por prioridade",
+        "roadmap de negocio",
+        "roadmap de negócio",
+        "p0",
+        "p1",
+        "p2",
+    )):
+        return "business_priority_plan"
+
+    if any(k in text for k in (
+        "especialistas da chris",
+        "equipe da chris",
+        "squad da chris",
+        "quais especialistas de negocio",
+        "quais especialistas de negócio",
+        "quem deveria atuar no negocio",
+        "quem deveria atuar no negócio",
+    )):
+        return "business_specialist_assignment"
+
+    if any(k in text for k in (
+        "business plan vivo",
+        "modulo business plan",
+        "módulo business plan",
+        "pagina business plan",
+        "página business plan",
+        "business plan dentro da plataforma",
+    )):
+        return "business_plan_vivo"
+
     if any(k in text for k in ("em uma frase", "uma frase", "resuma", "resumo executivo", "leitura executiva")):
         return "executive_one_sentence"
+
     if any(k in text for k in ("investidor", "investidores", "pitch", "captacao", "cap table", "valuation", "rodada", "seed", "series a")):
         return "investor_ready"
+
     if any(k in text for k in ("business plan", "plano de negocios", "plano de negócio", "dre", "fluxo de caixa", "projecao financeira", "projeções financeiras")):
         return "business_plan"
+
     if any(k in text for k in ("vendas", "comercial", "go-to-market", "go to market", "funil", "crm", "prospeccao", "prospecção", "follow-up", "marketing")):
         return "growth_sales"
+
     if any(k in text for k in ("financeiro", "cfo", "caixa", "margem", "custos", "receita", "payback", "tir", "vpl")):
         return "cfo"
+
     if any(k in text for k in ("agentes", "agente personalizado", "arquitetura de agentes", "orquestracao", "orquestração")):
         return "agent_architecture"
+
     return "executive_general"
 
 
@@ -263,7 +328,17 @@ def build_public_chris_policy_decision(
 
     intent = _classify_chris_intent(message)
 
+    if intent in {"business_improvement_diagnosis", "business_priority_plan", "business_plan_vivo"} and not is_business_self_improvement_enabled():
+        intent = "executive_general"
+
+    if intent == "business_specialist_assignment" and not is_chris_business_squad_enabled():
+        intent = "executive_general"
+
     answers = {
+        "business_improvement_diagnosis": render_business_improvement_diagnosis,
+        "business_priority_plan": render_business_priority_plan,
+        "business_specialist_assignment": render_business_specialist_assignment,
+        "business_plan_vivo": render_business_plan_vivo_brief,
         "executive_one_sentence": _answer_one_sentence,
         "investor_ready": _answer_investor_ready,
         "business_plan": _answer_business_plan,
@@ -318,6 +393,8 @@ def build_public_chris_stream_payload(
                 "route_family": "public_executive_strategy",
                 "route_reason": decision.get("reason") or "",
                 "policy_version": decision.get("policy_version") or CHRIS_POLICY_VERSION,
+                "business_self_improvement_enabled": is_business_self_improvement_enabled(),
+                "chris_business_squad_enabled": is_chris_business_squad_enabled(),
                 "consultive_success_enabled": is_consultive_success_enabled(),
                 "write_executed": False,
                 "proposal_created": False,
