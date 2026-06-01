@@ -4,8 +4,15 @@ import re
 import unicodedata
 from typing import Any, Dict, Optional
 
+from .orion_technical_squad import render_specialist_roster
+from .platform_self_improvement import (
+    render_platform_improvement_diagnosis,
+    render_priority_plan,
+    render_specialist_assignment,
+)
 
-ORION_POLICY_VERSION = "PUBLIC_ORION_POLICY_V1_TECH_PREMIUM_CONSERVATIVE"
+
+ORION_POLICY_VERSION = "PUBLIC_ORION_POLICY_V2_TECH_SQUAD_SELF_IMPROVEMENT"
 
 
 def _strip_accents(value: Any) -> str:
@@ -46,7 +53,14 @@ def _target_is_orion(
 
 
 def _should_skip_to_existing_orion_capabilities(message: Any) -> bool:
-    """Preserve memory/factual, explicit readonly audit and GitHub capability rails."""
+    """Do not intercept flows already stabilized elsewhere.
+
+    This conservative gate preserves:
+    - memory/factual fastpaths
+    - explicit readonly audit
+    - GitHub readonly/capability flows
+    - patch/deploy/runtime incident rails
+    """
     text = _norm(message)
 
     memory_markers = (
@@ -104,6 +118,49 @@ def _should_skip_to_existing_orion_capabilities(message: Any) -> bool:
 
 def _classify_orion_intent(message: Any) -> str:
     text = _norm(message)
+
+    if any(k in text for k in (
+        "precisa melhorar tecnicamente",
+        "melhorar tecnicamente",
+        "o que a plataforma precisa melhorar",
+        "diagnostico de melhorias",
+        "diagnóstico de melhorias",
+        "auto reconhecer",
+        "auto reconhecer melhorias",
+        "autoavaliacao",
+        "autoavaliação",
+        "pontos tecnicos mais frageis",
+        "pontos técnicos mais frágeis",
+        "fragilidades tecnicas",
+        "fragilidades técnicas",
+    )):
+        return "platform_improvement_diagnosis"
+
+    if any(k in text for k in (
+        "plano de melhoria",
+        "por prioridade",
+        "prioridades tecnicas",
+        "prioridades técnicas",
+        "p0",
+        "p1",
+        "p2",
+        "ordem segura",
+        "roadmap tecnico",
+        "roadmap técnico",
+    )):
+        return "platform_priority_plan"
+
+    if any(k in text for k in (
+        "especialistas tecnicos",
+        "especialistas técnicos",
+        "quais especialistas",
+        "squad tecnico",
+        "squad técnico",
+        "quem deveria atuar",
+        "equipe tecnica",
+        "equipe técnica",
+    )):
+        return "technical_specialist_assignment"
 
     if any(k in text for k in ("explique tecnicamente", "o que e o orkio", "o que é o orkio", "orkio os", "arquitetura da plataforma")):
         return "technical_platform_explanation"
@@ -233,7 +290,11 @@ def build_public_orion_policy_decision(
     dest_mode: Any = None,
     route_plan: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Return a conservative Orion answer for normal public technical conversation."""
+    """Return a conservative Orion answer for normal public technical conversation.
+
+    Explicit audit/GitHub/memory/runtime flows are intentionally skipped so the
+    already-existing specialized rails can continue to handle them.
+    """
     if not _target_is_orion(
         message=message,
         visible_agent=visible_agent,
@@ -249,6 +310,9 @@ def build_public_orion_policy_decision(
     intent = _classify_orion_intent(message)
 
     answers = {
+        "platform_improvement_diagnosis": render_platform_improvement_diagnosis,
+        "platform_priority_plan": render_priority_plan,
+        "technical_specialist_assignment": render_specialist_assignment,
         "technical_platform_explanation": _answer_platform_explanation,
         "agent_orchestration_architecture": _answer_agent_orchestration,
         "technical_architecture": _answer_technical_architecture,
