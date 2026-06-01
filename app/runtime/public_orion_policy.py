@@ -10,9 +10,15 @@ from .platform_self_improvement import (
     render_priority_plan,
     render_specialist_assignment,
 )
+from .runtime_feature_flags import (
+    get_governed_self_improvement_mode,
+    is_orion_technical_squad_enabled,
+    is_platform_self_improvement_enabled,
+    is_public_orion_policy_enabled,
+)
 
 
-ORION_POLICY_VERSION = "PUBLIC_ORION_POLICY_V2_TECH_SQUAD_SELF_IMPROVEMENT"
+ORION_POLICY_VERSION = "PUBLIC_ORION_POLICY_V3_FEATURE_FLAGS_TECH_SQUAD"
 
 
 def _strip_accents(value: Any) -> str:
@@ -53,14 +59,6 @@ def _target_is_orion(
 
 
 def _should_skip_to_existing_orion_capabilities(message: Any) -> bool:
-    """Do not intercept flows already stabilized elsewhere.
-
-    This conservative gate preserves:
-    - memory/factual fastpaths
-    - explicit readonly audit
-    - GitHub readonly/capability flows
-    - patch/deploy/runtime incident rails
-    """
     text = _norm(message)
 
     memory_markers = (
@@ -290,11 +288,9 @@ def build_public_orion_policy_decision(
     dest_mode: Any = None,
     route_plan: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Return a conservative Orion answer for normal public technical conversation.
+    if not is_public_orion_policy_enabled():
+        return {"handled": False, "reason": "public_orion_policy_disabled"}
 
-    Explicit audit/GitHub/memory/runtime flows are intentionally skipped so the
-    already-existing specialized rails can continue to handle them.
-    """
     if not _target_is_orion(
         message=message,
         visible_agent=visible_agent,
@@ -308,6 +304,12 @@ def build_public_orion_policy_decision(
         return {"handled": False, "reason": "skip_existing_orion_capability"}
 
     intent = _classify_orion_intent(message)
+
+    if intent in {"platform_improvement_diagnosis", "platform_priority_plan"} and not is_platform_self_improvement_enabled():
+        intent = "technical_general"
+
+    if intent == "technical_specialist_assignment" and not is_orion_technical_squad_enabled():
+        intent = "technical_general"
 
     answers = {
         "platform_improvement_diagnosis": render_platform_improvement_diagnosis,
@@ -365,6 +367,9 @@ def build_public_orion_stream_payload(
                 "route_family": "public_technical_architecture",
                 "route_reason": decision.get("reason") or "",
                 "policy_version": decision.get("policy_version") or ORION_POLICY_VERSION,
+                "governed_self_improvement_mode": get_governed_self_improvement_mode(),
+                "platform_self_improvement_enabled": is_platform_self_improvement_enabled(),
+                "orion_technical_squad_enabled": is_orion_technical_squad_enabled(),
                 "write_executed": False,
                 "proposal_created": False,
                 "branch_created": False,
