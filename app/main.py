@@ -56,6 +56,14 @@ from .runtime.public_orkio_policy import (
     build_public_orkio_stream_payload,
     append_orkio_ceo_scope_overlay,
 )
+from .runtime.public_chris_policy import (
+    build_public_chris_policy_decision,
+    build_public_chris_stream_payload,
+)
+from .runtime.public_orion_policy import (
+    build_public_orion_policy_decision,
+    build_public_orion_stream_payload,
+)
 from .numerology.schemas import NumerologyProfileIn, NumerologyProfileOut
 from .numerology.engine import generate_numerology_profile
 from .routes.user import router as user_router
@@ -39239,6 +39247,83 @@ async def chat_stream(
                 except Exception:
                     pass
                 # If this fast-path fails, existing guarded rails still protect the UI.
+
+        # CHRIS_ORION_PUBLIC_POLICY_MODULE_FASTPATH
+        # Chris/Orion public policies live outside app/main.py to reduce fragility.
+        # Keep this hook small: explicit target -> decide -> persist -> emit.
+        try:
+            _public_chris_decision = build_public_chris_policy_decision(
+                message,
+                visible_agent=getattr(inp, "visible_agent", None),
+                target_agent_slug=getattr(inp, "target_agent_slug", None),
+                dest_mode=getattr(inp, "dest_mode", None),
+                route_plan=route_plan if isinstance(route_plan, dict) else None,
+            )
+        except Exception:
+            _public_chris_decision = {"handled": False, "reason": "policy_exception"}
+
+        if isinstance(_public_chris_decision, dict) and _public_chris_decision.get("handled"):
+            try:
+                final_text = str(_public_chris_decision.get("answer") or "").strip()
+                persisted = await asyncio.to_thread(
+                    _persist_assistant_message,
+                    text=final_text,
+                    thread_id=tid_seed,
+                    agent_id=None,
+                    agent_name="Chris",
+                )
+                payload = build_public_chris_stream_payload(_public_chris_decision, persisted=persisted)
+                logger.warning(
+                    "CHRIS_PUBLIC_POLICY_MODULE_FASTPATH trace_id=%s thread_id=%s reason=%s",
+                    trace_id,
+                    tid_seed,
+                    _public_chris_decision.get("reason"),
+                )
+                async for ev in _emit_result_payload(payload, routing_source="public_chris_policy_module"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("CHRIS_PUBLIC_POLICY_MODULE_FASTPATH_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+
+        try:
+            _public_orion_decision = build_public_orion_policy_decision(
+                message,
+                visible_agent=getattr(inp, "visible_agent", None),
+                target_agent_slug=getattr(inp, "target_agent_slug", None),
+                dest_mode=getattr(inp, "dest_mode", None),
+                route_plan=route_plan if isinstance(route_plan, dict) else None,
+            )
+        except Exception:
+            _public_orion_decision = {"handled": False, "reason": "policy_exception"}
+
+        if isinstance(_public_orion_decision, dict) and _public_orion_decision.get("handled"):
+            try:
+                final_text = str(_public_orion_decision.get("answer") or "").strip()
+                persisted = await asyncio.to_thread(
+                    _persist_assistant_message,
+                    text=final_text,
+                    thread_id=tid_seed,
+                    agent_id=None,
+                    agent_name="Orion",
+                )
+                payload = build_public_orion_stream_payload(_public_orion_decision, persisted=persisted)
+                logger.warning(
+                    "ORION_PUBLIC_POLICY_MODULE_FASTPATH trace_id=%s thread_id=%s reason=%s",
+                    trace_id,
+                    tid_seed,
+                    _public_orion_decision.get("reason"),
+                )
+                async for ev in _emit_result_payload(payload, routing_source="public_orion_policy_module"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("ORION_PUBLIC_POLICY_MODULE_FASTPATH_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
 
         # ORKIO_PUBLIC_POLICY_MODULE_FASTPATH
         # Public Orkio CEO/product behavior lives in app.runtime.public_orkio_policy.
