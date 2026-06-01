@@ -4,8 +4,14 @@ import re
 import unicodedata
 from typing import Any, Dict, Optional
 
+from .runtime_feature_flags import (
+    get_consultive_team_label,
+    is_consultive_success_enabled,
+    is_public_chris_policy_enabled,
+)
 
-CHRIS_POLICY_VERSION = "PUBLIC_CHRIS_POLICY_V1_EXECUTIVE_PREMIUM"
+
+CHRIS_POLICY_VERSION = "PUBLIC_CHRIS_POLICY_V2_FEATURE_FLAGS_EXECUTIVE_PREMIUM"
 
 _FORBIDDEN_NEGATIVE_FRAMES = (
     "não está madura",
@@ -63,30 +69,31 @@ def _classify_chris_intent(message: Any) -> str:
 
     if any(k in text for k in ("em uma frase", "uma frase", "resuma", "resumo executivo", "leitura executiva")):
         return "executive_one_sentence"
-
     if any(k in text for k in ("investidor", "investidores", "pitch", "captacao", "cap table", "valuation", "rodada", "seed", "series a")):
         return "investor_ready"
-
     if any(k in text for k in ("business plan", "plano de negocios", "plano de negócio", "dre", "fluxo de caixa", "projecao financeira", "projeções financeiras")):
         return "business_plan"
-
     if any(k in text for k in ("vendas", "comercial", "go-to-market", "go to market", "funil", "crm", "prospeccao", "prospecção", "follow-up", "marketing")):
         return "growth_sales"
-
     if any(k in text for k in ("financeiro", "cfo", "caixa", "margem", "custos", "receita", "payback", "tir", "vpl")):
         return "cfo"
-
     if any(k in text for k in ("agentes", "agente personalizado", "arquitetura de agentes", "orquestracao", "orquestração")):
         return "agent_architecture"
-
     return "executive_general"
 
 
 def _whatsapp_cta() -> str:
+    if not is_consultive_success_enabled():
+        return ""
     return (
-        "Se quiser transformar essa leitura em um projeto real, a equipe ORKIO/PATROAI pode "
+        f"Se quiser transformar essa leitura em um projeto real, a {get_consultive_team_label()} pode "
         "mapear o cenário, priorizar os agentes necessários e desenhar um escopo de implantação."
     )
+
+
+def _with_cta(body: str) -> str:
+    cta = _whatsapp_cta()
+    return (str(body or "").strip() + ("\n\n" + cta if cta else "")).strip()
 
 
 def _sanitize_public_answer(answer: str) -> str:
@@ -110,7 +117,7 @@ def _answer_one_sentence() -> str:
 
 
 def _answer_investor_ready() -> str:
-    return """Chris — leitura executiva para investidores
+    return _with_cta("""Chris — leitura executiva para investidores
 
 A tese da PatroAI/ORKIO é forte porque une três dimensões que investidores valorizam: mercado real, tecnologia proprietária e capacidade de execução.
 
@@ -127,13 +134,11 @@ A empresa pode monetizar por implantação, agentes personalizados, contratos re
 Os principais pontos de atenção são foco comercial, prova de valor com casos reais, clareza de oferta, estabilidade da experiência e priorização dos segmentos iniciais.
 
 5. Próximo passo executivo
-Criar uma narrativa investidor-ready com mercado, produto, receita, roadmap, equipe, governança e três casos de uso demonstráveis.
-
-""" + _whatsapp_cta()
+Criar uma narrativa investidor-ready com mercado, produto, receita, roadmap, equipe, governança e três casos de uso demonstráveis.""")
 
 
 def _answer_business_plan() -> str:
-    return """Chris — estrutura executiva do Business Plan
+    return _with_cta("""Chris — estrutura executiva do Business Plan
 
 Eu organizaria o Business Plan da PatroAI/ORKIO em blocos de decisão, não como documento estático.
 
@@ -156,13 +161,11 @@ Arquitetura da plataforma, criação de agentes, governança, rastreabilidade, d
 Receitas, custos, margem, payback, cenários, valuation, necessidade de capital e milestones de tração.
 
 7. Governança e execução
-Ritmo de implantação, indicadores, responsabilidades, riscos e validação por ciclos.
-
-""" + _whatsapp_cta()
+Ritmo de implantação, indicadores, responsabilidades, riscos e validação por ciclos.""")
 
 
 def _answer_growth_sales() -> str:
-    return """Chris — leitura comercial e go-to-market
+    return _with_cta("""Chris — leitura comercial e go-to-market
 
 O caminho mais forte é vender a PatroAI/ORKIO como uma plataforma de transformação prática: ela entende a dor, desenha o agente certo e ajuda a empresa a sair do diagnóstico para execução.
 
@@ -179,13 +182,11 @@ Atrair dores concretas, qualificar urgência, mapear impacto financeiro, propor 
 Agente comercial, agente de CRM, agente de follow-up, agente de proposta, agente de marketing e agente de indicadores.
 
 5. Próximo passo
-Criar três ofertas claras: diagnóstico executivo, implantação inicial e pacote premium de agentes sob medida.
-
-""" + _whatsapp_cta()
+Criar três ofertas claras: diagnóstico executivo, implantação inicial e pacote premium de agentes sob medida.""")
 
 
 def _answer_cfo() -> str:
-    return """Chris — visão CFO executiva
+    return _with_cta("""Chris — visão CFO executiva
 
 A leitura financeira deve transformar a plataforma em uma decisão de investimento, não apenas em uma ferramenta de produtividade.
 
@@ -202,13 +203,11 @@ Setup de implantação, recorrência mensal, agentes adicionais, automações e 
 Agente CFO, agente de projeções, agente de precificação, agente de DRE, agente de fluxo de caixa e agente de indicadores.
 
 5. Próximo passo
-Mapear uma planilha-base com receita, custos, metas e gargalos para transformar a dor em escopo financeiro mensurável.
-
-""" + _whatsapp_cta()
+Mapear uma planilha-base com receita, custos, metas e gargalos para transformar a dor em escopo financeiro mensurável.""")
 
 
 def _answer_agent_architecture() -> str:
-    return """Chris — arquitetura executiva de agentes
+    return _with_cta("""Chris — arquitetura executiva de agentes
 
 A orquestração da Chris deve ser apresentada como uma camada executiva: ela organiza o negócio por eixos de decisão e recomenda os especialistas certos para cada demanda.
 
@@ -221,13 +220,11 @@ Eixos sob a Chris:
 - Chris Operations: processos, rotinas, atendimento e eficiência.
 
 Nota de governança:
-Nesta resposta, eu organizo a análise pelos eixos executivos da Chris. A ativação de agentes especializados pode ser desenhada conforme a demanda e implementada de forma controlada pela equipe ORKIO/PATROAI.
-
-""" + _whatsapp_cta()
+Nesta resposta, eu organizo a análise pelos eixos executivos da Chris. A ativação de agentes especializados pode ser desenhada conforme a demanda e implementada de forma controlada pela equipe ORKIO/PATROAI.""")
 
 
 def _answer_general() -> str:
-    return """Chris — leitura executiva
+    return _with_cta("""Chris — leitura executiva
 
 A PatroAI/ORKIO tem potencial para se posicionar como uma plataforma premium de criação, estruturação e execução de negócios digitais com IA.
 
@@ -241,9 +238,7 @@ A plataforma pode entregar Business Plan vivo, arquitetura de agentes personaliz
 O diferencial é combinar inteligência executiva com implantação prática: estratégia, agentes, governança e construção tecnológica sob demanda.
 
 4. Próxima ação
-Priorizar uma oferta clara, demonstrável e vendável: diagnóstico executivo + escopo de agentes + plano inicial de implantação.
-
-""" + _whatsapp_cta()
+Priorizar uma oferta clara, demonstrável e vendável: diagnóstico executivo + escopo de agentes + plano inicial de implantação.""")
 
 
 def build_public_chris_policy_decision(
@@ -254,7 +249,9 @@ def build_public_chris_policy_decision(
     dest_mode: Any = None,
     route_plan: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Return a deterministic public Chris answer when Chris is explicitly targeted."""
+    if not is_public_chris_policy_enabled():
+        return {"handled": False, "reason": "public_chris_policy_disabled"}
+
     if not _target_is_chris(
         message=message,
         visible_agent=visible_agent,
@@ -321,6 +318,7 @@ def build_public_chris_stream_payload(
                 "route_family": "public_executive_strategy",
                 "route_reason": decision.get("reason") or "",
                 "policy_version": decision.get("policy_version") or CHRIS_POLICY_VERSION,
+                "consultive_success_enabled": is_consultive_success_enabled(),
                 "write_executed": False,
                 "proposal_created": False,
                 "branch_created": False,
