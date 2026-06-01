@@ -104,6 +104,56 @@ RESEND_API_KEY = _clean_env(os.getenv("RESEND_API_KEY", ""))
 RESEND_FROM = _clean_env(os.getenv("RESEND_FROM", "Orkio <no-reply@orkio.ai>"), default="Orkio <no-reply@orkio.ai>")
 RESEND_INTERNAL_TO = _clean_env(os.getenv("RESEND_INTERNAL_TO", "daniel@patroai.com"), default="daniel@patroai.com")
 
+# ================================
+# ORKIO PUBLIC CEO MODE / COMMERCIAL CTA
+# ================================
+ORKIO_TEAM_WHATSAPP_NUMBER = "+5551989697605"
+ORKIO_TEAM_WHATSAPP_URL = (
+    "https://wa.me/5551989697605"
+    "?text=Ol%C3%A1%2C%20quero%20conversar%20com%20a%20equipe%20ORKIO%2FPATROAI%20"
+    "sobre%20agentes%20personalizados%20para%20minha%20empresa."
+)
+
+ORKIO_CEO_SCOPE_OVERLAY = f"""
+ORKIO_PUBLIC_CEO_MODE — contrato de resposta pública e comercial
+
+Você é Orkio, o agente principal e CEO digital da plataforma ORKIO OS / PATROAI.
+Sua função pública é entender dores reais de empreendedores, empresários, executivos e investidores,
+organizar essas dores em uma visão executiva e sugerir uma primeira arquitetura de agentes personalizados.
+
+Competências executivas que você deve simular com maturidade:
+- CFO/financeiro: caixa, custos, margem, indicadores, inadimplência, valuation, captação e previsibilidade.
+- Marketing: posicionamento, canais, conteúdo, funil, diferenciação, marca e geração de demanda.
+- Vendas/comercial: prospecção, CRM, follow-up, conversão, qualificação, propostas e relacionamento.
+- Operações: processos, gargalos, rotinas manuais, produtividade, atendimento e padronização.
+- Produto/tecnologia: automação com IA, agentes personalizados, dados necessários, integrações e roadmap.
+- Gestão: prioridades, equipe, rituais, acompanhamento, metas e governança.
+
+Quando o usuário trouxer uma dor de negócio, não responda de forma genérica.
+Entregue um ESCOPO INICIAL claro, curto e útil, preferencialmente com:
+1. Dor identificada
+2. Impacto provável no negócio
+3. Agentes personalizados recomendados
+4. Dados/processos que precisaríamos mapear
+5. Primeiro passo sugerido
+
+Sempre que houver demanda concreta, interesse comercial, necessidade de automação, criação de agentes,
+diagnóstico empresarial ou pedido de implantação, indique contato humano com a equipe ORKIO/PATROAI.
+
+CTA obrigatório quando houver oportunidade real:
+"Para transformar esse escopo em um projeto sob medida, fale com nossa equipe pelo WhatsApp:
+{ORKIO_TEAM_WHATSAPP_URL}"
+
+Regras de verdade operacional:
+- Não diga que todos os especialistas multiagente estão plenamente liberados para o público.
+- Explique, se necessário, que o ORKIO OS foi desenhado para arquitetura multiagente e que a ativação de agentes
+  personalizados é feita de forma progressiva, conforme a necessidade de cada empresa.
+- Não prometa integrações, automações, auditorias ou execuções que não tenham sido confirmadas.
+- Não exponha logs, runtime, GitHub, patches, terminal guard ou detalhes internos para usuário público.
+- Fale em pt-BR, com tom premium, claro, humano, executivo e confiante.
+- Seja consultivo: entenda, estruture e conduza para o próximo passo.
+""".strip()
+
 
 
 # ================================
@@ -2277,45 +2327,47 @@ def ensure_core_agents(db: Session, org: str) -> None:
         db.commit()
         by_key[(canonical_name or "").strip().lower()] = a
 
-    orkio_prompt = """You are Orkio, the executive AI host of the Patroai platform.
+    orkio_prompt = """You are Orkio, the public CEO digital host of the ORKIO OS / PATROAI platform.
 
-Your role is to act as an intelligent strategic advisor and moderator of an AI executive board that may include specialists such as Chris (CFO) and Orion (CTO).
+You are the primary executive agent for founders, entrepreneurs, executives and investors.
+Your mission is to understand business pain, organize priorities, design an initial scope, and guide the user toward the creation of personalized AI agents with the ORKIO/PATROAI team.
 
-Your personality is confident, articulate, warm, slightly charismatic, and executive.
-You communicate like a senior advisor speaking to founders, investors, and business leaders.
+You speak with confidence, warmth, precision and premium executive presence.
+You are not a generic chatbot. You are a consultative business operator with broad executive range.
 
-Before answering a complex question, briefly determine:
-- the user's real objective
-- the strategic dimensions of the problem
-- whether a specialist perspective would add value
+Core executive perspectives you can apply:
+- CFO / Finance: cash flow, margins, costs, KPIs, capital efficiency, valuation, fundraising and financial predictability.
+- Marketing: positioning, channels, content, funnel, demand generation, brand and differentiation.
+- Sales: prospecting, CRM, qualification, follow-up, conversion, proposals and customer relationship.
+- Operations: manual processes, bottlenecks, productivity, service routines, documentation and standardization.
+- Product / Technology: automation with AI, custom agents, integrations, data requirements and implementation roadmap.
+- Management: team priorities, rituals, accountability, goals, governance and execution rhythm.
 
-Then respond clearly and thoughtfully.
+When the user brings a business problem, provide an initial scope instead of a vague answer.
+Preferred structure:
+1. Pain identified
+2. Business impact
+3. Suggested personalized agents
+4. Data/processes to map
+5. Recommended next step
+
+When the user shows concrete interest, commercial intent, automation need, or a demand for personalized agents, invite them to contact the ORKIO/PATROAI team via WhatsApp:
+https://wa.me/5551989697605?text=Ol%C3%A1%2C%20quero%20conversar%20com%20a%20equipe%20ORKIO%2FPATROAI%20sobre%20agentes%20personalizados%20para%20minha%20empresa.
+
+Truth and positioning:
+- The ORKIO OS was designed for a multiagent architecture.
+- In the public experience, you conduct the main conversation and help design the agents needed for each business.
+- Do not claim that every specialist or integration is fully activated for all public users.
+- Do not expose internal runtime, logs, patches, GitHub, terminal guards or implementation details.
+- Never invent facts. Never expose secrets. Never execute financial or legal actions directly.
 
 Response style:
-- avoid extremely short answers
-- most responses should be 3–6 sentences or 2–3 short paragraphs
-- use natural executive framing such as:
-  "That's a great question."
-  "From a strategic perspective..."
-  "The key issue here is..."
-- provide insight, implication, and recommendation when relevant
-
-Specialist collaboration:
-- Chris is the CFO and Orion is the CTO
-- if the user directly asks for Chris, Orion, CFO, CTO, finance, technology, team, board, or multiple perspectives, call the relevant specialist immediately
-- do not say you need to verify availability
-- do not ask permission again when the user has already requested the specialist
-- when a specialist is called, Orkio should explicitly call them in natural speech, e.g. "Claro, vou chamar o Orion agora. Orion, você está disponível? Orion, pode trazer sua visão sobre isso?"
-- when the request is broad or ambiguous, Orkio may answer first and then bring one or more specialists as needed
-- after specialists speak, Orkio may briefly synthesize the takeaway
-
-Live mode:
-- prioritize clarity, confidence, and presence
-- sound natural, not robotic
-- occasional light enthusiasm is welcome, but stay elegant
-
-Never invent facts. Never expose secrets. Never execute financial or legal actions directly.
+- pt-BR by default.
+- concise but valuable.
+- executive, strategic and human.
+- prefer practical diagnosis, first scope and next step.
 """
+
 
     chris_prompt = """You are Chris, the CFO of the Orkio executive board.
 
@@ -2456,29 +2508,6 @@ Typical response length: 2–4 short paragraphs or a structured technical analys
         voice_id="echo",
         is_default=False,
     )
-
-    # ARQUITECH_STANDALONE_AGENT_V1:
-    # ARIA is the single standalone agent for the Arquitech module.
-    # No orchestration. No default replacement. No changes to existing agents.
-    try:
-        from app.aria_profile import (
-            ARIA_ALIASES,
-            ARIA_CANONICAL_NAME,
-            ARIA_DESCRIPTION,
-            ARIA_SYSTEM_PROMPT,
-            ARIA_VOICE_ID,
-        )
-
-        upsert(
-            canonical_name=ARIA_CANONICAL_NAME,
-            aliases=ARIA_ALIASES,
-            description=ARIA_DESCRIPTION,
-            system_prompt=ARIA_SYSTEM_PROMPT,
-            voice_id=ARIA_VOICE_ID,
-            is_default=False,
-        )
-    except Exception:
-        logger.exception("ARIA_STANDALONE_AGENT_SEED_FAILED org=%s", org)
 
 
 
@@ -2638,15 +2667,6 @@ class ChangePasswordIn(BaseModel):
     new_password: str = Field(min_length=6, max_length=256)
     new_password_confirm: str = Field(min_length=6, max_length=256)
 
-class BetaWaitlistIn(BaseModel):
-    name: str = Field(min_length=1, max_length=200)
-    company: Optional[str] = Field(default=None, max_length=200)
-    whatsapp: Optional[str] = Field(default=None, max_length=80)
-    email: EmailStr
-    consent: bool = False
-    access_code: str = Field(min_length=4, max_length=64)
-    source: Optional[str] = Field(default="closed_beta_gate", max_length=100)
-
 class FounderHandoffIn(BaseModel):
     thread_id: Optional[str] = None
     interest_type: str = Field(default="general", min_length=1, max_length=64)
@@ -2717,11 +2737,6 @@ class ChatIn(BaseModel):
     client_message_id: Optional[str] = None  # idempotency key (frontend-generated UUID)
     top_k: int = 6
     trace_id: Optional[str] = None  # V2V: propagado pelo frontend para correlação de logs
-    # ARQUITECH_STANDALONE_HARDLOCK_V1:
-    # Explicit product/source flags allow the backend to normalize the Arquitech
-    # experience to ARIA only, without changing the normal Orkio multi-agent flow.
-    source: Optional[str] = None
-    product: Optional[str] = None
 
 class ChatOut(BaseModel):
     thread_id: str
@@ -2733,202 +2748,6 @@ class ChatOut(BaseModel):
     voice_id: Optional[str] = None
     avatar_url: Optional[str] = None
     runtime_hints: Optional[Dict[str, Any]] = None
-
-
-def _arquitech_standalone_requested(inp: Any) -> bool:
-    """Return True only when the request explicitly belongs to Arquitech.
-
-    This intentionally does not activate merely because the text mentions BIM,
-    CAD, architecture or Arquitech. The Orkio general console must remain free
-    for normal multi-agent use unless the frontend marks the request as
-    source/product Arquitech or targets ARIA directly.
-    """
-    try:
-        source = str(getattr(inp, "source", "") or "").strip().lower()
-        product = str(getattr(inp, "product", "") or "").strip().lower()
-        visible = str(getattr(inp, "visible_agent", "") or "").strip().lower()
-        target = str(getattr(inp, "target_agent_slug", "") or "").strip().lower()
-        names = getattr(inp, "requested_agent_names", None)
-        requested = " ".join(str(x or "") for x in names) if isinstance(names, list) else str(names or "")
-        requested = requested.lower()
-        return bool(
-            source == "arquitech"
-            or product == "arquitech"
-            or visible in {"aria", "aria arquitech", "aria (arquitech)", "arquitech"}
-            or target in {"aria", "aria arquitech", "aria (arquitech)", "arquitech"}
-            or "aria" in requested
-        )
-    except Exception:
-        return False
-
-
-def _resolve_aria_agent_for_arquitech(db: Session, org: str) -> Optional[Agent]:
-    """Find ARIA after ensuring core agents.
-
-    Best-effort and narrow: failure must not break the main Orkio runtime.
-    """
-    try:
-        ensure_core_agents(db, org)
-    except Exception:
-        try:
-            logger.exception("ARQUITECH_ENSURE_CORE_AGENTS_FAILED org=%s", org)
-        except Exception:
-            pass
-
-    try:
-        row = (
-            db.execute(
-                select(Agent)
-                .where(Agent.org_slug == org)
-                .where(func.lower(Agent.name) == "aria")
-                .limit(1)
-            )
-            .scalars()
-            .first()
-        )
-        if row:
-            return row
-    except Exception:
-        try:
-            db.rollback()
-        except Exception:
-            pass
-
-    try:
-        return (
-            db.execute(
-                select(Agent)
-                .where(Agent.org_slug == org)
-                .where(Agent.name.ilike("%ARIA%"))
-                .order_by(Agent.created_at.asc())
-                .limit(1)
-            )
-            .scalars()
-            .first()
-        )
-    except Exception:
-        try:
-            db.rollback()
-        except Exception:
-            pass
-        return None
-
-
-
-def _build_aria_standalone_stream_answer(user_text: str) -> str:
-    """Deterministic ARIA fallback for the Arquitech standalone stream.
-
-    This guard exists only to prevent legacy Orkio/Team fast-paths from answering
-    inside the Arquitech product scope. It does not call other agents and it does
-    not perform orchestration.
-    """
-    raw = str(user_text or "").strip()
-    low = raw.lower()
-
-    greeting_terms = {"oi", "olá", "ola", "hello", "hi", "bom dia", "boa tarde", "boa noite"}
-    is_short_greeting = bool(low in greeting_terms or (len(low) <= 24 and any(t in low for t in greeting_terms)))
-
-    if is_short_greeting:
-        return (
-            "Olá, eu sou a ARIA, superagente standalone da Arquitech.\n\n"
-            "Posso te ajudar a organizar briefing, escopo, documentos, riscos, cronograma, proposta e próximos passos do seu projeto ou obra.\n\n"
-            "Para começarmos bem, me diga: qual é o tipo de projeto, em que fase ele está e qual entrega você precisa agora?"
-        )
-
-    if any(term in low for term in ("bim", "cad", "integra", "integração", "integracao", "sistema", "erp", "crm")):
-        return (
-            "Sou a ARIA, e vou tratar isso pela lógica da Arquitech: acima do BIM, a camada de decisão.\n\n"
-            "A Arquitech não substitui BIM, CAD ou sistemas técnicos. Ela organiza contexto, decisões, documentos, riscos, escopos e integrações para que o escritório tenha mais clareza operacional.\n\n"
-            "Próximo passo: me diga quais sistemas, documentos ou fluxos você quer conectar, e eu estruturo uma matriz inicial de integração e prioridade."
-        )
-
-    if any(term in low for term in ("shopping", "loja", "obra", "clínica", "clinica", "consultório", "consultorio", "reforma", "projeto")):
-        return (
-            "Vou organizar isso como ARIA, dentro da Arquitech.\n\n"
-            "1. Diagnóstico inicial\n"
-            "Seu pedido parece envolver projeto, obra ou operação arquitetônica. A primeira etapa é separar contexto, fase atual, responsáveis, documentos disponíveis e risco principal.\n\n"
-            "2. O que preciso confirmar\n"
-            "- tipo de obra ou projeto;\n"
-            "- área aproximada;\n"
-            "- cidade/local;\n"
-            "- fase atual;\n"
-            "- documentos existentes;\n"
-            "- entrega desejada agora.\n\n"
-            "3. Próximo passo recomendado\n"
-            "Me envie esses dados em poucas linhas e eu devolvo um briefing estruturado, checklist inicial e rota segura de trabalho."
-        )
-
-    return (
-        "Entendi. Vou responder como ARIA, a superagente standalone da Arquitech.\n\n"
-        "1. Diagnóstico inicial\n"
-        "Vou organizar seu pedido em contexto, objetivo, informações faltantes, riscos e próximo passo operacional.\n\n"
-        "2. O que já está claro\n"
-        f"- Mensagem recebida: {raw}\n\n"
-        "3. O que ainda falta\n"
-        "- tipo de projeto ou obra;\n"
-        "- fase atual;\n"
-        "- área aproximada;\n"
-        "- local;\n"
-        "- documento ou referência disponível;\n"
-        "- entrega que você quer gerar agora.\n\n"
-        "4. Próximo passo recomendado\n"
-        "Me envie esses dados e eu monto o primeiro diagnóstico Arquitech com briefing, checklist e rota de decisão."
-    )
-
-
-
-def _apply_arquitech_standalone_lock(inp: Any, db: Session, org: str) -> Dict[str, Any]:
-    """Force Arquitech requests to ARIA only.
-
-    This is the backend hardlock for the Arquitech standalone scope:
-    - no Team;
-    - no multi-agent;
-    - no requested_agent_names;
-    - no handoff by payload;
-    - preserve normal Orkio behavior outside explicit Arquitech context.
-    """
-    if not _arquitech_standalone_requested(inp):
-        return {"applied": False}
-
-    aria = _resolve_aria_agent_for_arquitech(db, org)
-
-    try:
-        raw_message = str(getattr(inp, "message", "") or "")
-        cleaned_message = re.sub(
-            r"@([A-Za-z0-9_\-/]+(?:\s+[A-Za-z0-9_\-/]+){0,2})(?=(?:\s*[,.:;!?])|(?:\s+@)|$)",
-            "",
-            raw_message,
-            flags=re.IGNORECASE,
-        )
-        cleaned_message = re.sub(r"\s{2,}", " ", cleaned_message).strip()
-        if cleaned_message:
-            setattr(inp, "message", cleaned_message)
-
-        setattr(inp, "source", "arquitech")
-        setattr(inp, "product", "arquitech")
-        setattr(inp, "dest_mode", "single")
-        setattr(inp, "agent_ids", [])
-        setattr(inp, "requested_agent_names", [])
-        setattr(inp, "visible_agent", "ARIA")
-        if aria is not None:
-            setattr(inp, "agent_id", getattr(aria, "id", None))
-            # Current frontend/backend contract accepts this field as a concrete
-            # target identifier even though the historical name says "slug".
-            setattr(inp, "target_agent_slug", getattr(aria, "id", None))
-        else:
-            setattr(inp, "agent_id", None)
-            setattr(inp, "target_agent_slug", "aria")
-    except Exception:
-        try:
-            logger.exception("ARQUITECH_STANDALONE_LOCK_MUTATION_FAILED org=%s", org)
-        except Exception:
-            pass
-
-    return {
-        "applied": True,
-        "agent_id": getattr(aria, "id", None) if aria is not None else None,
-        "agent_name": getattr(aria, "name", "ARIA") if aria is not None else "ARIA",
-    }
 
 
 class GovernanceApprovePatchIn(BaseModel):
@@ -5217,91 +5036,6 @@ def validate_access_code_post(
         "org": org,
     }
 
-@app.post("/api/beta/waitlist")
-def create_beta_waitlist(
-    inp: BetaWaitlistIn,
-    request: Request = None,
-    x_org_slug: Optional[str] = Header(default=None),
-    db: Session = Depends(get_db),
-):
-    org = (get_org(x_org_slug) if x_org_slug else default_tenant()).strip()
-    code = str(inp.access_code or "").strip().upper()
-
-    if code != "EFATAH777":
-        raise HTTPException(status_code=403, detail="Código de acesso inválido.")
-
-    if not inp.consent:
-        raise HTTPException(status_code=400, detail="É necessário autorizar o contato para entrar na lista prioritária.")
-
-    email = str(inp.email or "").strip().lower()
-    ip = request.client.host if request and request.client else "unknown"
-    ip_hash = hashlib.sha256(str(ip).encode("utf-8")).hexdigest()
-
-    try:
-        db.execute(text("""
-            CREATE TABLE IF NOT EXISTS beta_waitlist (
-                id VARCHAR PRIMARY KEY,
-                org_slug VARCHAR NOT NULL,
-                name VARCHAR NOT NULL,
-                company VARCHAR,
-                whatsapp VARCHAR,
-                email VARCHAR NOT NULL UNIQUE,
-                consent BOOLEAN NOT NULL DEFAULT FALSE,
-                access_code VARCHAR,
-                source VARCHAR,
-                user_agent TEXT,
-                ip_hash VARCHAR,
-                created_at BIGINT NOT NULL,
-                updated_at BIGINT NOT NULL
-            )
-        """))
-        db.execute(text("CREATE INDEX IF NOT EXISTS ix_beta_waitlist_org ON beta_waitlist(org_slug)"))
-        db.execute(text("""
-            INSERT INTO beta_waitlist (
-                id, org_slug, name, company, whatsapp, email, consent,
-                access_code, source, user_agent, ip_hash, created_at, updated_at
-            )
-            VALUES (
-                :id, :org_slug, :name, :company, :whatsapp, :email, :consent,
-                :access_code, :source, :user_agent, :ip_hash, :created_at, :updated_at
-            )
-            ON CONFLICT(email) DO UPDATE SET
-                name = excluded.name,
-                company = excluded.company,
-                whatsapp = excluded.whatsapp,
-                consent = excluded.consent,
-                access_code = excluded.access_code,
-                source = excluded.source,
-                user_agent = excluded.user_agent,
-                ip_hash = excluded.ip_hash,
-                updated_at = excluded.updated_at
-        """), {
-            "id": new_id(),
-            "org_slug": org,
-            "name": str(inp.name or "").strip(),
-            "company": str(inp.company or "").strip() or None,
-            "whatsapp": str(inp.whatsapp or "").strip() or None,
-            "email": email,
-            "consent": bool(inp.consent),
-            "access_code": code,
-            "source": str(inp.source or "closed_beta_gate")[:100],
-            "user_agent": str(request.headers.get("user-agent", "") if request else "")[:1000],
-            "ip_hash": ip_hash,
-            "created_at": now_ts(),
-            "updated_at": now_ts(),
-        })
-        db.commit()
-    except Exception:
-        try:
-            db.rollback()
-        except Exception:
-            pass
-        logger.exception("BETA_WAITLIST_SAVE_FAILED email=%s org=%s", email, org)
-        raise HTTPException(status_code=500, detail="Não foi possível registrar seu interesse agora.")
-
-    return {"ok": True, "message": "Cadastro registrado com sucesso."}
-
-
 
 class SummitSessionStartCompatIn(BaseModel):
     language: Optional[str] = "auto"
@@ -6446,38 +6180,6 @@ def _get_feature_flag(db: Session, org: str, key: str) -> Optional[str]:
         return None
 
 
-# AO-BETA-01 — Closed Beta / Programa de Evolução Controlada.
-# Gate operacional: externos não acessam console; EFATAH777 entra na waitlist.
-def _closed_beta_gate_enabled() -> bool:
-    raw = _clean_env(os.getenv("ORKIO_CLOSED_BETA_GATE", "true"), default="true")
-    return raw.strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _closed_beta_internal_emails() -> set:
-    raw = _clean_env(os.getenv("ORKIO_CLOSED_BETA_INTERNAL_EMAILS", ""), default="")
-    return {part.strip().lower() for part in raw.split(",") if part.strip()}
-
-
-def _is_closed_beta_internal_email(email: Optional[str]) -> bool:
-    safe = str(email or "").strip().lower()
-    if not safe:
-        return False
-    if safe in admin_emails():
-        return True
-    if safe in _closed_beta_internal_emails():
-        return True
-    return False
-
-
-def _is_closed_beta_internal_user(u: Optional[User], email: Optional[str] = None) -> bool:
-    safe_email = str(email or getattr(u, "email", "") or "").strip().lower()
-    if _is_closed_beta_internal_email(safe_email):
-        return True
-    if u and str(getattr(u, "role", "") or "").strip().lower() == "admin":
-        return True
-    return False
-
-
 def _is_summit_auto_approved_code(raw_access_code: Optional[str], signup_code_label: Optional[str], signup_source: Optional[str]) -> bool:
     """
     Summit access code EFATAH777 must auto-approve without manual admin approval.
@@ -6528,15 +6230,6 @@ def register(inp: RegisterIn, request: Request = None, x_org_slug: Optional[str]
     org = (get_org(x_org_slug) if x_org_slug else (inp.tenant or default_tenant())).strip()
     email = inp.email.lower().strip()
     is_admin_email = email in admin_emails()
-
-    # AO-BETA-01 — em beta fechado, registro externo não cria conta de console.
-    # EFATAH777 deve ir para waitlist, não para console completo.
-    if _closed_beta_gate_enabled() and not _is_closed_beta_internal_email(email):
-        logger.warning("REGISTER_DENIED reason=closed_beta_hold email=%s org=%s", email, org)
-        raise HTTPException(
-            status_code=403,
-            detail="Acesso antecipado temporariamente restrito. Entre na Lista Prioritária pelo Programa de Evolução Controlada."
-        )
 
     try:
         logger.warning(
@@ -6771,14 +6464,6 @@ def login(inp: LoginIn, x_org_slug: Optional[str] = Header(default=None), db: Se
     except Exception:
         logger.exception("ADMIN_ELEVATE_FAILED")
 
-    # AO-BETA-01 — bloqueio operacional do console para externos.
-    # Apenas admin/equipe allowlist acessa o console completo durante estabilização.
-    if _closed_beta_gate_enabled() and not _is_closed_beta_internal_user(u, email):
-        logger.warning("LOGIN_DENIED reason=closed_beta_hold email=%s org=%s", email, org)
-        raise HTTPException(
-            status_code=403,
-            detail="Acesso antecipado temporariamente restrito. A nova fase do ORKIO OS está em evolução controlada."
-        )
 
     usage_tier = getattr(u, "usage_tier", "summit_standard") or "summit_standard"
 
@@ -8556,6 +8241,33 @@ def _canonical_dispatch_specialist_slug(name: Any) -> Optional[str]:
 
 
 
+
+
+def _append_orkio_ceo_scope_overlay(
+    system_prompt: Optional[str],
+    *,
+    agent_name: Any = None,
+    final_speaker: Any = None,
+) -> str:
+    """
+    ORKIO_PUBLIC_CEO_MODE:
+    Runtime overlay for Orkio as public CEO/consultative host.
+
+    This is intentionally additive. It does not alter routing, runtime execution,
+    GitHub, Orion, Chris or Team behavior. It only strengthens Orkio's public
+    response contract when Orkio is the actual responding agent.
+    """
+    base = str(system_prompt or "").strip()
+    names = [
+        str(agent_name or "").strip().lower(),
+        str(final_speaker or "").strip().lower(),
+    ]
+    is_orkio = any(name in {"orkio", "@orkio", "orkio (ceo)"} for name in names)
+    if not is_orkio:
+        return base
+    if "ORKIO_PUBLIC_CEO_MODE" in base:
+        return base
+    return (base + "\n\n" + ORKIO_CEO_SCOPE_OVERLAY).strip() if base else ORKIO_CEO_SCOPE_OVERLAY
 
 def _extract_readonly_squad_requested_raw_from_message(message: Any) -> List[str]:
     """
@@ -13849,6 +13561,124 @@ def _efata777_apply_destination_receipt(
         receipt["fallback_used"] = False
         receipt["fallback_reason"] = ""
     return receipt
+
+
+def _efata777_destination_contract_routing_locked(contract: Optional[Dict[str, Any]]) -> bool:
+    """True when frontend/@mention supplied a concrete agent target for this turn."""
+    c = dict(contract or {})
+    if not bool(c.get("destination_contract_used")):
+        return False
+    if c.get("target_agents_rows"):
+        return True
+    if c.get("target_agent_names_frozen") or c.get("target_agents_frozen"):
+        return True
+    target = c.get("target_agent_frozen")
+    if isinstance(target, str) and target.strip():
+        return True
+    # Backward compatibility for older AO37 contracts that stored True here.
+    if target is True and (c.get("visible_agent") or c.get("requested_agent_names")):
+        return True
+    return False
+
+
+def _efata777_destination_contract_locked_names(contract: Optional[Dict[str, Any]]) -> List[str]:
+    c = dict(contract or {})
+    out: List[str] = []
+    seen: set = set()
+
+    def _add(value: Any) -> None:
+        name = str(value or "").strip()
+        if not name or name.lower() in {"true", "false", "none", "null"}:
+            return
+        key = name.lower()
+        if key in seen:
+            return
+        seen.add(key)
+        out.append(name)
+
+    for row in list(c.get("target_agents_rows") or []):
+        _add(getattr(row, "name", None) or getattr(row, "slug", None) or row)
+    for value in list(c.get("target_agent_names_frozen") or []):
+        _add(value)
+    for value in list(c.get("target_agents_frozen") or []):
+        _add(_dispatch_agent_display_name(value))
+    target = c.get("target_agent_frozen")
+    if isinstance(target, str):
+        _add(_dispatch_agent_display_name(target))
+    if not out:
+        _add(c.get("visible_agent"))
+    if not out:
+        for value in list(c.get("requested_agent_names") or []):
+            _add(value)
+    return out
+
+
+def _efata777_apply_routing_lock_to_targets(
+    target_agents: Optional[List[Any]],
+    requested_names: Optional[List[Any]],
+    mention_tokens: Optional[List[Any]],
+    has_team: bool,
+    contract: Optional[Dict[str, Any]],
+) -> Any:
+    """Make the destination contract sovereign over later planner/fast-path rewrites."""
+    if not _efata777_destination_contract_routing_locked(contract):
+        return list(target_agents or []), list(requested_names or []), list(mention_tokens or []), bool(has_team)
+
+    c = dict(contract or {})
+    locked_rows = list(c.get("target_agents_rows") or [])
+    locked_names = _efata777_destination_contract_locked_names(c)
+
+    next_targets = locked_rows if locked_rows else list(target_agents or [])
+    next_requested = list(requested_names or [])
+    next_mentions = list(mention_tokens or [])
+
+    for name in locked_names:
+        if name and str(name).lower() not in {str(x).lower() for x in next_requested}:
+            next_requested.append(name)
+        if name and str(name).lower() not in {str(x).lower() for x in next_mentions}:
+            next_mentions.append(name)
+
+    lock_is_multi = str(c.get("dest_mode") or "").strip().lower() == "multi" or len(locked_rows) > 1 or len(locked_names) > 1
+    return next_targets, next_requested, next_mentions, bool(lock_is_multi)
+
+
+def _efata777_apply_routing_lock_to_receipt(
+    receipt: Optional[Dict[str, Any]],
+    contract: Optional[Dict[str, Any]],
+) -> Dict[str, Any]:
+    r = dict(receipt or {})
+    if not _efata777_destination_contract_routing_locked(contract):
+        return r
+
+    c = dict(contract or {})
+    locked_names = _efata777_destination_contract_locked_names(c)
+    locked_slugs = [_canonical_dispatch_specialist_slug(name) or _efata777_slug(name) for name in locked_names if str(name or "").strip()]
+    locked_display = [_dispatch_agent_display_name(name) for name in locked_names if str(name or "").strip()]
+    visible = str(c.get("visible_agent") or (locked_display[0] if len(locked_display) == 1 else "") or "").strip()
+
+    r["routing_locked"] = True
+    r["final_agent_source"] = "destination_contract"
+    r["destination_contract_used"] = True
+    r["dest_mode"] = c.get("dest_mode") or r.get("dest_mode") or ""
+    r["target_agent_names_frozen"] = locked_display
+    r["target_agents_frozen"] = locked_slugs
+    if locked_display:
+        r["target_agents"] = locked_display
+    if visible:
+        r["visible_agent"] = visible
+    if len(locked_display) == 1:
+        r["target_agent"] = locked_display[0]
+        r["final_speaker"] = locked_display[0]
+        r["direct_agent_message"] = True
+        r["orchestrator_dispatch"] = False
+        r["mediated_single_target_delegation"] = False
+    elif len(locked_display) > 1:
+        r["orchestrator_dispatch"] = True
+        r["direct_agent_message"] = False
+        r["final_speaker"] = visible or "Team"
+    r["fallback_used"] = False
+    r["fallback_reason"] = ""
+    return r
 
 
 def _dispatch_receipt_requested_specialists(receipt: Optional[Dict[str, Any]]) -> List[str]:
@@ -21660,20 +21490,6 @@ def chat(
     if db_user.role != "admin" and auth_status == "pending_approval":
         raise HTTPException(status_code=403, detail="User pending approval")
 
-    try:
-        _arquitech_lock_receipt = _apply_arquitech_standalone_lock(inp, db, org)
-        if _arquitech_lock_receipt.get("applied"):
-            logger.warning(
-                "ARQUITECH_STANDALONE_LOCK_APPLIED route=chat org=%s agent_id=%s",
-                org,
-                _arquitech_lock_receipt.get("agent_id"),
-            )
-    except Exception:
-        try:
-            logger.exception("ARQUITECH_STANDALONE_LOCK_FAILED route=chat org=%s", org)
-        except Exception:
-            pass
-
     uid = user.get("sub")
 
     # AO-32_RUNTIME_CHAT_OBSERVABILITY
@@ -21883,12 +21699,13 @@ def chat(
             "destination_contract_used": True,
             "dest_mode": "single",
             "requested_agent_names": ["orkio"],
-            "target_agent_frozen": True,
+            "target_agent_frozen": "orkio",
             "target_agent_names_frozen": ["orkio"],
             "target_agents_frozen": ["orkio"],
             "target_agents_rows": [ao37_plain_orkio_agent],
             "visible_agent": "orkio",
         }
+        routing_locked = True
 
         try:
             dispatch_routing_receipt = _build_dispatch_routing_receipt(
@@ -22048,6 +21865,20 @@ def chat(
         if destination_contract.get("dest_mode") == "multi" and destination_contract.get("target_agents_rows"):
             has_team = True
 
+        routing_locked = _efata777_destination_contract_routing_locked(destination_contract)
+        try:
+            if routing_locked:
+                logger.warning(
+                    "EFATA777_ROUTING_LOCK_ARMED trace_id=%s thread_id=%s locked_names=%s dest_mode=%s elapsed_ms=%s",
+                    ao32_trace_id,
+                    tid,
+                    ",".join(_efata777_destination_contract_locked_names(destination_contract)),
+                    destination_contract.get("dest_mode"),
+                    _ao32_elapsed_ms(),
+                )
+        except Exception:
+            pass
+
         # PATCH27_12AY — Orion self-knowledge hard gate BEFORE any fan-out
         forced_orion_agent = None
         if orion_self_knowledge_flags.get("requested") or orion_operational_maturity_flags.get("requested"):
@@ -22161,6 +21992,13 @@ def chat(
             has_team=has_team,
             user_text=inp.message,
         )
+        target_agents, requested_names, mention_tokens, has_team = _efata777_apply_routing_lock_to_targets(
+            target_agents,
+            requested_names,
+            mention_tokens,
+            has_team,
+            destination_contract,
+        )
         try:
             logger.warning(
                 "AO36C_AFTER_TARGET_FREEZE trace_id=%s thread_id=%s target_count=%s elapsed_ms=%s",
@@ -22200,6 +22038,10 @@ def chat(
             dispatch_routing_receipt["dispatch_executed"] = False
             dispatch_routing_receipt["fallback_used"] = False
             dispatch_routing_receipt["fallback_reason"] = ""
+        dispatch_routing_receipt = _efata777_apply_routing_lock_to_receipt(
+            dispatch_routing_receipt,
+            destination_contract,
+        )
 
         if excluded_agent_names:
             target_agents = [a for a in (target_agents or []) if str(getattr(a, "name", "") or "").strip().lower() not in excluded_agent_names]
@@ -22222,6 +22064,18 @@ def chat(
             requested_names = ["orion"]
             mention_tokens = ["orion"]
             has_team = False
+
+        target_agents, requested_names, mention_tokens, has_team = _efata777_apply_routing_lock_to_targets(
+            target_agents,
+            requested_names,
+            mention_tokens,
+            has_team,
+            destination_contract,
+        )
+        dispatch_routing_receipt = _efata777_apply_routing_lock_to_receipt(
+            dispatch_routing_receipt,
+            destination_contract,
+        )
 
 
     try:
@@ -22389,6 +22243,20 @@ def chat(
                 requested_names = ["orion"]
     except Exception:
         pass
+    try:
+        target_agents, requested_names, mention_tokens, has_team = _efata777_apply_routing_lock_to_targets(
+            target_agents,
+            requested_names,
+            mention_tokens,
+            has_team,
+            destination_contract,
+        )
+        dispatch_routing_receipt = _efata777_apply_routing_lock_to_receipt(
+            dispatch_routing_receipt,
+            destination_contract,
+        )
+    except Exception:
+        pass
 
     try:
         logger.warning(
@@ -22441,6 +22309,17 @@ def chat(
         runtime_enrichment = _constraint_guard.get("runtime_enrichment") if isinstance(_constraint_guard.get("runtime_enrichment"), dict) else runtime_enrichment
         constraint_violations = list(_constraint_guard.get("violations") or [])
         runtime_constraints = dict(_constraint_guard.get("constraints") or {})
+        target_agents, requested_names, mention_tokens, has_team = _efata777_apply_routing_lock_to_targets(
+            target_agents,
+            requested_names,
+            mention_tokens,
+            has_team,
+            destination_contract,
+        )
+        dispatch_routing_receipt = _efata777_apply_routing_lock_to_receipt(
+            dispatch_routing_receipt,
+            destination_contract,
+        )
     except Exception:
         constraint_violations = []
         runtime_constraints = {}
@@ -22539,6 +22418,17 @@ def chat(
         pass
     if runtime_enrichment.get("planner_snapshot") and len(target_agents) > 1:
         target_agents = _reorder_agents_by_planner(target_agents, runtime_enrichment.get("planner_snapshot"))
+        target_agents, requested_names, mention_tokens, has_team = _efata777_apply_routing_lock_to_targets(
+            target_agents,
+            requested_names,
+            mention_tokens,
+            has_team,
+            destination_contract,
+        )
+        dispatch_routing_receipt = _efata777_apply_routing_lock_to_receipt(
+            dispatch_routing_receipt,
+            destination_contract,
+        )
     try:
         logger.warning(
             "AO38B_AFTER_PLANNER_REORDER_BEFORE_EXECUTION_REVIEW trace_id=%s thread_id=%s target_agents_count=%s elapsed_ms=%s",
@@ -22564,6 +22454,17 @@ def chat(
         planner_adjustment = _build_execution_planner_adjustment(execution_review)
         target_agents = _apply_execution_planner_adjustment(target_agents, planner_adjustment)
         target_agents = _apply_explicit_agent_request(db, org, target_agents, requested_names)
+        target_agents, requested_names, mention_tokens, has_team = _efata777_apply_routing_lock_to_targets(
+            target_agents,
+            requested_names,
+            mention_tokens,
+            has_team,
+            destination_contract,
+        )
+        dispatch_routing_receipt = _efata777_apply_routing_lock_to_receipt(
+            dispatch_routing_receipt,
+            destination_contract,
+        )
         runtime_hints_live = runtime_enrichment.get("runtime_hints") if isinstance(runtime_enrichment.get("runtime_hints"), dict) else {}
         if isinstance(runtime_hints_live, dict):
             runtime_hints_live["execution_review"] = execution_review
@@ -22587,7 +22488,7 @@ def chat(
         orion_self_knowledge_flags = _orion_self_knowledge_request_flags(inp.message)
         if orion_self_knowledge_flags.get("requested"):
             forced_orion = _pick_target_agent_by_slug(target_agents, "orion")
-            if forced_orion is not None:
+            if forced_orion is not None and not _efata777_destination_contract_routing_locked(destination_contract):
                 target_agents = [forced_orion]
                 planner_snapshot_live = runtime_enrichment.get("planner_snapshot") if isinstance(runtime_enrichment.get("planner_snapshot"), dict) else {}
                 if isinstance(planner_snapshot_live, dict):
@@ -22599,6 +22500,20 @@ def chat(
                     runtime_hints_live["force_single_visible_agent"] = "orion"
                     runtime_hints_live["force_catalog_self_knowledge"] = True
                     runtime_enrichment["runtime_hints"] = runtime_hints_live
+    except Exception:
+        pass
+    try:
+        target_agents, requested_names, mention_tokens, has_team = _efata777_apply_routing_lock_to_targets(
+            target_agents,
+            requested_names,
+            mention_tokens,
+            has_team,
+            destination_contract,
+        )
+        dispatch_routing_receipt = _efata777_apply_routing_lock_to_receipt(
+            dispatch_routing_receipt,
+            destination_contract,
+        )
     except Exception:
         pass
     try:
@@ -22700,6 +22615,21 @@ def chat(
         except Exception:
             pass
 
+    try:
+        target_agents, requested_names, mention_tokens, has_team = _efata777_apply_routing_lock_to_targets(
+            target_agents,
+            requested_names,
+            mention_tokens,
+            has_team,
+            destination_contract,
+        )
+        dispatch_routing_receipt = _efata777_apply_routing_lock_to_receipt(
+            dispatch_routing_receipt,
+            destination_contract,
+        )
+    except Exception:
+        pass
+
     # PATCH27_12AJ — execution-first collapse for sync chat
     should_execute_runtime = _should_execute_runtime_from_enrichment(runtime_enrichment)
     try:
@@ -22788,6 +22718,17 @@ def chat(
             runtime_primary_agent = None
         if runtime_primary_agent is not None:
             target_agents = [runtime_primary_agent]
+            target_agents, requested_names, mention_tokens, has_team = _efata777_apply_routing_lock_to_targets(
+                target_agents,
+                requested_names,
+                mention_tokens,
+                has_team,
+                destination_contract,
+            )
+            dispatch_routing_receipt = _efata777_apply_routing_lock_to_receipt(
+                dispatch_routing_receipt,
+                destination_contract,
+            )
         try:
             dag_snapshot_live = runtime_enrichment.get("dag_snapshot") if isinstance(runtime_enrichment, dict) else {}
             if isinstance(dag_snapshot_live, dict):
@@ -23103,6 +23044,11 @@ def chat(
         runtime_overlay = (runtime_enrichment.get("system_overlay") if runtime_enrichment else "") or ""
         if runtime_overlay:
             effective_system_prompt = ((effective_system_prompt or "").strip() + "\n\n" + runtime_overlay).strip()
+        effective_system_prompt = _append_orkio_ceo_scope_overlay(
+            effective_system_prompt,
+            agent_name=_agent_attr(agent, "name", None),
+            final_speaker=final_signer_agent_name,
+        )
         if active_founder_guidance:
             effective_system_prompt = ((effective_system_prompt or "").strip() + "\n\nFounder guidance (temporary, internal):\n" + active_founder_guidance).strip()
 
@@ -32968,23 +32914,6 @@ async def chat_stream(
     if not message:
         raise HTTPException(400, "message required")
 
-    _arquitech_lock_receipt = {"applied": False}
-
-    try:
-        _arquitech_lock_receipt = _apply_arquitech_standalone_lock(inp, db, org)
-        if _arquitech_lock_receipt.get("applied"):
-            message = (inp.message or "").strip()
-            logger.warning(
-                "ARQUITECH_STANDALONE_LOCK_APPLIED route=chat_stream org=%s agent_id=%s",
-                org,
-                _arquitech_lock_receipt.get("agent_id"),
-            )
-    except Exception:
-        try:
-            logger.exception("ARQUITECH_STANDALONE_LOCK_FAILED route=chat_stream org=%s", org)
-        except Exception:
-            pass
-
     route_plan = _ao20bc_resolve_route(
         message,
         requested_agent=(
@@ -40909,19 +40838,7 @@ async def chat_stream(
                 and not any(_term in _ao01_norm for _term in _hf6r3b_approval_terms)
             )
 
-            _arquitech_aria_stream_mode = bool(
-                (_arquitech_lock_receipt or {}).get("applied")
-                or str(getattr(inp, "source", "") or "").strip().lower() == "arquitech"
-                or str(getattr(inp, "product", "") or "").strip().lower() == "arquitech"
-                or str(getattr(inp, "target_agent_slug", "") or "").strip().lower() in {"aria", "arquitech"}
-                or str(getattr(inp, "visible_agent", "") or "").strip().lower() in {"aria", "arquitech"}
-            )
-
-            if _arquitech_aria_stream_mode:
-                _hf4k_kind = "arquitech_aria_standalone"
-                _hf4k_final_text = _build_aria_standalone_stream_answer(message)
-
-            elif _hf6r3b_mutation_without_approval:
+            if _hf6r3b_mutation_without_approval:
                 _hf4k_kind = "mutation_without_approval_blocked"
                 _hf4k_final_text = (
                     "ORKIO — EXECUÇÃO BLOQUEADA SEM APROVAÇÃO\n\n"
@@ -41818,9 +41735,7 @@ async def chat_stream(
             # AO20K-HF4U_AGENT_FASTPATH_DISPLAY_NAME
             _hf4k_agent_name = "Orkio"
             try:
-                if _hf4k_kind == "arquitech_aria_standalone":
-                    _hf4k_agent_name = "ARIA"
-                elif _hf4k_kind == "safe_agent_ping":
+                if _hf4k_kind == "safe_agent_ping":
                     _hf4k_agent_name = str(_hf4p_target or "Orkio").strip() or "Orkio"
                 elif _hf4k_kind == "safe_agent_greeting":
                     _hf4k_agent_name = str(_hf4t_target or "Orkio").strip() or "Orkio"
@@ -41857,7 +41772,6 @@ async def chat_stream(
                 "memory_lookup_readonly": "memory_lookup_readonly",
                 "premium_context_snapshot": "context_snapshot_fastpath",
                 "natural_executive_reading": "natural_executive_reading_fastpath",
-                "arquitech_aria_standalone": "arquitech_aria_standalone",
             }.get(str(_hf4k_kind or ""), "safe_fastpath_coverage")
 
             _hf6r1_route_priority = {
@@ -41879,7 +41793,6 @@ async def chat_stream(
                 "simple_status": 120,
                 "premium_context_snapshot": 65,
                 "natural_executive_reading": 64,
-                "arquitech_aria_standalone": 1,
             }.get(str(_hf4k_kind or ""), 999)
 
             if _hf4k_kind and _hf4k_final_text:
@@ -41887,7 +41800,7 @@ async def chat_stream(
                     _persist_assistant_message,
                     text=_hf4k_final_text,
                     thread_id=tid_seed,
-                    agent_id=((_arquitech_lock_receipt or {}).get("agent_id") if _hf4k_kind == "arquitech_aria_standalone" else None),
+                    agent_id=None,
                     agent_name=_hf4k_agent_name,
                 )
 
@@ -41897,7 +41810,7 @@ async def chat_stream(
                     "answer": _hf4k_final_text,
                     "message": _hf4k_final_text,
                     "final_text": _hf4k_final_text,
-                    "agent_id": (_arquitech_lock_receipt or {}).get("agent_id") if _hf4k_kind == "arquitech_aria_standalone" else None,
+                    "agent_id": None,
                     "agent_name": _hf4k_agent_name,
                     "final_speaker": _hf4k_agent_name,
                     "runtime_hints": {
@@ -45070,6 +44983,11 @@ def _run_realtime_multi_agent_turn(
 
         user_msg = _build_agent_prompt(agent, text_in, has_team or bool(requested_names), mention_tokens)
         effective_system_prompt = agent.system_prompt if agent else None
+        effective_system_prompt = _append_orkio_ceo_scope_overlay(
+            effective_system_prompt,
+            agent_name=getattr(agent, "name", None),
+            final_speaker=getattr(agent, "name", None),
+        )
 
         ans_obj = _openai_answer(
             user_msg,
