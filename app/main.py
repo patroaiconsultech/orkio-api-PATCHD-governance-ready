@@ -2716,6 +2716,167 @@ class ChatOut(BaseModel):
     runtime_hints: Optional[Dict[str, Any]] = None
 
 
+# ORKIO_AO57B_PUBLIC_BETA_ORKIO_ONLY_ENFORCEMENT_V1
+# Backend is the authority for public beta agent access.
+# Public beta users are restricted to Orkio. Admin users keep full access.
+
+_AO57B_PUBLIC_BETA_MARKERS = (
+    "efatah777",
+    "orkio_closed_beta_gate",
+    "public_beta",
+    "closed_beta",
+    "beta",
+    "trial",
+    "orkio_only",
+)
+
+_AO57B_RESTRICTED_AGENT_TERMS = (
+    "chris",
+    "@chris",
+    "orion",
+    "@orion",
+    "team",
+    "@team",
+    "auditoria",
+    "audit",
+    "github",
+    "patch",
+    "pull request",
+    "branch",
+    "runtime action",
+    "terminal",
+)
+
+
+def _ao57b_user_value(db_user, payload, name) -> str:
+    try:
+        value = getattr(db_user, name, None)
+        if value is not None:
+            return str(value or "")
+    except Exception:
+        pass
+    try:
+        if isinstance(payload, dict):
+            return str(payload.get(name) or "")
+    except Exception:
+        pass
+    return ""
+
+
+def _ao57b_has_admin_access(db_user, payload=None) -> bool:
+    try:
+        if getattr(db_user, "role", None) == "admin":
+            return True
+    except Exception:
+        pass
+    try:
+        if isinstance(payload, dict) and (
+            payload.get("role") == "admin"
+            or payload.get("admin") is True
+            or payload.get("is_admin") is True
+        ):
+            return True
+    except Exception:
+        pass
+    try:
+        return bool(_payload_has_catalog_privileged_access(payload or {}))
+    except Exception:
+        return False
+
+
+def _ao57b_is_public_beta_orkio_only_user(db_user, payload=None) -> bool:
+    if not db_user:
+        return False
+    if _ao57b_has_admin_access(db_user, payload):
+        return False
+
+    haystack = " ".join([
+        _ao57b_user_value(db_user, payload, "signup_code_label"),
+        _ao57b_user_value(db_user, payload, "signup_source"),
+        _ao57b_user_value(db_user, payload, "product_scope"),
+        _ao57b_user_value(db_user, payload, "usage_tier"),
+        _ao57b_user_value(db_user, payload, "plan"),
+        _ao57b_user_value(db_user, payload, "access_code_label"),
+    ]).lower()
+
+    return any(marker in haystack for marker in _AO57B_PUBLIC_BETA_MARKERS)
+
+
+def _ao57b_agent_token(agent) -> str:
+    parts = []
+    for attr in ("name", "slug", "id"):
+        try:
+            parts.append(str(getattr(agent, attr, "") or ""))
+        except Exception:
+            pass
+    raw_text = " ".join(parts)
+    try:
+        raw_text = f"{raw_text} {_canonical_agent_admin_slug(raw_text)}"
+    except Exception:
+        pass
+    return raw_text.lower()
+
+
+def _ao57b_filter_orkio_agents(rows):
+    return [a for a in list(rows or []) if "orkio" in _ao57b_agent_token(a)]
+
+
+def _ao57b_input_has_restricted_agent_intent(inp) -> bool:
+    values = []
+    for attr in ("visible_agent", "target_agent_slug", "dest_mode", "message"):
+        try:
+            values.append(str(getattr(inp, attr, "") or ""))
+        except Exception:
+            pass
+    try:
+        values.extend([str(x or "") for x in (getattr(inp, "requested_agent_names", None) or [])])
+    except Exception:
+        pass
+    text = " ".join(values).lower()
+    return any(term in text for term in _AO57B_RESTRICTED_AGENT_TERMS)
+
+
+def _ao57b_force_orkio_only_input(inp):
+    try:
+        inp.agent_id = None
+    except Exception:
+        pass
+    try:
+        inp.agent_ids = []
+    except Exception:
+        pass
+    try:
+        inp.dest_mode = "single"
+    except Exception:
+        pass
+    try:
+        inp.visible_agent = "Orkio"
+    except Exception:
+        pass
+    try:
+        inp.target_agent_slug = "orkio"
+    except Exception:
+        pass
+    try:
+        inp.requested_agent_names = ["Orkio"]
+    except Exception:
+        pass
+
+    if _ao57b_input_has_restricted_agent_intent(inp):
+        try:
+            inp.message = (
+                "Orkio, estou no beta público. Explique com elegância que neste beta "
+                "somente Orkio está disponível para diagnóstico estratégico, planejamento "
+                "de negócio e desenho inicial de agentes e integrações. Depois, ajude-me "
+                "com a necessidade de negócio que eu trouxe, conduzindo para WhatsApp se "
+                "houver interesse real em implantação."
+            )
+        except Exception:
+            pass
+
+    return inp
+
+
 class GovernanceApprovePatchIn(BaseModel):
     thread_id: str = Field(min_length=1)
     audit_receipt_id: Optional[str] = None
@@ -21451,6 +21612,9 @@ def chat(
 
     uid = user.get("sub")
 
+    if _ao57b_is_public_beta_orkio_only_user(db_user, user):
+        _ao57b_force_orkio_only_input(inp)
+
     # AO-32_RUNTIME_CHAT_OBSERVABILITY
     ao32_started_at = _time.time()
     ao32_trace_id = str(getattr(inp, "trace_id", "") or "").strip()
@@ -30695,6 +30859,11 @@ def list_agents(x_org_slug: Optional[str] = Header(default=None), user=Depends(g
     org = get_request_org(user, x_org_slug)
     ensure_core_agents(db, org)
     rows = db.execute(select(Agent).where(Agent.org_slug == org).order_by(Agent.updated_at.desc())).scalars().all()
+    db_user = db.execute(
+        select(User).where(User.id == user.get("sub"), User.org_slug == org)
+    ).scalar_one_or_none()
+    if _ao57b_is_public_beta_orkio_only_user(db_user, user):
+        rows = _ao57b_filter_orkio_agents(rows)
     roster = get_agent_roster()
     return [
         _serialize_agent_record(
@@ -32869,6 +33038,13 @@ async def chat_stream(
 
     org = _resolve_org(user, x_org_slug)
     uid = user.get("sub")
+    db_user = db.execute(
+        select(User).where(User.id == user.get("sub"), User.org_slug == org)
+    ).scalar_one_or_none()
+    if not db_user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
+    if _ao57b_is_public_beta_orkio_only_user(db_user, user):
+        _ao57b_force_orkio_only_input(inp)
     message = (inp.message or "").strip()
     if not message:
         raise HTTPException(400, "message required")
