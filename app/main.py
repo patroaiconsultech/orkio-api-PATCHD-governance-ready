@@ -2124,6 +2124,17 @@ def _seed_default_summit_codes(db: Session, org: str = "public") -> None:
             "expires_days": 90,
             "created_by": "system_seed",
         },
+        {
+            # ORKIO_AO58_AMCHAM_RS_PARTNER_ACCESS_V1
+            # Partner access: no time expiration, Orkio-only scope, monitored by usage/cost.
+            "id": "seed_amchamrsorkio_partner",
+            "plain_code": "AMCHAMRSORKIO",
+            "label": "amcham_rs_orkio_only",
+            "source": "amcham_rs_partner",
+            "max_uses": 500,
+            "expires_days": None,
+            "created_by": "system_seed",
+        },
     ]
 
     try:
@@ -6321,6 +6332,15 @@ def _is_summit_auto_approved_code(raw_access_code: Optional[str], signup_code_la
         return True
     if source == "investor":
         return True
+
+    # ORKIO_AO58_AMCHAM_RS_PARTNER_ACCESS_V1
+    if raw == "amchamrsorkio":
+        return True
+    if label == "amcham_rs_orkio_only":
+        return True
+    if source == "amcham_rs_partner":
+        return True
+
     return False
 
 # AO20K-HF6A_TESTER_BILLING_BYPASS
@@ -6384,9 +6404,10 @@ def register(inp: RegisterIn, request: Request = None, x_org_slug: Optional[str]
             raise HTTPException(status_code=403, detail="Access code is required in Summit mode.")
 
         normalized_input_code = (inp.access_code or "").strip().lower()
-        if normalized_input_code != "efatah777":
-            logger.warning("REGISTER_DENIED reason=non_investor_code ip=%s org=%s", ip, org)
-            raise HTTPException(status_code=403, detail="Only investor access is enabled for this Summit build.")
+        allowed_partner_codes = {"efatah777", "amchamrsorkio"}
+        if normalized_input_code not in allowed_partner_codes:
+            logger.warning("REGISTER_DENIED reason=unsupported_partner_code ip=%s org=%s", ip, org)
+            raise HTTPException(status_code=403, detail="Access code is not enabled for this build.")
 
         sc = _validate_access_code(db, org, inp.access_code)
         if not sc:
@@ -6402,12 +6423,25 @@ def register(inp: RegisterIn, request: Request = None, x_org_slug: Optional[str]
         normalized_signup_source = (sc.source or "").strip().lower()
         normalized_signup_label = (sc.label or "").strip().lower()
 
-        if normalized_signup_source != "investor" and normalized_signup_label != "efatah777":
-            logger.warning("REGISTER_DENIED reason=non_investor_signup_source ip=%s org=%s", ip, org)
-            raise HTTPException(status_code=403, detail="Only investor access is enabled for this Summit build.")
+        is_investor_access = normalized_signup_source == "investor" or normalized_signup_label == "efatah777"
+        is_amcham_partner_access = (
+            normalized_input_code == "amchamrsorkio"
+            or normalized_signup_source == "amcham_rs_partner"
+            or normalized_signup_label == "amcham_rs_orkio_only"
+        )
 
-        usage_tier = "summit_investor"
-        product_scope = "full"
+        if not (is_investor_access or is_amcham_partner_access):
+            logger.warning("REGISTER_DENIED reason=unsupported_signup_source ip=%s org=%s", ip, org)
+            raise HTTPException(status_code=403, detail="Access code is not enabled for this build.")
+
+        if is_amcham_partner_access:
+            usage_tier = "partner_access"
+            product_scope = "orkio_only"
+            signup_code_label = "amcham_rs_orkio_only"
+            signup_source = "amcham_rs_partner"
+        else:
+            usage_tier = "summit_investor"
+            product_scope = "full"
 
     elif SUMMIT_MODE and is_admin_email:
         usage_tier = "summit_admin"
