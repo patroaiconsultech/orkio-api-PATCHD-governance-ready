@@ -112,7 +112,10 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
     _run_realtime_multi_agent_turn = deps._run_realtime_multi_agent_turn
     _sanitize_assistant_text = deps._sanitize_assistant_text
     _sensitive_guard_instruction = deps._sensitive_guard_instruction
+    # ORKIO_AO60B_HF2_BIND_FASTAPI_DEPENDENCIES
     build_summit_instructions = deps.build_summit_instructions
+    get_current_user = deps.get_current_user
+    get_db = deps.get_db
     get_summit_runtime_config = deps.get_summit_runtime_config
     logger = deps.logger
     new_id = deps.new_id
