@@ -64,6 +64,14 @@ from .runtime.public_orion_policy import (
     build_public_orion_policy_decision,
     build_public_orion_stream_payload,
 )
+from .runtime.realtime_support import (
+    RealtimeClientSecretReq,
+    RealtimeStartReq,
+    RealtimeEventIn,
+    RealtimeEndReq,
+    RealtimeGuardReq,
+    normalize_realtime_voice,
+)
 from .numerology.schemas import NumerologyProfileIn, NumerologyProfileOut
 from .numerology.engine import generate_numerology_profile
 from .routes.user import router as user_router
@@ -1421,7 +1429,7 @@ def _summit_access_expired(payload_or_user: Any) -> bool:
         if role == "admin":
             return False
         usage_tier = (payload_or_user.get("usage_tier") if isinstance(payload_or_user, dict) else getattr(payload_or_user, "usage_tier", None)) or "summit_standard"
-        if usage_tier in ("summit_vip", "summit_investor"):
+        if usage_tier in ("summit_vip", "summit_investor", "partner_access"):
             return False
         return now_ts() > int(SUMMIT_EXPIRES_AT)
     except Exception:
@@ -1511,6 +1519,17 @@ def fmt_ts(ts: int) -> str:
     except Exception:
         return str(ts)
 
+
+
+# ORKIO_AO59C_FIRST_CONTACT_PREMIUM_PERSONA
+def _orkio_premium_first_contact_text() -> str:
+    return (
+        "Efatà. Bem-vindo ao Orkio.\n\n"
+        "Eu sou o copiloto inteligente da PatroAI. Vou te ajudar a explorar a plataforma com clareza, segurança e propósito — "
+        "organizando ideias, entendendo seu objetivo e transformando perguntas em próximos passos.\n\n"
+        "Neste beta público, a experiência é focada no Orkio: simples, segura e direta. "
+        "Para começar, me diga o que você quer fazer agora: explorar a plataforma, organizar um plano, testar uma ideia, revisar um problema ou apenas conversar comigo."
+    )
 
 
 def estimate_tokens(text: str) -> int:
@@ -1813,9 +1832,10 @@ def _is_summit_eligible_user(u: Optional[User]) -> bool:
     product_scope = (getattr(u, "product_scope", "") or "").lower()
     return (
         usage_tier.startswith("summit_")
-        or signup_source == "investor"
-        or signup_code_label == "efatah777"
-        or product_scope == "full"
+        or usage_tier == "partner_access"
+        or signup_source in {"investor", "amcham_rs_partner"}
+        or signup_code_label in {"efatah777", "amcham_rs_orkio_only"}
+        or product_scope in {"full", "orkio_only"}
     )
 
 def _auto_approve_summit_user_if_needed(db: Session, u: Optional[User], *, reason: str) -> bool:
@@ -2124,6 +2144,17 @@ def _seed_default_summit_codes(db: Session, org: str = "public") -> None:
             "expires_days": 90,
             "created_by": "system_seed",
         },
+        {
+            # ORKIO_AO58_AMCHAM_RS_PARTNER_ACCESS_V1
+            # Partner access: no time expiration, Orkio-only scope, monitored by usage/cost.
+            "id": "seed_amchamrsorkio_partner",
+            "plain_code": "AMCHAMRSORKIO",
+            "label": "amcham_rs_orkio_only",
+            "source": "amcham_rs_partner",
+            "max_uses": 500,
+            "expires_days": None,
+            "created_by": "system_seed",
+        },
     ]
 
     try:
@@ -2139,13 +2170,14 @@ def _seed_default_summit_codes(db: Session, org: str = "public") -> None:
                 continue
 
             now = now_ts()
+            expires_days = item.get("expires_days")
             sc = SignupCode(
                 id=item["id"],
                 org_slug=org,
                 code_hash=code_hash,
                 label=item["label"],
                 source=item["source"],
-                expires_at=now + int(item["expires_days"]) * 86400,
+                expires_at=(None if expires_days is None else now + int(expires_days) * 86400),
                 max_uses=int(item["max_uses"]),
                 used_count=0,
                 active=True,
@@ -6160,6 +6192,15 @@ def _is_summit_auto_approved_code(raw_access_code: Optional[str], signup_code_la
         return True
     if source == "investor":
         return True
+
+    # ORKIO_AO58_AMCHAM_RS_PARTNER_ACCESS_V1
+    if raw == "amchamrsorkio":
+        return True
+    if label == "amcham_rs_orkio_only":
+        return True
+    if source == "amcham_rs_partner":
+        return True
+
     return False
 
 # AO20K-HF6A_TESTER_BILLING_BYPASS
@@ -6216,6 +6257,7 @@ def register(inp: RegisterIn, request: Request = None, x_org_slug: Optional[str]
     signup_source = None
     usage_tier = "summit_investor"
     product_scope = "full"
+    is_amcham_partner_access = False
 
     if SUMMIT_MODE and not is_admin_email:
         if not inp.access_code:
@@ -6223,9 +6265,10 @@ def register(inp: RegisterIn, request: Request = None, x_org_slug: Optional[str]
             raise HTTPException(status_code=403, detail="Access code is required in Summit mode.")
 
         normalized_input_code = (inp.access_code or "").strip().lower()
-        if normalized_input_code != "efatah777":
-            logger.warning("REGISTER_DENIED reason=non_investor_code ip=%s org=%s", ip, org)
-            raise HTTPException(status_code=403, detail="Only investor access is enabled for this Summit build.")
+        allowed_partner_codes = {"efatah777", "amchamrsorkio"}
+        if normalized_input_code not in allowed_partner_codes:
+            logger.warning("REGISTER_DENIED reason=unsupported_partner_code ip=%s org=%s", ip, org)
+            raise HTTPException(status_code=403, detail="Access code is not enabled for this build.")
 
         sc = _validate_access_code(db, org, inp.access_code)
         if not sc:
@@ -6241,12 +6284,25 @@ def register(inp: RegisterIn, request: Request = None, x_org_slug: Optional[str]
         normalized_signup_source = (sc.source or "").strip().lower()
         normalized_signup_label = (sc.label or "").strip().lower()
 
-        if normalized_signup_source != "investor" and normalized_signup_label != "efatah777":
-            logger.warning("REGISTER_DENIED reason=non_investor_signup_source ip=%s org=%s", ip, org)
-            raise HTTPException(status_code=403, detail="Only investor access is enabled for this Summit build.")
+        is_investor_access = normalized_signup_source == "investor" or normalized_signup_label == "efatah777"
+        is_amcham_partner_access = (
+            normalized_input_code == "amchamrsorkio"
+            or normalized_signup_source == "amcham_rs_partner"
+            or normalized_signup_label == "amcham_rs_orkio_only"
+        )
 
-        usage_tier = "summit_investor"
-        product_scope = "full"
+        if not (is_investor_access or is_amcham_partner_access):
+            logger.warning("REGISTER_DENIED reason=unsupported_signup_source ip=%s org=%s", ip, org)
+            raise HTTPException(status_code=403, detail="Access code is not enabled for this build.")
+
+        if is_amcham_partner_access:
+            usage_tier = "partner_access"
+            product_scope = "orkio_only"
+            signup_code_label = "amcham_rs_orkio_only"
+            signup_source = "amcham_rs_partner"
+        else:
+            usage_tier = "summit_investor"
+            product_scope = "full"
 
     elif SUMMIT_MODE and is_admin_email:
         usage_tier = "summit_admin"
@@ -6269,7 +6325,7 @@ def register(inp: RegisterIn, request: Request = None, x_org_slug: Optional[str]
         raise HTTPException(status_code=409, detail="Email already registered")
 
     tester_billing_bypass_access = _is_summit_auto_approved_code(inp.access_code, signup_code_label, signup_source)
-    if tester_billing_bypass_access and not is_admin_email:
+    if tester_billing_bypass_access and not is_admin_email and not is_amcham_partner_access:
         usage_tier = usage_tier or "summit_investor"
         product_scope = "full"
 
@@ -6299,17 +6355,26 @@ def register(inp: RegisterIn, request: Request = None, x_org_slug: Optional[str]
 
     try:
         if SUMMIT_MODE and not is_admin_email:
-            # HARD ENFORCEMENT FOR INVESTOR-ONLY SUMMIT
-            usage_tier = "summit_investor"
-            signup_source = "investor" if not signup_source else signup_source
-            product_scope = "full"
+            if is_amcham_partner_access:
+                # ORKIO_AO58_AMCHAM_RS_PARTNER_ACCESS_V1
+                usage_tier = "partner_access"
+                signup_source = "amcham_rs_partner"
+                signup_code_label = "amcham_rs_orkio_only"
+                product_scope = "orkio_only"
+            else:
+                # HARD ENFORCEMENT FOR INVESTOR-ONLY SUMMIT
+                usage_tier = "summit_investor"
+                signup_source = "investor" if not signup_source else signup_source
+                product_scope = "full"
 
             if hasattr(u, "usage_tier"):
-                setattr(u, "usage_tier", "summit_investor")
+                setattr(u, "usage_tier", usage_tier)
             if hasattr(u, "signup_source"):
-                setattr(u, "signup_source", "investor")
+                setattr(u, "signup_source", signup_source)
+            if hasattr(u, "signup_code_label"):
+                setattr(u, "signup_code_label", signup_code_label)
             if hasattr(u, "product_scope"):
-                setattr(u, "product_scope", "full")
+                setattr(u, "product_scope", product_scope)
 
         if hasattr(u, "approved_via") and SUMMIT_MODE and not is_admin_email:
             setattr(u, "approved_via", "access_code")
@@ -6371,7 +6436,8 @@ def register(inp: RegisterIn, request: Request = None, x_org_slug: Optional[str]
                 "usage_tier": getattr(u, "usage_tier", usage_tier),
                 "product_scope": getattr(u, "product_scope", product_scope),
                 "summit_mode": SUMMIT_MODE,
-                "investor_only": True,
+                "investor_only": not is_amcham_partner_access,
+                "amcham_partner_access": bool(is_amcham_partner_access),
             },
         )
     except Exception:
@@ -40835,7 +40901,7 @@ async def chat_stream(
                         elif _target == "Team":
                             _ao01d_parts.append("- Team: online para coordenação segura, auditoria readonly e testes controlados.")
                         else:
-                            _ao01d_parts.append("- Orkio: online para chat básico, auditoria readonly e governança segura.")
+                            _ao01d_parts.append("- Orkio: online para acolhimento premium, contexto, orientação segura e beta público Orkio-only.")
 
                     _ao01d_parts.extend([
                         "",
@@ -40974,10 +41040,8 @@ async def chat_stream(
 
             elif _ao01_simple_greeting_no_target:
                 _hf4k_kind = "simple_greeting"
-                _hf4k_final_text = (
-                    "Olá. Orkio está online para chat básico, auditoria readonly "
-                    "e testes controlados. Execução real permanece bloqueada sem aprovação."
-                )
+                # ORKIO_AO59C_FIRST_CONTACT_PREMIUM_PERSONA
+                _hf4k_final_text = _orkio_premium_first_contact_text()
 
             elif _ao01_system_status:
                 _hf4k_kind = "system_status_readonly"
@@ -41059,7 +41123,8 @@ async def chat_stream(
 
             elif _hf4k_status:
                 _hf4k_kind = "simple_status"
-                _hf4k_final_text = "Estou operacional para chat básico, auditoria readonly e testes controlados."
+                # ORKIO_AO59C_FIRST_CONTACT_PREMIUM_PERSONA
+                _hf4k_final_text = _orkio_premium_first_contact_text()
 
             elif _hf4p_agent_ping:
                 _hf4k_kind = "safe_agent_ping"
@@ -41070,7 +41135,8 @@ async def chat_stream(
                 elif _hf4p_target == "Team":
                     _hf4k_final_text = "Team está online para coordenação segura, auditoria readonly e testes controlados. Execução real permanece bloqueada sem aprovação."
                 else:
-                    _hf4k_final_text = "Orkio está online para chat básico, auditoria readonly e testes controlados. Execução real permanece bloqueada sem aprovação."
+                    # ORKIO_AO59C_FIRST_CONTACT_PREMIUM_PERSONA
+                    _hf4k_final_text = _orkio_premium_first_contact_text()
 
             elif _hf4t_agent_greeting:
                 _hf4k_kind = "safe_agent_greeting"
@@ -41081,7 +41147,8 @@ async def chat_stream(
                 elif _hf4t_target == "Team":
                     _hf4k_final_text = "Olá. Team está online para coordenação segura, auditoria readonly e testes controlados. Execução real permanece bloqueada sem aprovação."
                 else:
-                    _hf4k_final_text = "Olá. Orkio está online para chat básico, auditoria readonly e testes controlados. Execução real permanece bloqueada sem aprovação."
+                    # ORKIO_AO59C_FIRST_CONTACT_PREMIUM_PERSONA
+                    _hf4k_final_text = _orkio_premium_first_contact_text()
 
             elif _hf5b_issue_patch_plan_readonly:
                 _hf4k_kind = "issue_map_patch_plan_readonly"
@@ -41432,7 +41499,8 @@ async def chat_stream(
                             _hf4k_final_text = "Team está online para coordenação segura entre Orkio, Chris e Orion. Execução real permanece bloqueada sem aprovação."
                         else:
                             _hf4k_kind = "team_safe_greeting_ack"
-                            _hf4k_final_text = "Olá. Eu sou Orkio, o anfitrião executivo da plataforma PatroAI. Estou online para conversa, coordenação segura e auditoria readonly."
+                            # ORKIO_AO59C_FIRST_CONTACT_PREMIUM_PERSONA
+                            _hf4k_final_text = _orkio_premium_first_contact_text()
                 except Exception:
                     pass
 
@@ -43864,449 +43932,15 @@ async def stt_endpoint(
 
 
 # ==========================
-# Realtime/WebRTC (V2V) support
+# Realtime/WebRTC (V2V) routes
 # ==========================
-class RealtimeClientSecretReq(BaseModel):
-    # Request an ephemeral client secret for the OpenAI Realtime API (WebRTC).
-    agent_id: Optional[str] = None
-    voice: str = Field(default="cedar", description="Realtime voice id (e.g. nova, alloy, echo).")
-    model: str = Field(default="gpt-realtime-mini", description="Realtime model name.")
-    ttl_seconds: int = Field(default=600, ge=10, le=7200, description="Client secret TTL in seconds.")
-    mode: Optional[str] = Field(default=None, description="platform|summit")
-    response_profile: Optional[str] = Field(default=None, description="default|stage")
-    language_profile: Optional[str] = Field(default=None, description="auto|pt-BR|en")
-
-
-class RealtimeStartReq(BaseModel):
-    agent_id: Optional[str] = None
-    thread_id: Optional[str] = None
-    voice: str = Field(default="cedar")
-    model: str = Field(default="gpt-realtime-mini")
-    ttl_seconds: int = Field(default=600, ge=10, le=7200)
-    mode: Optional[str] = Field(default=None, description="platform|summit")
-    response_profile: Optional[str] = Field(default=None, description="default|stage")
-    language_profile: Optional[str] = Field(default=None, description="auto|pt-BR|en")
-
-class RealtimeEventIn(BaseModel):
-    session_id: str
-    event_type: str
-    client_event_id: Optional[str] = None  # idempotency key per event (frontend-generated)
-    role: str = Field(description="user|assistant|system")
-    content: Optional[str] = None
-    created_at: Optional[int] = None  # epoch ms; server will default to now
-    is_final: Optional[bool] = None
-    meta: Optional[Dict[str, Any]] = None
-
-class RealtimeEndReq(BaseModel):
-    session_id: str
-    ended_at: Optional[int] = None  # epoch ms
-    meta: Optional[Dict[str, Any]] = None
-
-
-class RealtimeGuardReq(BaseModel):
-    thread_id: Optional[str] = None
-    message: str = Field(min_length=1, max_length=4000)
+# ORKIO_AO60A_REALTIME_SUPPORT_EXTRACTION:
+# schemas and voice normalization live in app/runtime/realtime_support.py.
+# Routes remain here in AO60A to keep extraction small, reversible and low-risk.
 
 
 
-# =========================
-# Realtime Voice Normalization
-# =========================
-# The OpenAI Realtime API supports a restricted set of voice ids.
-# We normalize any legacy/invalid voice ids to a safe default ("cedar"),
-# and map older Orkio voice ids (e.g. "nova") into supported ones.
 
-REALTIME_VOICE_SUPPORTED = {
-    "alloy", "ash", "ballad", "coral",
-    "echo", "sage", "shimmer", "verse",
-    "marin", "cedar",
-}
-
-REALTIME_VOICE_ALIASES = {
-    # legacy -> supported
-    "nova": "cedar",
-    "onyx": "echo",
-    "fable": "sage",
-    "shimmer": "shimmer",
-    "echo": "echo",
-    "alloy": "alloy",
-}
-
-def normalize_realtime_voice(voice: str | None, default: str = "cedar") -> str:
-    if not voice:
-        return default
-    v = str(voice).strip().lower()
-    if v in REALTIME_VOICE_SUPPORTED:
-        return v
-    if v in REALTIME_VOICE_ALIASES:
-        return REALTIME_VOICE_ALIASES[v]
-    return default
-
-
-
-@app.post("/api/realtime/guard")
-def realtime_guard(
-    body: RealtimeGuardReq,
-    x_org_slug: Optional[str] = Header(default=None),
-    user=Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    org = _resolve_org(user, x_org_slug)
-    tid = (body.thread_id or "").strip() or None
-    if tid and user.get("role") != "admin":
-        _require_thread_member(db, org, tid, user.get("sub"))
-    blocked_reply = _guard_realtime_message(body.message)
-    return {"ok": True, "blocked": bool(blocked_reply), "reply": blocked_reply}
-@app.post("/api/realtime/client_secret")
-async def realtime_client_secret(
-    body: RealtimeClientSecretReq,
-    x_org_slug: Optional[str] = Header(default=None),
-    user=Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    # Mint a short-lived Realtime client secret for browser WebRTC connections.
-    if OpenAI is None:
-        raise HTTPException(status_code=503, detail="OpenAI SDK not available")
-
-    api_key = os.getenv("OPENAI_API_KEY", "").strip()
-    if not api_key:
-        raise HTTPException(status_code=503, detail="OPENAI_API_KEY not configured")
-
-    org = _resolve_org(user, x_org_slug)
-
-    mode = normalize_mode(body.mode)
-    response_profile = normalize_response_profile(body.response_profile)
-    language_profile = normalize_language_profile(body.language_profile)
-    summit_cfg = get_summit_runtime_config(
-        mode=mode,
-        response_profile=response_profile,
-        language_profile=language_profile,
-    )
-
-    # AO47A_REALTIME_AGENT_IDENTITY_BINDING
-    # Realtime nunca deve iniciar como assistente genérica.
-    # Se agent_id não vier do frontend, Orkio é o agente padrão governado.
-    agent_system_prompt = None
-    agent_voice = None
-    agent_identity_name = "Orkio"
-    agent_identity_source = "default_orkio_fallback"
-    _ao47a_agent_id = str(body.agent_id or "").strip() or None
-
-    if _ao47a_agent_id is not None:
-        agent = db.execute(select(Agent).where(Agent.id == _ao47a_agent_id, Agent.org_slug == org)).scalar_one_or_none()
-        if agent:
-            agent_identity_name = (agent.name or "Orkio").strip() or "Orkio"
-            agent_identity_source = "requested_agent"
-            agent_system_prompt = (agent.system_prompt or "").strip()[:8000] or None
-            agent_voice = resolve_agent_voice(agent) if agent else None
-    else:
-        try:
-            default_agent = db.execute(
-                select(Agent).where(Agent.name == "Orkio", Agent.org_slug == org)
-            ).scalar_one_or_none()
-            if default_agent:
-                agent_identity_name = (default_agent.name or "Orkio").strip() or "Orkio"
-                agent_identity_source = "default_orkio_agent"
-                agent_system_prompt = (default_agent.system_prompt or "").strip()[:8000] or None
-                agent_voice = resolve_agent_voice(default_agent)
-        except Exception:
-            try:
-                logger.exception("AO47A_DEFAULT_ORKIO_CLIENT_SECRET_LOOKUP_FAILED org=%s", org)
-            except Exception:
-                pass
-
-    identity_guard = (
-        "IDENTIDADE OBRIGATÓRIA DO REALTIME — AO47A\n"
-        f"- Você é {agent_identity_name}, agente da plataforma PatroAI.\n"
-        "- Nunca se apresente como assistente genérica, modelo genérico ou voz sem nome.\n"
-        "- Se o usuário perguntar quem é você, responda com seu nome e função na PatroAI.\n"
-        "- Em português do Brasil, mantenha tom executivo, claro, seguro e objetivo.\n"
-        "- Se nenhuma especialidade específica for informada, atue como Orkio, anfitrião executivo da PatroAI.\n"
-        f"- identity_source={agent_identity_source}."
-    )
-
-    if agent_system_prompt:
-        agent_system_prompt = (identity_guard + "\n\n" + agent_system_prompt).strip()
-    else:
-        agent_system_prompt = identity_guard
-
-    instructions = build_summit_instructions(
-        mode=mode,
-        agent_instructions=agent_system_prompt,
-        language_profile=summit_cfg.get("language_profile"),
-        response_profile=summit_cfg.get("response_profile"),
-    )
-    if instructions:
-        instructions = instructions + "\n\n" + _sensitive_guard_instruction()
-
-    # Choose voice: explicit > agent default > fallback
-    voice_raw = body.voice or agent_voice or os.getenv("OPENAI_REALTIME_VOICE_DEFAULT", "cedar")
-
-    # Normalize to supported voices to avoid Realtime mint failures
-    voice = normalize_realtime_voice(voice_raw, default=os.getenv("OPENAI_REALTIME_VOICE_DEFAULT", "cedar"))
-    resolved_language = resolve_stt_language(summit_cfg.get("transcription_language"))
-    auto_response_enabled = str(
-        os.getenv(
-            "OPENAI_REALTIME_AUTO_RESPONSE_ENABLED",
-            os.getenv("REALTIME_AUTO_RESPONSE_ENABLED", "false"),
-        )
-    ).strip().lower() not in {"0", "false", "no", "off"}
-
-    summit_runtime = bool(
-        mode == "summit"
-        or response_profile == "stage"
-        or os.getenv("SUMMIT_MODE", "false").strip().lower() in {"1", "true", "yes", "on"}
-        or os.getenv("ORKIO_RUNTIME_MODE", "").strip().lower() == "summit"
-    )
-    resolved_create_response = False if summit_runtime else bool(auto_response_enabled)
-
-    if summit_runtime:
-        resolved_language = resolve_stt_language(summit_cfg.get("transcription_language") or language_profile or os.getenv("SUMMIT_DEFAULT_LANGUAGE", "pt")) or "pt"
-        if instructions:
-            instructions = (instructions + "\n\nResponder sempre em português do Brasil.").strip()
-        else:
-            instructions = "Responder sempre em português do Brasil."
-
-    session_cfg: Dict[str, Any] = {
-        "type": "realtime",
-        "model": body.model,
-        "audio": {
-            "output": {"voice": voice},
-            # Let the server detect turns for lowest-latency voice UX
-            "input": {
-                "turn_detection": {"type": "server_vad", "create_response": resolved_create_response},
-                # Optional transcription for UI captions / logs
-                "transcription": {
-                    **({"language": resolved_language} if resolved_language else {}),
-                    "model": os.getenv("OPENAI_REALTIME_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe"),
-                },
-            },
-        },
-    }
-    if instructions:
-        session_cfg["instructions"] = instructions
-
-    payload = {
-        "expires_after": {"anchor": "created_at", "seconds": body.ttl_seconds},
-        "session": session_cfg,
-    }
-
-    # Prefer SDK (if present), fallback to direct REST call.
-    try:
-        client = OpenAI(api_key=api_key)
-        secret_obj = client.realtime.client_secrets.create(**payload)  # type: ignore[attr-defined]
-        value = getattr(secret_obj, "value", None) or (secret_obj.get("value") if isinstance(secret_obj, dict) else None)
-        session = getattr(secret_obj, "session", None) or (secret_obj.get("session") if isinstance(secret_obj, dict) else None)
-        if not value:
-            raise RuntimeError("Realtime client secret missing in SDK response")
-        return {"value": value, "session": session}
-    except Exception as sdk_err:
-        try:
-            import urllib.request, json as _json
-
-            req = urllib.request.Request(
-                "https://api.openai.com/v1/realtime/client_secrets",
-                data=_json.dumps(payload).encode("utf-8"),
-                headers={
-                    "Authorization": f"Bearer {api_key}",
-                    "Content-Type": "application/json",
-                },
-                method="POST",
-            )
-            with urllib.request.urlopen(req, timeout=20) as resp:
-                data = _json.loads(resp.read().decode("utf-8"))
-            if not data.get("value"):
-                raise RuntimeError("Realtime client secret missing in REST response")
-            return {"value": data["value"], "session": data.get("session"), "sdk_fallback": True}
-        except Exception as rest_err:
-            logger.exception("realtime_client_secret_failed org=%s sdk_err=%s rest_err=%s", org, sdk_err, rest_err)
-            raise HTTPException(status_code=502, detail="Failed to mint Realtime client secret")
-
-
-@app.post("/api/realtime/start")
-async def realtime_start(
-    body: RealtimeStartReq,
-    x_org_slug: Optional[str] = Header(default=None),
-    user=Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Start a Realtime/WebRTC session bound to an Orkio agent and thread, returning:
-    - session_id (for audit / event logging)
-    - thread_id (created if missing)
-    - client_secret value for browser WebRTC connection
-    This ensures the realtime voice is never a generic assistant.
-    """
-    org = _resolve_org(user, x_org_slug)
-    db_user = db.execute(select(User).where(User.id == user.get("sub"), User.org_slug == org)).scalar_one_or_none()
-    if not db_user:
-        raise HTTPException(status_code=401, detail="Not authenticated")
-    if db_user.role != "admin" and not bool(getattr(db_user, "onboarding_completed", False)):
-        raise HTTPException(status_code=403, detail="Onboarding incomplete")
-    uid = user.get("sub")
-    uname = user.get("name")
-
-    # Resolve thread
-    tid = body.thread_id
-    if not tid:
-        t = Thread(id=new_id(), org_slug=org, title="Realtime", created_at=now_ts())
-        db.add(t)
-        db.commit()
-        tid = t.id
-        _ensure_thread_owner(db, org, tid, uid)
-    else:
-        if user.get("role") != "admin":
-            _require_thread_member(db, org, tid, uid)
-
-    mode = normalize_mode(body.mode)
-    response_profile = normalize_response_profile(body.response_profile)
-    language_profile = normalize_language_profile(body.language_profile)
-    summit_cfg = get_summit_runtime_config(
-        mode=mode,
-        response_profile=response_profile,
-        language_profile=language_profile,
-    )
-
-    # AO47A_REALTIME_AGENT_IDENTITY_BINDING
-    # Se o frontend não enviar agent_id, bindar Orkio como default seguro.
-    agent_id = str(body.agent_id or "").strip() or None
-    agent_name = None
-    agent_voice = None
-    agent_identity_source = "requested_agent"
-
-    if agent_id is not None:
-        agent = db.execute(select(Agent).where(Agent.id == agent_id, Agent.org_slug == org)).scalar_one_or_none()
-        if not agent:
-            raise HTTPException(status_code=404, detail="Agent not found for this tenant")
-        agent_name = (agent.name or "Orkio").strip() or "Orkio"
-        agent_voice = resolve_agent_voice(agent) if agent else None
-    else:
-        agent_identity_source = "default_orkio_fallback"
-        try:
-            default_agent = db.execute(
-                select(Agent).where(Agent.name == "Orkio", Agent.org_slug == org)
-            ).scalar_one_or_none()
-            if default_agent:
-                agent_id = str(default_agent.id)
-                agent_name = (default_agent.name or "Orkio").strip() or "Orkio"
-                agent_voice = resolve_agent_voice(default_agent)
-                agent_identity_source = "default_orkio_agent"
-            else:
-                agent_name = "Orkio"
-        except Exception:
-            try:
-                logger.exception("AO47A_DEFAULT_ORKIO_REALTIME_START_LOOKUP_FAILED org=%s user_id=%s", org, uid)
-            except Exception:
-                pass
-            agent_name = "Orkio"
-            agent_identity_source = "default_orkio_fallback_error"
-
-    default_realtime_voice = (os.getenv("OPENAI_REALTIME_VOICE_DEFAULT", "") or os.getenv("OPENAI_TTS_VOICE_DEFAULT", "cedar")).strip() or "cedar"
-    voice = normalize_realtime_voice(body.voice or agent_voice or default_realtime_voice, default=default_realtime_voice)
-
-    sid = str(uuid.uuid4())
-    rs = None
-    try:
-        # Create session record
-        rs = RealtimeSession(
-            id=sid,
-            org_slug=org,
-            thread_id=tid,
-            agent_id=str(agent_id) if agent_id is not None else None,
-            agent_name=agent_name,
-            user_id=uid,
-            user_name=uname,
-            model=body.model,
-            voice=voice,
-            started_at=now_ts(),
-            meta=json.dumps({
-                "ttl_seconds": body.ttl_seconds,
-                "mode": summit_cfg.get("mode"),
-                "response_profile": summit_cfg.get("response_profile"),
-                "language_profile": summit_cfg.get("language_profile"),
-                "transcription_language": summit_cfg.get("transcription_language"),
-                "stage_guidance": summit_cfg.get("stage_guidance"),
-                "agent_identity_binding": "AO47A_REALTIME_AGENT_IDENTITY_BINDING",
-                "agent_identity_source": agent_identity_source,
-                "resolved_agent_id": str(agent_id or ""),
-                "resolved_agent_name": agent_name or "Orkio",
-            }, ensure_ascii=False),
-        )
-        db.add(rs)
-        db.commit()
-
-        # Mint client secret using the same logic as /client_secret, but ensure instructions are injected.
-        r = await realtime_client_secret(
-            RealtimeClientSecretReq(
-                agent_id=agent_id,
-                voice=voice,
-                model=body.model,
-                ttl_seconds=body.ttl_seconds,
-                mode=summit_cfg.get("mode"),
-                response_profile=summit_cfg.get("response_profile"),
-                language_profile=summit_cfg.get("language_profile"),
-            ),
-            x_org_slug=x_org_slug,
-            user=user,
-            db=db,
-        )
-    except HTTPException:
-        if rs is not None:
-            try:
-                rs.ended_at = now_ts()
-                db.add(rs)
-                db.commit()
-            except Exception:
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
-        raise
-    except Exception as err:
-        try:
-            logger.exception("realtime_start_failed org=%s user_id=%s thread_id=%s agent_id=%s", org, uid, tid, agent_id)
-        except Exception:
-            pass
-        if rs is not None:
-            try:
-                rs.ended_at = now_ts()
-                db.add(rs)
-                db.commit()
-            except Exception:
-                try:
-                    db.rollback()
-                except Exception:
-                    pass
-        raise HTTPException(status_code=502, detail="Failed to start Realtime session") from err
-
-    # Audit
-    _audit_realtime_safe(db, org, uid, action="realtime.session.start", meta={
-        "session_id": sid,
-        "thread_id": tid,
-        "agent_id": agent_id,
-        "agent_name": agent_name or "Orkio",
-        "agent_identity_source": agent_identity_source,
-        "model": body.model,
-        "voice": voice,
-        "mode": summit_cfg.get("mode"),
-        "response_profile": summit_cfg.get("response_profile"),
-        "language_profile": summit_cfg.get("language_profile"),
-    })
-
-    return {
-        "ok": True,
-        "session_id": sid,
-        "thread_id": tid,
-        "agent": {"id": agent_id, "name": agent_name or "Orkio", "identity_source": agent_identity_source},
-        "model": body.model,
-        "voice": voice,
-        "mode": summit_cfg.get("mode"),
-        "response_profile": summit_cfg.get("response_profile"),
-        "language_profile": summit_cfg.get("language_profile"),
-        "client_secret": {"value": r.get("value")},
-        "client_secret_value": r.get("value"),
-        "realtime_session": r.get("session"),
-        "summit_config": summit_cfg,
-    }
 
 
 
@@ -45139,149 +44773,6 @@ def _run_realtime_multi_agent_turn(
     return answers
 
 
-@app.post("/api/realtime/event")
-def realtime_event(
-    body: RealtimeEventIn,
-    background_tasks: BackgroundTasks,
-    x_org_slug: Optional[str] = Header(default=None),
-    user=Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Persist realtime transcript/response events for auditability.
-    Frontend should POST here for:
-      - transcript deltas/finals (role=user)
-      - response deltas/finals (role=assistant)
-    If is_final=True, we also persist a Message into the thread timeline.
-    """
-    org = _resolve_org(user, x_org_slug)
-    uid = user.get("sub")
-
-    rs = db.execute(select(RealtimeSession).where(RealtimeSession.id == body.session_id, RealtimeSession.org_slug == org)).scalar_one_or_none()
-    if not rs:
-        raise HTTPException(status_code=404, detail="Realtime session not found")
-
-    if user.get("role") != "admin":
-        _require_thread_member(db, org, rs.thread_id, uid)
-
-    ts = int(body.created_at or now_ts())
-    speaker_type = (body.role or "user").strip() or "user"
-    speaker_id = rs.user_id if speaker_type == "user" else rs.agent_id
-    agent_id = rs.agent_id if speaker_type != "user" else None
-    agent_name = rs.agent_name if speaker_type != "user" else None
-    content = (body.content or "").strip()
-    client_eid = (getattr(body, "client_event_id", None) or "").strip() or None
-
-    if client_eid:
-        try:
-            existing_eid = db.execute(
-                select(RealtimeEvent.id)
-                .where(
-                    RealtimeEvent.org_slug == org,
-                    RealtimeEvent.session_id == rs.id,
-                    RealtimeEvent.client_event_id == client_eid,
-                )
-                .limit(1)
-            ).scalar_one_or_none()
-            if existing_eid:
-                return {"ok": True, "deduped": True}
-        except Exception:
-            pass
-
-    ev = RealtimeEvent(
-        id=new_id(),
-        org_slug=org,
-        session_id=rs.id,
-        thread_id=rs.thread_id,
-        speaker_type=speaker_type,
-        speaker_id=speaker_id,
-        agent_id=agent_id,
-        agent_name=agent_name,
-        event_type=body.event_type,
-        transcript_raw=content,
-        transcript_punct=None,
-        created_at=ts,
-        client_event_id=client_eid,
-        meta=json.dumps(body.meta or {}, ensure_ascii=False) if body.meta is not None else None,
-    )
-    db.add(ev)
-
-    if body.is_final and content:
-        if speaker_type == "user":
-            client_mid = f"rt-{client_eid}" if client_eid else None
-            already_message = None
-            if client_mid:
-                try:
-                    already_message = db.execute(
-                        select(Message.id)
-                        .where(
-                            Message.org_slug == org,
-                            Message.thread_id == rs.thread_id,
-                            Message.role == "user",
-                            Message.client_message_id == client_mid,
-                        )
-                        .limit(1)
-                    ).scalar_one_or_none()
-                except Exception:
-                    already_message = None
-
-            if not already_message:
-                m = Message(
-                    id=new_id(),
-                    org_slug=org,
-                    thread_id=rs.thread_id,
-                    user_id=rs.user_id,
-                    user_name=rs.user_name,
-                    role="user",
-                    content=_sanitize_assistant_text(content),
-                    client_message_id=client_mid,
-                    created_at=ts,
-                )
-                db.add(m)
-        else:
-            m = Message(
-                id=new_id(),
-                org_slug=org,
-                thread_id=rs.thread_id,
-                user_id=None,
-                user_name=None,
-                role="assistant",
-                content=_sanitize_assistant_text(content),
-                agent_id=agent_id,
-                agent_name=agent_name,
-                created_at=ts,
-            )
-            db.add(m)
-
-    _audit_realtime_safe(db, org, uid, action="realtime.event", meta={"session_id": rs.id, "thread_id": rs.thread_id, "event_type": body.event_type, "role": body.role, "is_final": bool(body.is_final)})
-
-    db.commit()
-    try:
-        if body.is_final and (body.event_type or "").strip() == "transcript.final":
-            background_tasks.add_task(punctuate_realtime_events, org, [ev.id])
-    except Exception:
-        pass
-
-    try:
-        if (
-            body.is_final
-            and (body.event_type or "").strip() == "transcript.final"
-            and speaker_type == "user"
-            and content
-        ):
-            _run_realtime_multi_agent_turn(
-                db,
-                org=org,
-                rs=rs,
-                user=user,
-                message=content,
-            )
-    except Exception:
-        logger.exception(
-            "REALTIME_MULTI_AGENT_TURN_FAILED session_id=%s thread_id=%s",
-            rs.id,
-            rs.thread_id,
-        )
-    return {"ok": True}
 
 
 
@@ -45323,368 +44814,55 @@ def _ao19d_safe_meta(meta: Any) -> Dict[str, Any]:
         return meta
     return {}
 
-class RealtimeEventsBatchReq(BaseModel):
-    session_id: str
-    events: List[RealtimeEventIn]
-
-
-@app.post("/api/realtime/events:batch")
-def realtime_events_batch(
-    body: RealtimeEventsBatchReq,
-    background_tasks: BackgroundTasks,
-    x_org_slug: Optional[str] = Header(default=None),
-    user=Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Persist a batch of realtime events for auditability.
-    This is the preferred path for WebRTC clients to avoid per-event HTTP overhead.
-    Final realtime transcripts stay in realtime_events and MUST NOT pollute the text chat timeline.
-    """
-    org = _resolve_org(user, x_org_slug)
-    uid = user.get("sub")
-
-    rs = db.execute(select(RealtimeSession).where(RealtimeSession.id == body.session_id, RealtimeSession.org_slug == org)).scalar_one_or_none()
-    if not rs:
-        raise HTTPException(status_code=404, detail="Realtime session not found")
-
-    if user.get("role") != "admin":
-        _require_thread_member(db, org, rs.thread_id, uid)
-
-    now = int(now_ts())
-    ev_rows: List[RealtimeEvent] = []
-    message_rows: List[Message] = []
-    punct_ids: List[str] = []
-    multi_agent_inputs: List[str] = []
-    ao19d_telemetry_counts: Dict[str, int] = {}
-    ao19d_critical_seen: List[str] = []
-
-    for item in body.events:
-        ts = int(item.created_at or now)
-        event_type_raw = str(item.event_type or "").strip()
-        if event_type_raw.startswith("telemetry."):
-            telemetry_name = _ao19d_realtime_event_name(event_type_raw)
-            ao19d_telemetry_counts[telemetry_name] = ao19d_telemetry_counts.get(telemetry_name, 0) + 1
-            if event_type_raw in AO19D_REALTIME_TELEMETRY_CRITICAL_EVENTS:
-                ao19d_critical_seen.append(telemetry_name)
-                telemetry_meta = _ao19d_safe_meta(getattr(item, "meta", None))
-                logger.info(
-                    "AO19D_REALTIME_TELEMETRY session_id=%s thread_id=%s event=%s dc_state=%s pc_state=%s phase=%s",
-                    body.session_id,
-                    getattr(rs, "thread_id", None),
-                    telemetry_name,
-                    telemetry_meta.get("dc_state"),
-                    telemetry_meta.get("pc_state"),
-                    telemetry_meta.get("phase"),
-                )
-        speaker_type = (item.role or "user").strip() or "user"
-        speaker_id = rs.user_id if speaker_type == "user" else rs.agent_id
-        agent_id = rs.agent_id if speaker_type != "user" else None
-        agent_name = rs.agent_name if speaker_type != "user" else None
-
-        client_eid = (getattr(item, "client_event_id", None) or "").strip() or None
-        if client_eid:
-            try:
-                existing_eid = db.execute(
-                    select(RealtimeEvent.id)
-                    .where(
-                        RealtimeEvent.org_slug == org,
-                        RealtimeEvent.session_id == rs.id,
-                        RealtimeEvent.client_event_id == client_eid,
-                    )
-                    .limit(1)
-                ).scalar_one_or_none()
-                if existing_eid:
-                    continue
-            except Exception:
-                pass
-
-        content = (item.content or "").strip()
-        eid = new_id()
-        ev_rows.append(
-            RealtimeEvent(
-                id=eid,
-                org_slug=org,
-                session_id=rs.id,
-                thread_id=rs.thread_id,
-                speaker_type=speaker_type,
-                speaker_id=speaker_id,
-                agent_id=agent_id,
-                agent_name=agent_name,
-                event_type=item.event_type,
-                transcript_raw=content,
-                transcript_punct=None,
-                created_at=ts,
-                client_event_id=client_eid,
-                meta=json.dumps(item.meta or {}, ensure_ascii=False) if item.meta is not None else None,
-            )
-        )
-
-        try:
-            event_type = (item.event_type or "").strip()
-            if item.is_final and event_type == "transcript.final":
-                punct_ids.append(eid)
-
-            if item.is_final and content and event_type in ("transcript.final", "response.final"):
-                message_created_at = ts if isinstance(ts, int) and ts > 0 else int(now_ts())
-
-                if speaker_type == "user":
-                    client_mid = f"rt-{client_eid}" if client_eid else None
-                    already_message = None
-                    if client_mid:
-                        try:
-                            already_message = db.execute(
-                                select(Message.id)
-                                .where(
-                                    Message.org_slug == org,
-                                    Message.thread_id == rs.thread_id,
-                                    Message.role == "user",
-                                    Message.client_message_id == client_mid,
-                                )
-                                .limit(1)
-                            ).scalar_one_or_none()
-                        except Exception:
-                            already_message = None
-
-                    if not already_message:
-                        message_rows.append(
-                            Message(
-                                id=new_id(),
-                                org_slug=org,
-                                thread_id=rs.thread_id,
-                                user_id=rs.user_id,
-                                user_name=rs.user_name,
-                                role="user",
-                                content=_sanitize_assistant_text(content),
-                                client_message_id=client_mid,
-                                created_at=message_created_at,
-                            )
-                        )
-                    if event_type == "transcript.final":
-                        multi_agent_inputs.append(content)
-                else:
-                    message_rows.append(
-                        Message(
-                            id=new_id(),
-                            org_slug=org,
-                            thread_id=rs.thread_id,
-                            user_id=None,
-                            user_name=None,
-                            role="assistant",
-                            content=_sanitize_assistant_text(content),
-                            agent_id=agent_id,
-                            agent_name=agent_name,
-                            created_at=message_created_at,
-                        )
-                    )
-        except Exception:
-            pass
-
-    if ev_rows:
-        db.add_all(ev_rows)
-    if message_rows:
-        db.add_all(message_rows)
-
-    db.commit()
-    try:
-        if punct_ids:
-            background_tasks.add_task(punctuate_realtime_events, org, punct_ids)
-    except Exception:
-        pass
-
-    for content in multi_agent_inputs:
-        try:
-            _run_realtime_multi_agent_turn(
-                db,
-                org=org,
-                rs=rs,
-                user=user,
-                message=content,
-            )
-        except Exception:
-            logger.exception(
-                "REALTIME_MULTI_AGENT_TURN_FAILED session_id=%s thread_id=%s",
-                rs.id,
-                rs.thread_id,
-            )
-
-    if ao19d_telemetry_counts:
-        try:
-            logger.info(
-                "AO19D_REALTIME_TELEMETRY_BATCH session_id=%s thread_id=%s total=%s critical=%s counts=%s",
-                rs.id,
-                rs.thread_id,
-                sum(ao19d_telemetry_counts.values()),
-                ",".join(ao19d_critical_seen[-12:]),
-                json.dumps(ao19d_telemetry_counts, ensure_ascii=False, sort_keys=True),
-            )
-        except Exception:
-            pass
-
-    return {
-        "inserted_events": len(ev_rows),
-        "inserted_messages": len(message_rows),
-        "ao19d_telemetry": {
-            "enabled": True,
-            "total": sum(ao19d_telemetry_counts.values()),
-            "critical_seen": ao19d_critical_seen[-20:],
-            "counts": ao19d_telemetry_counts,
-        },
-    }
-
-
-@app.post("/api/realtime/end")
-def realtime_end(
-    body: RealtimeEndReq,
-    x_org_slug: Optional[str] = Header(default=None),
-    user=Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    org = _resolve_org(user, x_org_slug)
-    uid = user.get("sub")
-
-    rs = db.execute(select(RealtimeSession).where(RealtimeSession.id == body.session_id, RealtimeSession.org_slug == org)).scalar_one_or_none()
-    if not rs:
-        raise HTTPException(status_code=404, detail="Realtime session not found")
-
-    if user.get("role") != "admin":
-        _require_thread_member(db, org, rs.thread_id, uid)
-
-    rs.ended_at = int(body.ended_at or now_ts())
-    # merge meta
-    try:
-        cur = json.loads(rs.meta) if rs.meta else {}
-    except Exception:
-        cur = {}
-    if body.meta:
-        cur.update(body.meta)
-    rs.meta = json.dumps(cur)
-
-    _audit_realtime_safe(db, org, uid, action="realtime.session.end", meta={"session_id": rs.id, "thread_id": rs.thread_id})
-
-    db.commit()
-    return {"ok": True}
 
 
 
-@app.get("/api/realtime/sessions/{session_id}")
-def realtime_get_session(
-    session_id: str,
-    finals_only: bool = True,
-    x_org_slug: Optional[str] = Header(default=None),
-    user=Depends(get_current_user),
-    db: Session = Depends(get_db),
-):
-    """Fetch a realtime session and its persisted events.
-    - finals_only=True returns only *.final events (recommended for UI/audit).
-    Best-effort, never depends on audit helpers.
-    """
-    org = _resolve_org(user, x_org_slug)
-    uid = user.get("sub")
 
-    rs = db.execute(select(RealtimeSession).where(RealtimeSession.id == session_id, RealtimeSession.org_slug == org)).scalar_one_or_none()
-    if not rs:
-        raise HTTPException(status_code=404, detail="Realtime session not found")
 
-    if user.get("role") != "admin":
-        _require_thread_member(db, org, rs.thread_id, uid)
 
-    q = select(RealtimeEvent).where(RealtimeEvent.org_slug == org, RealtimeEvent.session_id == session_id)
-    if finals_only:
-        q = q.where(RealtimeEvent.event_type.like("%.final"))
-    q = q.order_by(RealtimeEvent.created_at.asc())
-    evs = db.execute(q).scalars().all()
 
-    def _ev_to_dict(ev: RealtimeEvent) -> dict:
-        speaker_type = getattr(ev, "speaker_type", None)
-        transcript_raw = getattr(ev, "transcript_raw", None)
-        legacy_role = getattr(ev, "role", None)
-        legacy_content = getattr(ev, "content", None)
-        return {
-            "id": ev.id,
-            "session_id": ev.session_id,
-            "thread_id": ev.thread_id,
-            "speaker_type": speaker_type or legacy_role,
-            "speaker_id": getattr(ev, "speaker_id", None),
-            "role": speaker_type or legacy_role,
-            "agent_id": getattr(ev, "agent_id", None),
-            "agent_name": getattr(ev, "agent_name", None),
-            "event_type": getattr(ev, "event_type", None),
-            "transcript_raw": transcript_raw or legacy_content,
-            "content": transcript_raw or legacy_content,
-            "transcript_punct": getattr(ev, "transcript_punct", None),
-            "created_at": getattr(ev, "created_at", None),
-            "is_final": bool(str(getattr(ev, "event_type", "")).endswith(".final")),
-            "client_event_id": getattr(ev, "client_event_id", None),
-            "meta": getattr(ev, "meta", None),
-        }
 
-    try:
-        meta = json.loads(rs.meta) if rs.meta else {}
-    except Exception:
-        meta = {}
+# ORKIO_AO60B_REALTIME_ROUTE_EXTRACTION
+# Realtime route handlers are registered from app/routes/realtime.py.
+# Heavy helper functions remain in this file for now and are injected as deps.
+from .routes.realtime import build_realtime_router as _build_realtime_router
 
-    # Simple status flags for UI polling
-    punct_total = 0
-    punct_ready = 0
-    out_events = []
-    for ev in evs:
-        d = _ev_to_dict(ev)
-        ev_text = (getattr(ev, "transcript_raw", None) or getattr(ev, "content", None) or "").strip()
-        if finals_only and (ev.event_type or "").endswith(".final") and ev_text:
-            punct_total += 1
-            if (getattr(ev, "transcript_punct", None) or ev_text).strip():
-                punct_ready += 1
-        out_events.append(d)
+app.include_router(_build_realtime_router(SimpleNamespace(
+    Session=Session,
+    OpenAI=OpenAI,
+    Agent=Agent,
+    Message=Message,
+    RealtimeEvent=RealtimeEvent,
+    RealtimeSession=RealtimeSession,
+    Thread=Thread,
+    User=User,
+    get_current_user=get_current_user,
+    get_db=get_db,
+    _resolve_org=_resolve_org,
+    _require_thread_member=_require_thread_member,
+    _guard_realtime_message=_guard_realtime_message,
+    resolve_agent_voice=resolve_agent_voice,
+    resolve_stt_language=resolve_stt_language,
+    normalize_mode=normalize_mode,
+    normalize_response_profile=normalize_response_profile,
+    normalize_language_profile=normalize_language_profile,
+    get_summit_runtime_config=get_summit_runtime_config,
+    build_summit_instructions=build_summit_instructions,
+    _sensitive_guard_instruction=_sensitive_guard_instruction,
+    now_ts=now_ts,
+    new_id=new_id,
+    logger=logger,
+    _ensure_thread_owner=_ensure_thread_owner,
+    _audit_realtime_safe=_audit_realtime_safe,
+    _run_realtime_multi_agent_turn=_run_realtime_multi_agent_turn,
+    _sanitize_assistant_text=_sanitize_assistant_text,
+    AO19D_REALTIME_TELEMETRY_CRITICAL_EVENTS=AO19D_REALTIME_TELEMETRY_CRITICAL_EVENTS,
+    _ao19d_realtime_event_name=_ao19d_realtime_event_name,
+    _ao19d_safe_meta=_ao19d_safe_meta,
+    punctuate_realtime_events=punctuate_realtime_events,
+)))
 
-    live_assistant_messages = []
-    try:
-        msgs = db.execute(
-            select(Message)
-            .where(
-                Message.org_slug == org,
-                Message.thread_id == rs.thread_id,
-                Message.role == "assistant",
-                Message.created_at >= int(rs.started_at or 0),
-            )
-            .order_by(Message.created_at.asc())
-        ).scalars().all()
-        agent_ids = list({getattr(m, "agent_id", None) for m in msgs if getattr(m, "agent_id", None)})
-        agent_rows = db.execute(
-            select(Agent).where(Agent.org_slug == org, Agent.id.in_(agent_ids))
-        ).scalars().all() if agent_ids else []
-        agent_by_id = {a.id: a for a in agent_rows}
-        live_assistant_messages = [
-            {
-                "id": m.id,
-                "agent_id": getattr(m, "agent_id", None),
-                "agent_name": getattr(m, "agent_name", None),
-                "voice_id": resolve_agent_voice(agent_by_id.get(getattr(m, "agent_id", None))),
-                "content": getattr(m, "content", None),
-                "created_at": getattr(m, "created_at", None),
-            }
-            for m in msgs
-        ]
-    except Exception:
-        logger.exception("REALTIME_LIVE_MESSAGES_LOAD_FAILED session_id=%s", session_id)
 
-    return {
-        "session": {
-            "id": rs.id,
-            "thread_id": rs.thread_id,
-            "agent_id": rs.agent_id,
-            "agent_name": rs.agent_name,
-            "user_id": rs.user_id,
-            "user_name": rs.user_name,
-            "model": rs.model,
-            "voice": rs.voice,
-            "started_at": rs.started_at,
-            "ended_at": rs.ended_at,
-            "meta": meta,
-        },
-        "events": out_events,
-        "live_assistant_messages": live_assistant_messages,
-        "punct": {"total": punct_total, "ready": punct_ready, "done": (punct_total > 0 and punct_ready == punct_total)},
-    }
 
 
 
