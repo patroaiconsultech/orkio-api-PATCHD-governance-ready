@@ -127,6 +127,94 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
     resolve_agent_voice = deps.resolve_agent_voice
     resolve_stt_language = deps.resolve_stt_language
 
+    # ORKIO_AO60G_REALTIME_PUBLIC_BETA_PROMISE_GUARD
+    def _rt_norm(value: Any) -> str:
+        raw = str(value or "")
+        try:
+            import unicodedata as _ud
+            raw = _ud.normalize("NFD", raw)
+            raw = "".join(ch for ch in raw if _ud.category(ch) != "Mn")
+        except Exception:
+            pass
+        raw = raw.lower()
+        return " ".join(raw.split())
+
+    def _rt_public_beta_context(db: Session, user: Dict[str, Any], org: str) -> Dict[str, Any]:
+        db_user = db.execute(select(User).where(User.id == user.get("sub"), User.org_slug == org)).scalar_one_or_none()
+        is_admin = bool(
+            str(user.get("role") or "").strip().lower() == "admin"
+            or bool(user.get("is_admin") or user.get("admin"))
+            or (
+                db_user is not None
+                and (
+                    str(getattr(db_user, "role", "") or "").strip().lower() == "admin"
+                    or bool(getattr(db_user, "is_admin", False))
+                    or bool(getattr(db_user, "admin", False))
+                )
+            )
+        )
+        return {
+            "db_user": db_user,
+            "is_admin": is_admin,
+            "public_beta_orkio_only": bool(db_user is not None and not is_admin),
+            "usage_tier": str(getattr(db_user, "usage_tier", "") or "").strip().lower() if db_user is not None else "",
+            "signup_source": str(getattr(db_user, "signup_source", "") or "").strip().lower() if db_user is not None else "",
+            "signup_label": str(getattr(db_user, "signup_code_label", "") or "").strip().lower() if db_user is not None else "",
+            "product_scope": str(getattr(db_user, "product_scope", "") or "").strip().lower() if db_user is not None else "",
+        }
+
+    def _rt_public_beta_orkio_only_instructions() -> str:
+        return (
+            "GUARDA DO BETA PÚBLICO ORKIO-ONLY — AO60G\n"
+            "- Você é Orkio. Responda sempre como Orkio para usuários não-admin.\n"
+            "- Não prometa chamar, transferir, convidar, acionar ou liberar Chris, Cris, Orion, Team, especialistas, squads ou agentes internos.\n"
+            "- Não diga que outros agentes estão disponíveis, na escuta ou que podem entrar agora.\n"
+            "- Não liste 'agentes personalizados recomendados' como se estivessem disponíveis nesta conversa.\n"
+            "- Não ofereça WhatsApp, equipe consultiva humana, atendimento humano ou venda assistida no Realtime.\n"
+            "- Se o usuário pedir Chris, Cris, Orion, Team ou outro agente, responda com clareza: nesta fase do beta público eu mesmo conduzo a conversa como Orkio.\n"
+            "- Você pode ajudar diretamente com planejamento, perguntas, organização de ideias, próximos passos e análise inicial, sem criar expectativa de outros agentes.\n"
+            "- Mantenha respostas curtas, úteis, seguras e em português do Brasil."
+        )
+
+    def _rt_public_beta_guard_reply(message: Any) -> Optional[str]:
+        raw = _rt_norm(message)
+        if not raw:
+            return None
+        blocked_terms = [
+            "chris", "cris", "orion", "team", "agente", "agentes", "especialista", "especialistas",
+            "squad", "squads", "equipe consultiva", "whatsapp", "atendimento humano",
+        ]
+        action_terms = [
+            "chamar", "chama", "acionar", "aciona", "falar com", "conversar com", "esta ai",
+            "está ai", "esta disponivel", "está disponivel", "na escuta", "pode entrar",
+            "liberar", "transferir", "encaminhar",
+        ]
+        if any(t in raw for t in blocked_terms) and (any(t in raw for t in action_terms) or len(raw.split()) <= 14):
+            return (
+                "Nesta fase do beta público, eu mesmo conduzo a conversa como Orkio. "
+                "Ainda não vou acionar outros agentes aqui. Posso te ajudar diretamente a organizar a ideia, "
+                "mapear prioridades e definir o próximo passo com segurança."
+            )
+        return None
+
+    def _rt_public_beta_sanitize_assistant_text(content: Any) -> str:
+        raw_text = str(content or "").strip()
+        raw = _rt_norm(raw_text)
+        if not raw:
+            return raw_text
+        risky = [
+            "vou chamar", "vou acionar", "chris", "cris", "orion", "team",
+            "agentes personalizados recomendados", "falar com a equipe", "whatsapp",
+            "atendimento humano", "nossa equipe consultiva",
+        ]
+        if any(t in raw for t in risky):
+            return (
+                "Nesta fase do beta público, eu sigo com você como Orkio. "
+                "Ainda não vou acionar outros agentes nesta conversa. "
+                "Posso ajudar diretamente a transformar sua ideia em um plano inicial claro, seguro e prático."
+            )
+        return raw_text
+
     @router.post("/api/realtime/guard")
     def realtime_guard(
         body: RealtimeGuardReq,
@@ -138,6 +226,16 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
         tid = (body.thread_id or "").strip() or None
         if tid and user.get("role") != "admin":
             _require_thread_member(db, org, tid, user.get("sub"))
+        rt_ctx = _rt_public_beta_context(db, user, org)
+        if rt_ctx.get("public_beta_orkio_only"):
+            orkio_only_reply = _rt_public_beta_guard_reply(body.message)
+            if orkio_only_reply:
+                return {
+                    "ok": True,
+                    "blocked": True,
+                    "reply": orkio_only_reply,
+                    "reason": "public_beta_orkio_only_promise_guard",
+                }
         blocked_reply = _guard_realtime_message(body.message)
         return {"ok": True, "blocked": bool(blocked_reply), "reply": blocked_reply}
 
@@ -254,6 +352,8 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
         )
         if instructions:
             instructions = instructions + "\n\n" + _sensitive_guard_instruction()
+        if public_beta_orkio_only:
+            instructions = ((instructions or "") + "\n\n" + _rt_public_beta_orkio_only_instructions()).strip()
 
         # Choose voice: explicit > agent default > fallback
         voice_raw = (agent_voice or os.getenv("OPENAI_REALTIME_VOICE_DEFAULT", "cedar")) if public_beta_orkio_only else (body.voice or agent_voice or os.getenv("OPENAI_REALTIME_VOICE_DEFAULT", "cedar"))
@@ -581,6 +681,9 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
         if user.get("role") != "admin":
             _require_thread_member(db, org, rs.thread_id, uid)
 
+        rt_ctx = _rt_public_beta_context(db, user, org)
+        public_beta_orkio_only = bool(rt_ctx.get("public_beta_orkio_only"))
+
         ts = int(body.created_at or now_ts())
         speaker_type = (body.role or "user").strip() or "user"
         speaker_id = rs.user_id if speaker_type == "user" else rs.agent_id
@@ -663,7 +766,7 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
                     user_id=None,
                     user_name=None,
                     role="assistant",
-                    content=_sanitize_assistant_text(content),
+                    content=_sanitize_assistant_text(_rt_public_beta_sanitize_assistant_text(content) if public_beta_orkio_only else content),
                     agent_id=agent_id,
                     agent_name=agent_name,
                     created_at=ts,
@@ -686,13 +789,23 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
                 and speaker_type == "user"
                 and content
             ):
-                _run_realtime_multi_agent_turn(
-                    db,
-                    org=org,
-                    rs=rs,
-                    user=user,
-                    message=content,
-                )
+                if public_beta_orkio_only:
+                    try:
+                        logger.info(
+                            "AO60G_REALTIME_MULTI_AGENT_SUPPRESSED session_id=%s thread_id=%s reason=public_beta_orkio_only",
+                            rs.id,
+                            rs.thread_id,
+                        )
+                    except Exception:
+                        pass
+                else:
+                    _run_realtime_multi_agent_turn(
+                        db,
+                        org=org,
+                        rs=rs,
+                        user=user,
+                        message=content,
+                    )
         except Exception:
             logger.exception(
                 "REALTIME_MULTI_AGENT_TURN_FAILED session_id=%s thread_id=%s",
@@ -723,6 +836,9 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
 
         if user.get("role") != "admin":
             _require_thread_member(db, org, rs.thread_id, uid)
+
+        rt_ctx = _rt_public_beta_context(db, user, org)
+        public_beta_orkio_only = bool(rt_ctx.get("public_beta_orkio_only"))
 
         now = int(now_ts())
         ev_rows: List[RealtimeEvent] = []
@@ -867,13 +983,23 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
 
         for content in multi_agent_inputs:
             try:
-                _run_realtime_multi_agent_turn(
-                    db,
-                    org=org,
-                    rs=rs,
-                    user=user,
-                    message=content,
-                )
+                if public_beta_orkio_only:
+                    try:
+                        logger.info(
+                            "AO60G_REALTIME_MULTI_AGENT_SUPPRESSED session_id=%s thread_id=%s reason=public_beta_orkio_only",
+                            rs.id,
+                            rs.thread_id,
+                        )
+                    except Exception:
+                        pass
+                else:
+                    _run_realtime_multi_agent_turn(
+                        db,
+                        org=org,
+                        rs=rs,
+                        user=user,
+                        message=content,
+                    )
             except Exception:
                 logger.exception(
                     "REALTIME_MULTI_AGENT_TURN_FAILED session_id=%s thread_id=%s",
