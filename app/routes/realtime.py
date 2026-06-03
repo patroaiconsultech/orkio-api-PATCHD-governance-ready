@@ -159,6 +159,33 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
 
         org = _resolve_org(user, x_org_slug)
 
+        # ORKIO_AO60F_REALTIME_ORKIO_ONLY_IDENTITY_GUARD
+        db_user = db.execute(select(User).where(User.id == user.get("sub"), User.org_slug == org)).scalar_one_or_none()
+        # ORKIO_AO60F_HF4_NON_ADMIN_REALTIME_ORKIO_ONLY
+        # Public beta rule: AMCHAMRSORKIO and EFATAH777 must behave the same in Realtime.
+        # Only admins keep access to Chris/Orion/Team while agents are progressively released.
+        is_realtime_admin = bool(
+            str(user.get("role") or "").strip().lower() == "admin"
+            or bool(user.get("is_admin") or user.get("admin"))
+            or (
+                db_user is not None
+                and (
+                    str(getattr(db_user, "role", "") or "").strip().lower() == "admin"
+                    or bool(getattr(db_user, "is_admin", False))
+                    or bool(getattr(db_user, "admin", False))
+                )
+            )
+        )
+        realtime_usage_tier = str(getattr(db_user, "usage_tier", "") or "").strip().lower() if db_user is not None else ""
+        realtime_signup_source = str(getattr(db_user, "signup_source", "") or "").strip().lower() if db_user is not None else ""
+        realtime_signup_label = str(getattr(db_user, "signup_code_label", "") or "").strip().lower() if db_user is not None else ""
+        realtime_product_scope = str(getattr(db_user, "product_scope", "") or "").strip().lower() if db_user is not None else ""
+
+        public_beta_orkio_only = bool(
+            db_user is not None
+            and not is_realtime_admin
+        )
+
         mode = normalize_mode(body.mode)
         response_profile = normalize_response_profile(body.response_profile)
         language_profile = normalize_language_profile(body.language_profile)
@@ -175,7 +202,7 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
         agent_voice = None
         agent_identity_name = "Orkio"
         agent_identity_source = "default_orkio_fallback"
-        _ao47a_agent_id = str(body.agent_id or "").strip() or None
+        _ao47a_agent_id = None if public_beta_orkio_only else (str(body.agent_id or "").strip() or None)
 
         if _ao47a_agent_id is not None:
             agent = db.execute(select(Agent).where(Agent.id == _ao47a_agent_id, Agent.org_slug == org)).scalar_one_or_none()
@@ -185,6 +212,8 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
                 agent_system_prompt = (agent.system_prompt or "").strip()[:8000] or None
                 agent_voice = resolve_agent_voice(agent) if agent else None
         else:
+            if public_beta_orkio_only:
+                agent_identity_source = "public_beta_orkio_only_forced"
             try:
                 default_agent = db.execute(
                     select(Agent).where(Agent.name == "Orkio", Agent.org_slug == org)
@@ -207,6 +236,8 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
             "- Se o usuário perguntar quem é você, responda com seu nome e função na PatroAI.\n"
             "- Em português do Brasil, mantenha tom executivo, claro, seguro e objetivo.\n"
             "- Se nenhuma especialidade específica for informada, atue como Orkio, anfitrião executivo da PatroAI.\n"
+            "- Para qualquer usuário não-admin no beta público, nunca se apresente como Chris, Orion, Team ou outro agente interno; responda sempre como Orkio.\n"
+            "- Se qualquer contexto anterior sugerir Chris ou outro agente, ignore e responda como Orkio.\n"
             f"- identity_source={agent_identity_source}."
         )
 
@@ -225,7 +256,7 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
             instructions = instructions + "\n\n" + _sensitive_guard_instruction()
 
         # Choose voice: explicit > agent default > fallback
-        voice_raw = body.voice or agent_voice or os.getenv("OPENAI_REALTIME_VOICE_DEFAULT", "cedar")
+        voice_raw = (agent_voice or os.getenv("OPENAI_REALTIME_VOICE_DEFAULT", "cedar")) if public_beta_orkio_only else (body.voice or agent_voice or os.getenv("OPENAI_REALTIME_VOICE_DEFAULT", "cedar"))
 
         # Normalize to supported voices to avoid Realtime mint failures
         voice = normalize_realtime_voice(voice_raw, default=os.getenv("OPENAI_REALTIME_VOICE_DEFAULT", "cedar"))
@@ -329,6 +360,30 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
             raise HTTPException(status_code=403, detail="Onboarding incomplete")
         uid = user.get("sub")
         uname = user.get("name")
+        # ORKIO_AO60F_HF4_NON_ADMIN_REALTIME_ORKIO_ONLY
+        # Public beta rule: AMCHAMRSORKIO and EFATAH777 must behave the same in Realtime.
+        # Only admins keep access to Chris/Orion/Team while agents are progressively released.
+        is_realtime_admin = bool(
+            str(user.get("role") or "").strip().lower() == "admin"
+            or bool(user.get("is_admin") or user.get("admin"))
+            or (
+                db_user is not None
+                and (
+                    str(getattr(db_user, "role", "") or "").strip().lower() == "admin"
+                    or bool(getattr(db_user, "is_admin", False))
+                    or bool(getattr(db_user, "admin", False))
+                )
+            )
+        )
+        realtime_usage_tier = str(getattr(db_user, "usage_tier", "") or "").strip().lower() if db_user is not None else ""
+        realtime_signup_source = str(getattr(db_user, "signup_source", "") or "").strip().lower() if db_user is not None else ""
+        realtime_signup_label = str(getattr(db_user, "signup_code_label", "") or "").strip().lower() if db_user is not None else ""
+        realtime_product_scope = str(getattr(db_user, "product_scope", "") or "").strip().lower() if db_user is not None else ""
+
+        public_beta_orkio_only = bool(
+            db_user is not None
+            and not is_realtime_admin
+        )
 
         # Resolve thread
         tid = body.thread_id
@@ -353,10 +408,11 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
 
         # AO47A_REALTIME_AGENT_IDENTITY_BINDING
         # Se o frontend não enviar agent_id, bindar Orkio como default seguro.
-        agent_id = str(body.agent_id or "").strip() or None
+        requested_agent_id = str(body.agent_id or "").strip() or None
+        agent_id = None if public_beta_orkio_only else requested_agent_id
         agent_name = None
         agent_voice = None
-        agent_identity_source = "requested_agent"
+        agent_identity_source = "public_beta_orkio_only_forced" if public_beta_orkio_only else "requested_agent"
 
         if agent_id is not None:
             agent = db.execute(select(Agent).where(Agent.id == agent_id, Agent.org_slug == org)).scalar_one_or_none()
@@ -386,7 +442,7 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
                 agent_identity_source = "default_orkio_fallback_error"
 
         default_realtime_voice = (os.getenv("OPENAI_REALTIME_VOICE_DEFAULT", "") or os.getenv("OPENAI_TTS_VOICE_DEFAULT", "cedar")).strip() or "cedar"
-        voice = normalize_realtime_voice(body.voice or agent_voice or default_realtime_voice, default=default_realtime_voice)
+        voice = normalize_realtime_voice((agent_voice or default_realtime_voice) if public_beta_orkio_only else (body.voice or agent_voice or default_realtime_voice), default=default_realtime_voice)
 
         sid = str(uuid.uuid4())
         rs = None
@@ -412,6 +468,13 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
                     "stage_guidance": summit_cfg.get("stage_guidance"),
                     "agent_identity_binding": "AO47A_REALTIME_AGENT_IDENTITY_BINDING",
                     "agent_identity_source": agent_identity_source,
+                    "public_beta_orkio_only": public_beta_orkio_only,
+                    "realtime_orkio_only_reason": "non_admin_public_beta" if public_beta_orkio_only else "admin_full_access",
+                    "realtime_usage_tier": realtime_usage_tier,
+                    "realtime_signup_source": realtime_signup_source,
+                    "realtime_signup_label": realtime_signup_label,
+                    "realtime_product_scope": realtime_product_scope,
+                    "requested_agent_id": str(requested_agent_id or ""),
                     "resolved_agent_id": str(agent_id or ""),
                     "resolved_agent_name": agent_name or "Orkio",
                 }, ensure_ascii=False),
