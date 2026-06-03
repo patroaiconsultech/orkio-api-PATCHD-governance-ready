@@ -38,6 +38,54 @@ class RealtimeEventsBatchReq(BaseModel):
     events: List[RealtimeEventIn]
 
 
+# ORKIO_AO60I_REALTIME_TIMEBOX_COOLDOWN_GUARD
+def _rt_positive_int_env(name: str, default: int) -> int:
+    try:
+        value = int(str(os.getenv(name, str(default))).strip())
+        return value if value > 0 else default
+    except Exception:
+        return default
+
+
+# ORKIO_AO60I_HF3_2MIN_10MIN_POLICY
+# Product decision: public beta Realtime sessions are short and explicit.
+# Default policy is now 120s session + 600s cooldown; production can still override via env.
+REALTIME_PUBLIC_BETA_MAX_SECONDS = _rt_positive_int_env("ORKIO_REALTIME_PUBLIC_BETA_MAX_SECONDS", 120)
+REALTIME_PUBLIC_BETA_COOLDOWN_SECONDS = _rt_positive_int_env("ORKIO_REALTIME_PUBLIC_BETA_COOLDOWN_SECONDS", 600)
+
+
+def _rt_is_realtime_admin(user: Any, db_user: Any = None) -> bool:
+    roles = {"admin", "owner", "superadmin"}
+    user_role = str((user or {}).get("role") or "").strip().lower()
+    db_role = str(getattr(db_user, "role", "") or "").strip().lower() if db_user is not None else ""
+    return bool(
+        user_role in roles
+        or bool((user or {}).get("is_admin") or (user or {}).get("admin"))
+        or (
+            db_user is not None
+            and (
+                db_role in roles
+                or bool(getattr(db_user, "is_admin", False))
+                or bool(getattr(db_user, "admin", False))
+            )
+        )
+    )
+
+
+def _rt_http_cooldown(retry_after_seconds: int, message: Optional[str] = None) -> HTTPException:
+    retry_after = max(1, int(retry_after_seconds or 1))
+    return HTTPException(
+        status_code=429,
+        detail={
+            "code": "REALTIME_COOLDOWN_ACTIVE",
+            "retry_after_seconds": retry_after,
+            "message": message
+            or "A voz em tempo real estará disponível novamente em alguns minutos. O chat por texto continua disponível.",
+        },
+        headers={"Retry-After": str(retry_after)},
+    )
+
+
 # ORKIO_AO60B_HF1_REALTIME_DEPENDENCY_CONTRACT
 REALTIME_ROUTER_REQUIRED_DEPS = (
     "AO19D_REALTIME_TELEMETRY_CRITICAL_EVENTS",
@@ -171,6 +219,7 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
             "- Não diga que outros agentes estão disponíveis, na escuta ou que podem entrar agora.\n"
             "- Não liste 'agentes personalizados recomendados' como se estivessem disponíveis nesta conversa.\n"
             "- Não ofereça WhatsApp, equipe consultiva humana, atendimento humano ou venda assistida no Realtime.\n"
+            "- AO60I-HF2: na primeira fala da sessão Realtime, avise de forma breve que a voz ao vivo tem até 2 minutos, que o contador aparece na tela e que o chat por texto continua disponível ao final.\n"
             "- Se o usuário pedir Chris, Cris, Orion, Team ou outro agente, responda com clareza: nesta fase do beta público eu mesmo conduzo a conversa como Orkio.\n"
             "- Você pode ajudar diretamente com planejamento, perguntas, organização de ideias, próximos passos e análise inicial, sem criar expectativa de outros agentes.\n"
             "- Mantenha respostas curtas, úteis, seguras e em português do Brasil."
@@ -262,18 +311,7 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
         # ORKIO_AO60F_HF4_NON_ADMIN_REALTIME_ORKIO_ONLY
         # Public beta rule: AMCHAMRSORKIO and EFATAH777 must behave the same in Realtime.
         # Only admins keep access to Chris/Orion/Team while agents are progressively released.
-        is_realtime_admin = bool(
-            str(user.get("role") or "").strip().lower() == "admin"
-            or bool(user.get("is_admin") or user.get("admin"))
-            or (
-                db_user is not None
-                and (
-                    str(getattr(db_user, "role", "") or "").strip().lower() == "admin"
-                    or bool(getattr(db_user, "is_admin", False))
-                    or bool(getattr(db_user, "admin", False))
-                )
-            )
-        )
+        is_realtime_admin = _rt_is_realtime_admin(user, db_user)
         realtime_usage_tier = str(getattr(db_user, "usage_tier", "") or "").strip().lower() if db_user is not None else ""
         realtime_signup_source = str(getattr(db_user, "signup_source", "") or "").strip().lower() if db_user is not None else ""
         realtime_signup_label = str(getattr(db_user, "signup_code_label", "") or "").strip().lower() if db_user is not None else ""
@@ -283,6 +321,13 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
             db_user is not None
             and not is_realtime_admin
         )
+
+        # ORKIO_AO60I_REALTIME_TIMEBOX_COOLDOWN_GUARD
+        if public_beta_orkio_only:
+            try:
+                body.ttl_seconds = min(int(body.ttl_seconds or REALTIME_PUBLIC_BETA_MAX_SECONDS), REALTIME_PUBLIC_BETA_MAX_SECONDS)
+            except Exception:
+                body.ttl_seconds = REALTIME_PUBLIC_BETA_MAX_SECONDS
 
         mode = normalize_mode(body.mode)
         response_profile = normalize_response_profile(body.response_profile)
@@ -463,18 +508,7 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
         # ORKIO_AO60F_HF4_NON_ADMIN_REALTIME_ORKIO_ONLY
         # Public beta rule: AMCHAMRSORKIO and EFATAH777 must behave the same in Realtime.
         # Only admins keep access to Chris/Orion/Team while agents are progressively released.
-        is_realtime_admin = bool(
-            str(user.get("role") or "").strip().lower() == "admin"
-            or bool(user.get("is_admin") or user.get("admin"))
-            or (
-                db_user is not None
-                and (
-                    str(getattr(db_user, "role", "") or "").strip().lower() == "admin"
-                    or bool(getattr(db_user, "is_admin", False))
-                    or bool(getattr(db_user, "admin", False))
-                )
-            )
-        )
+        is_realtime_admin = _rt_is_realtime_admin(user, db_user)
         realtime_usage_tier = str(getattr(db_user, "usage_tier", "") or "").strip().lower() if db_user is not None else ""
         realtime_signup_source = str(getattr(db_user, "signup_source", "") or "").strip().lower() if db_user is not None else ""
         realtime_signup_label = str(getattr(db_user, "signup_code_label", "") or "").strip().lower() if db_user is not None else ""
@@ -484,6 +518,48 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
             db_user is not None
             and not is_realtime_admin
         )
+
+        # ORKIO_AO60I_REALTIME_TIMEBOX_COOLDOWN_GUARD
+        effective_ttl_seconds = int(body.ttl_seconds or REALTIME_PUBLIC_BETA_MAX_SECONDS)
+        if public_beta_orkio_only:
+            effective_ttl_seconds = min(effective_ttl_seconds, REALTIME_PUBLIC_BETA_MAX_SECONDS)
+            now_int = int(now_ts())
+            last_rs = db.execute(
+                select(RealtimeSession)
+                .where(
+                    RealtimeSession.org_slug == org,
+                    RealtimeSession.user_id == uid,
+                )
+                .order_by(RealtimeSession.started_at.desc())
+                .limit(1)
+            ).scalar_one_or_none()
+
+            if last_rs is not None:
+                try:
+                    last_started = int(getattr(last_rs, "started_at", 0) or 0)
+                except Exception:
+                    last_started = 0
+                try:
+                    last_ended = int(getattr(last_rs, "ended_at", 0) or 0)
+                except Exception:
+                    last_ended = 0
+
+                cooldown_anchor = 0
+                if last_ended > 0:
+                    cooldown_anchor = last_ended
+                elif last_started > 0:
+                    active_elapsed = max(0, now_int - last_started)
+                    if active_elapsed < REALTIME_PUBLIC_BETA_MAX_SECONDS:
+                        raise _rt_http_cooldown(
+                            REALTIME_PUBLIC_BETA_MAX_SECONDS - active_elapsed,
+                            "Já existe uma sessão de voz em tempo real ativa. Aguarde alguns segundos ou continue por texto.",
+                        )
+                    cooldown_anchor = last_started + REALTIME_PUBLIC_BETA_MAX_SECONDS
+
+                if cooldown_anchor > 0:
+                    retry_after = REALTIME_PUBLIC_BETA_COOLDOWN_SECONDS - max(0, now_int - cooldown_anchor)
+                    if retry_after > 0:
+                        raise _rt_http_cooldown(retry_after)
 
         # Resolve thread
         tid = body.thread_id
@@ -560,7 +636,7 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
                 voice=voice,
                 started_at=now_ts(),
                 meta=json.dumps({
-                    "ttl_seconds": body.ttl_seconds,
+                    "ttl_seconds": effective_ttl_seconds,
                     "mode": summit_cfg.get("mode"),
                     "response_profile": summit_cfg.get("response_profile"),
                     "language_profile": summit_cfg.get("language_profile"),
@@ -574,6 +650,9 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
                     "realtime_signup_source": realtime_signup_source,
                     "realtime_signup_label": realtime_signup_label,
                     "realtime_product_scope": realtime_product_scope,
+                    "timebox_policy": "public_beta_env_timebox_cooldown" if public_beta_orkio_only else "admin_bypass",
+                    "timebox_max_seconds": REALTIME_PUBLIC_BETA_MAX_SECONDS if public_beta_orkio_only else None,
+                    "cooldown_seconds": REALTIME_PUBLIC_BETA_COOLDOWN_SECONDS if public_beta_orkio_only else None,
                     "requested_agent_id": str(requested_agent_id or ""),
                     "resolved_agent_id": str(agent_id or ""),
                     "resolved_agent_name": agent_name or "Orkio",
@@ -588,7 +667,7 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
                     agent_id=agent_id,
                     voice=voice,
                     model=body.model,
-                    ttl_seconds=body.ttl_seconds,
+                    ttl_seconds=effective_ttl_seconds,
                     mode=summit_cfg.get("mode"),
                     response_profile=summit_cfg.get("response_profile"),
                     language_profile=summit_cfg.get("language_profile"),
@@ -654,6 +733,12 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
             "client_secret_value": r.get("value"),
             "realtime_session": r.get("session"),
             "summit_config": summit_cfg,
+            "timebox": {
+                "limited": bool(public_beta_orkio_only),
+                "max_seconds": REALTIME_PUBLIC_BETA_MAX_SECONDS if public_beta_orkio_only else None,
+                "cooldown_seconds": REALTIME_PUBLIC_BETA_COOLDOWN_SECONDS if public_beta_orkio_only else None,
+                "bypass": "admin" if is_realtime_admin else None,
+            },
         }
 
 
