@@ -550,6 +550,17 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
                 elif last_started > 0:
                     active_elapsed = max(0, now_int - last_started)
                     if active_elapsed < REALTIME_PUBLIC_BETA_MAX_SECONDS:
+                        # AO60K_HF3_BACKEND_REALTIME_429_OBSERVABILITY
+                        # Observability only: no behavior change. Logs why /api/realtime/start returned 429.
+                        logger.warning(
+                            "REALTIME_START_DENIED reason=active_session user_id=%s session_id=%s started_at=%s ended_at=%s active_elapsed=%s retry_after=%s",
+                            uid,
+                            getattr(last_rs, "id", None),
+                            getattr(last_rs, "started_at", None),
+                            getattr(last_rs, "ended_at", None),
+                            active_elapsed,
+                            REALTIME_PUBLIC_BETA_MAX_SECONDS - active_elapsed,
+                        )
                         raise _rt_http_cooldown(
                             REALTIME_PUBLIC_BETA_MAX_SECONDS - active_elapsed,
                             "Já existe uma sessão de voz em tempo real ativa. Aguarde alguns segundos ou continue por texto.",
@@ -559,6 +570,16 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
                 if cooldown_anchor > 0:
                     retry_after = REALTIME_PUBLIC_BETA_COOLDOWN_SECONDS - max(0, now_int - cooldown_anchor)
                     if retry_after > 0:
+                        # AO60K_HF3_BACKEND_REALTIME_429_OBSERVABILITY
+                        # Observability only: no behavior change. Logs why /api/realtime/start returned 429.
+                        logger.warning(
+                            "REALTIME_START_DENIED reason=cooldown user_id=%s session_id=%s started_at=%s ended_at=%s retry_after=%s",
+                            uid,
+                            getattr(last_rs, "id", None),
+                            getattr(last_rs, "started_at", None),
+                            getattr(last_rs, "ended_at", None),
+                            retry_after,
+                        )
                         raise _rt_http_cooldown(retry_after)
 
         # Resolve thread
