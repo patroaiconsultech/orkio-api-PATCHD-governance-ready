@@ -86,6 +86,36 @@ def _rt_http_cooldown(retry_after_seconds: int, message: Optional[str] = None) -
     )
 
 
+
+# ORKIO_AO60K_HF4_REALTIME_EPOCH_SECONDS_NORMALIZATION
+def _rt_epoch_seconds(value: Any) -> int:
+    """Normalize timestamps used by realtime cooldown to epoch seconds.
+
+    Historical rows may contain browser Date.now() milliseconds in ended_at,
+    while started_at/now_ts are seconds. A millisecond ended_at makes the
+    cooldown calculation restart at the full window forever because now_seconds
+    is smaller than ended_at_milliseconds. This helper keeps behavior stable
+    without altering policy.
+    """
+    if value is None:
+        return 0
+    try:
+        if hasattr(value, "timestamp"):
+            return max(0, int(value.timestamp()))
+    except Exception:
+        pass
+    try:
+        raw = str(value).strip()
+        if not raw:
+            return 0
+        # Accept numeric strings/ints/floats. Values above 10 digits are ms.
+        number = float(raw)
+        if number > 9999999999:
+            number = number / 1000.0
+        return max(0, int(number))
+    except Exception:
+        return 0
+
 # ORKIO_AO60B_HF1_REALTIME_DEPENDENCY_CONTRACT
 REALTIME_ROUTER_REQUIRED_DEPS = (
     "AO19D_REALTIME_TELEMETRY_CRITICAL_EVENTS",
@@ -523,7 +553,7 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
         effective_ttl_seconds = int(body.ttl_seconds or REALTIME_PUBLIC_BETA_MAX_SECONDS)
         if public_beta_orkio_only:
             effective_ttl_seconds = min(effective_ttl_seconds, REALTIME_PUBLIC_BETA_MAX_SECONDS)
-            now_int = int(now_ts())
+            now_int = _rt_epoch_seconds(now_ts())
             last_rs = db.execute(
                 select(RealtimeSession)
                 .where(
@@ -535,14 +565,10 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
             ).scalar_one_or_none()
 
             if last_rs is not None:
-                try:
-                    last_started = int(getattr(last_rs, "started_at", 0) or 0)
-                except Exception:
-                    last_started = 0
-                try:
-                    last_ended = int(getattr(last_rs, "ended_at", 0) or 0)
-                except Exception:
-                    last_ended = 0
+                # AO60K-HF4: normalize DB timestamps before cooldown math.
+                # Older rows can have ended_at in milliseconds from browser Date.now().
+                last_started = _rt_epoch_seconds(getattr(last_rs, "started_at", None))
+                last_ended = _rt_epoch_seconds(getattr(last_rs, "ended_at", None))
 
                 cooldown_anchor = 0
                 if last_ended > 0:
@@ -553,11 +579,13 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
                         # AO60K_HF3_BACKEND_REALTIME_429_OBSERVABILITY
                         # Observability only: no behavior change. Logs why /api/realtime/start returned 429.
                         logger.warning(
-                            "REALTIME_START_DENIED reason=active_session user_id=%s session_id=%s started_at=%s ended_at=%s active_elapsed=%s retry_after=%s",
+                            "REALTIME_START_DENIED reason=active_session user_id=%s session_id=%s started_at=%s ended_at=%s normalized_started_at=%s normalized_ended_at=%s active_elapsed=%s retry_after=%s",
                             uid,
                             getattr(last_rs, "id", None),
                             getattr(last_rs, "started_at", None),
                             getattr(last_rs, "ended_at", None),
+                            last_started,
+                            last_ended,
                             active_elapsed,
                             REALTIME_PUBLIC_BETA_MAX_SECONDS - active_elapsed,
                         )
@@ -573,11 +601,13 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
                         # AO60K_HF3_BACKEND_REALTIME_429_OBSERVABILITY
                         # Observability only: no behavior change. Logs why /api/realtime/start returned 429.
                         logger.warning(
-                            "REALTIME_START_DENIED reason=cooldown user_id=%s session_id=%s started_at=%s ended_at=%s retry_after=%s",
+                            "REALTIME_START_DENIED reason=cooldown user_id=%s session_id=%s started_at=%s ended_at=%s normalized_started_at=%s normalized_ended_at=%s retry_after=%s",
                             uid,
                             getattr(last_rs, "id", None),
                             getattr(last_rs, "started_at", None),
                             getattr(last_rs, "ended_at", None),
+                            last_started,
+                            last_ended,
                             retry_after,
                         )
                         raise _rt_http_cooldown(retry_after)
@@ -1155,7 +1185,8 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
         if user.get("role") != "admin":
             _require_thread_member(db, org, rs.thread_id, uid)
 
-        rs.ended_at = int(body.ended_at or now_ts())
+        # AO60K-HF4: browser Date.now() can arrive in milliseconds; persist epoch seconds.
+        rs.ended_at = _rt_epoch_seconds(body.ended_at) or _rt_epoch_seconds(now_ts())
         # merge meta
         try:
             cur = json.loads(rs.meta) if rs.meta else {}
