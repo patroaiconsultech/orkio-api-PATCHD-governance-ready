@@ -52,7 +52,7 @@ def _rt_positive_int_env(name: str, default: int) -> int:
 # Default policy is now 120s session + 600s cooldown; production can still override via env.
 REALTIME_PUBLIC_BETA_MAX_SECONDS = _rt_positive_int_env("ORKIO_REALTIME_PUBLIC_BETA_MAX_SECONDS", 120)
 REALTIME_PUBLIC_BETA_COOLDOWN_SECONDS = _rt_positive_int_env("ORKIO_REALTIME_PUBLIC_BETA_COOLDOWN_SECONDS", 600)
-REALTIME_PUBLIC_BETA_GRACE_RESUME_SECONDS = _rt_positive_int_env("ORKIO_REALTIME_PUBLIC_BETA_GRACE_RESUME_SECONDS", 60)
+REALTIME_PUBLIC_BETA_GRACE_RESUME_SECONDS = _rt_positive_int_env("ORKIO_REALTIME_PUBLIC_BETA_GRACE_RESUME_SECONDS", 120)
 REALTIME_PUBLIC_BETA_MAX_CYCLE_SESSIONS = _rt_positive_int_env("ORKIO_REALTIME_PUBLIC_BETA_MAX_CYCLE_SESSIONS", 10)
 
 
@@ -119,7 +119,9 @@ def _rt_epoch_seconds(value: Any) -> int:
         return 0
 
 
-# AO61A_HF2B_REALTIME_GRACE_RESUME_QUOTA
+# AO61A_HF2B_HF1_REALTIME_GRACE_RESUME_RUNTIME_DECISION_FIX
+# Ensures quota evaluation is logged before any 429, zero-duration sessions consume 0,
+# and grace resume decisions are evaluated before cooldown denial.
 def _rt_session_started_ended(rs: Any) -> tuple[int, int]:
     """Return normalized (started_at, ended_at) epoch seconds for a RealtimeSession."""
     return (
@@ -145,15 +147,16 @@ def _rt_eval_public_beta_quota(
     grace_seconds: int,
     max_cycle_sessions: int = 10,
 ) -> Dict[str, Any]:
-    """Evaluate public-beta Realtime timebox with a small grace-resume window.
+    """Evaluate public-beta Realtime timebox with grace-resume.
 
-    Product rule for AO61A-HF2B:
-    - Public users still have at most max_seconds of voice before cooldown.
-    - If they disconnect early and reconnect within grace_seconds, they may resume
-      the remaining quota from the current contiguous cycle.
-    - If they disconnect and do not return within the grace window, cooldown starts
-      from the last ended_at, preserving cost governance and avoiding infinite resets.
-    - No schema change: consumption is inferred from recent realtime_sessions.
+    AO61A-HF2B-HF1 rules:
+    - Realtime rows with started_at == ended_at are treated as zero-duration/fail-fast rows.
+      They do not consume quota and do not start cooldown by themselves.
+    - Active session protection is preserved.
+    - Ended sessions with real duration are aggregated into a contiguous cycle.
+    - If remaining_seconds > 0 and the latest effective session ended within grace_seconds,
+      allow_resume wins before cooldown.
+    - If the grace window expired, cooldown is valid and explicit.
     """
     max_seconds = max(1, int(max_seconds or 1))
     cooldown_seconds = max(1, int(cooldown_seconds or 1))
@@ -161,15 +164,20 @@ def _rt_eval_public_beta_quota(
     max_cycle_sessions = max(1, int(max_cycle_sessions or 10))
     now_int = _rt_epoch_seconds(now_int) or 0
 
+    base = {
+        "decision": "allow_new",
+        "remaining_seconds": max_seconds,
+        "consumed_seconds": 0,
+        "retry_after": 0,
+        "cooldown_anchor": 0,
+        "cycle_session_ids": [],
+        "within_grace": False,
+        "grace_remaining_seconds": 0,
+        "skipped_zero_duration_session_ids": [],
+    }
+
     if not sessions:
-        return {
-            "decision": "allow_new",
-            "remaining_seconds": max_seconds,
-            "consumed_seconds": 0,
-            "retry_after": 0,
-            "cooldown_anchor": 0,
-            "cycle_session_ids": [],
-        }
+        return dict(base)
 
     latest = sessions[0]
     latest_started, latest_ended = _rt_session_started_ended(latest)
@@ -179,11 +187,11 @@ def _rt_eval_public_beta_quota(
         active_elapsed = max(0, now_int - latest_started)
         if active_elapsed < max_seconds:
             return {
+                **base,
                 "decision": "active_session",
                 "remaining_seconds": max(0, max_seconds - active_elapsed),
                 "consumed_seconds": active_elapsed,
                 "retry_after": max(1, max_seconds - active_elapsed),
-                "cooldown_anchor": 0,
                 "session_id": getattr(latest, "id", None),
                 "cycle_session_ids": [getattr(latest, "id", None)],
             }
@@ -192,6 +200,7 @@ def _rt_eval_public_beta_quota(
         retry_after = cooldown_seconds - max(0, now_int - cooldown_anchor)
         if retry_after > 0:
             return {
+                **base,
                 "decision": "cooldown",
                 "remaining_seconds": 0,
                 "consumed_seconds": max_seconds,
@@ -201,42 +210,53 @@ def _rt_eval_public_beta_quota(
                 "cycle_session_ids": [getattr(latest, "id", None)],
             }
 
+        return dict(base)
+
+    # Ignore zero-duration / failed rows for quota and cooldown anchoring.
+    # They can happen when a session row is created and immediately closed by browser/WebRTC/start failure.
+    effective_sessions: List[Any] = []
+    skipped_zero_duration_session_ids: List[Any] = []
+    for rs in sessions:
+        started_at, ended_at = _rt_session_started_ended(rs)
+        if started_at <= 0:
+            continue
+        if ended_at <= 0:
+            # Older active/orphaned rows should not anchor cooldown for a new latest ended session.
+            continue
+        if ended_at < started_at:
+            continue
+        consumed = _rt_session_consumed_seconds(rs, max_seconds)
+        if ended_at == started_at or consumed <= 0:
+            skipped_zero_duration_session_ids.append(getattr(rs, "id", None))
+            continue
+        effective_sessions.append(rs)
+
+    if not effective_sessions:
         return {
-            "decision": "allow_new",
-            "remaining_seconds": max_seconds,
-            "consumed_seconds": 0,
-            "retry_after": 0,
-            "cooldown_anchor": 0,
-            "cycle_session_ids": [],
+            **base,
+            "skipped_zero_duration_session_ids": skipped_zero_duration_session_ids,
         }
 
-    if latest_started <= 0 or latest_ended <= 0:
-        return {
-            "decision": "allow_new",
-            "remaining_seconds": max_seconds,
-            "consumed_seconds": 0,
-            "retry_after": 0,
-            "cooldown_anchor": 0,
-            "cycle_session_ids": [],
-        }
+    latest_effective = effective_sessions[0]
+    latest_effective_started, latest_effective_ended = _rt_session_started_ended(latest_effective)
 
-    # Build a contiguous resume cycle from newest to older sessions.
-    # Older sessions are part of the same cycle only if the next session started
+    # Build a contiguous resume cycle from newest effective session to older effective sessions.
+    # Older sessions are part of the same cycle only if the newer session started
     # within grace_seconds after the older one ended.
-    cycle = []
-    for idx, rs in enumerate(sessions):
+    cycle: List[Any] = []
+    for idx, rs in enumerate(effective_sessions):
         if len(cycle) >= max_cycle_sessions:
             break
 
         started_at, ended_at = _rt_session_started_ended(rs)
-        if started_at <= 0 or ended_at <= 0 or ended_at < started_at:
-            break
+        if started_at <= 0 or ended_at <= started_at:
+            continue
 
         if idx == 0:
             cycle.append(rs)
             continue
 
-        newer_started, _newer_ended = _rt_session_started_ended(sessions[idx - 1])
+        newer_started, _newer_ended = _rt_session_started_ended(effective_sessions[idx - 1])
         gap = max(0, newer_started - ended_at)
         if gap <= grace_seconds:
             cycle.append(rs)
@@ -246,44 +266,47 @@ def _rt_eval_public_beta_quota(
     consumed_seconds = sum(_rt_session_consumed_seconds(rs, max_seconds) for rs in cycle)
     consumed_seconds = max(0, min(max_seconds, consumed_seconds))
     remaining_seconds = max(0, max_seconds - consumed_seconds)
-    since_latest_end = max(0, now_int - latest_ended)
+    since_latest_end = max(0, now_int - latest_effective_ended)
+    within_grace = since_latest_end <= grace_seconds
+    grace_remaining_seconds = max(0, grace_seconds - since_latest_end)
     cycle_session_ids = [getattr(rs, "id", None) for rs in cycle]
 
-    if remaining_seconds > 0 and since_latest_end <= grace_seconds:
+    # Critical order: if there is real remaining quota and the user returned inside grace,
+    # allow_resume must win before cooldown.
+    if remaining_seconds > 0 and within_grace:
         return {
+            **base,
             "decision": "allow_resume",
             "remaining_seconds": remaining_seconds,
             "consumed_seconds": consumed_seconds,
             "retry_after": 0,
             "cooldown_anchor": 0,
-            "session_id": getattr(latest, "id", None),
+            "session_id": getattr(latest_effective, "id", None),
             "cycle_session_ids": cycle_session_ids,
-            "grace_remaining_seconds": max(0, grace_seconds - since_latest_end),
+            "within_grace": True,
+            "grace_remaining_seconds": grace_remaining_seconds,
+            "skipped_zero_duration_session_ids": skipped_zero_duration_session_ids,
         }
 
-    # If the user did not return inside grace, or fully consumed the cycle,
-    # cooldown anchors to latest ended_at.
-    cooldown_anchor = latest_ended
+    # If quota is exhausted, or the user did not return inside grace, cooldown is valid.
+    cooldown_anchor = latest_effective_ended
     retry_after = cooldown_seconds - max(0, now_int - cooldown_anchor)
     if retry_after > 0:
         return {
+            **base,
             "decision": "cooldown",
             "remaining_seconds": remaining_seconds,
             "consumed_seconds": consumed_seconds,
             "retry_after": max(1, retry_after),
             "cooldown_anchor": cooldown_anchor,
-            "session_id": getattr(latest, "id", None),
+            "session_id": getattr(latest_effective, "id", None),
             "cycle_session_ids": cycle_session_ids,
+            "within_grace": within_grace,
+            "grace_remaining_seconds": grace_remaining_seconds,
+            "skipped_zero_duration_session_ids": skipped_zero_duration_session_ids,
         }
 
-    return {
-        "decision": "allow_new",
-        "remaining_seconds": max_seconds,
-        "consumed_seconds": 0,
-        "retry_after": 0,
-        "cooldown_anchor": 0,
-        "cycle_session_ids": [],
-    }
+    return dict(base)
 
 
 # ORKIO_AO60B_HF1_REALTIME_DEPENDENCY_CONTRACT
@@ -747,6 +770,7 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
                 max_seconds=REALTIME_PUBLIC_BETA_MAX_SECONDS,
                 cooldown_seconds=REALTIME_PUBLIC_BETA_COOLDOWN_SECONDS,
                 grace_seconds=REALTIME_PUBLIC_BETA_GRACE_RESUME_SECONDS,
+                max_cycle_sessions=REALTIME_PUBLIC_BETA_MAX_CYCLE_SESSIONS,
             )
             decision = str(quota_eval.get("decision") or "allow_new")
             retry_after = int(quota_eval.get("retry_after") or 0)
@@ -758,8 +782,8 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
             last_ended = _rt_epoch_seconds(getattr(last_rs, "ended_at", None)) if last_rs is not None else 0
 
             try:
-                logger.info(
-                    "REALTIME_QUOTA_EVAL user_id=%s decision=%s session_id=%s started_at=%s ended_at=%s normalized_started_at=%s normalized_ended_at=%s consumed_seconds=%s remaining_seconds=%s grace_seconds=%s retry_after=%s cycle_session_ids=%s",
+                logger.warning(
+                    "REALTIME_QUOTA_EVAL user_id=%s decision=%s session_id=%s started_at=%s ended_at=%s normalized_started_at=%s normalized_ended_at=%s consumed_seconds=%s remaining_seconds=%s grace_seconds=%s within_grace=%s grace_remaining_seconds=%s retry_after=%s cycle_session_ids=%s skipped_zero_duration_session_ids=%s",
                     uid,
                     decision,
                     getattr(last_rs, "id", None),
@@ -770,8 +794,11 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
                     timebox_consumed_seconds,
                     timebox_remaining_seconds,
                     REALTIME_PUBLIC_BETA_GRACE_RESUME_SECONDS,
+                    bool(quota_eval.get("within_grace")),
+                    int(quota_eval.get("grace_remaining_seconds") or 0),
                     retry_after,
                     ",".join([str(x) for x in timebox_cycle_session_ids if x]),
+                    ",".join([str(x) for x in (quota_eval.get("skipped_zero_duration_session_ids") or []) if x]),
                 )
             except Exception:
                 pass
@@ -1005,6 +1032,7 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
                 "resume_allowed": bool(timebox_resume_allowed) if public_beta_orkio_only else False,
                 "grace_resume_seconds": REALTIME_PUBLIC_BETA_GRACE_RESUME_SECONDS if public_beta_orkio_only else None,
                 "cooldown_seconds": REALTIME_PUBLIC_BETA_COOLDOWN_SECONDS if public_beta_orkio_only else None,
+                "quota_eval_marker": "AO61A_HF2B_HF1_REALTIME_GRACE_RESUME_RUNTIME_DECISION_FIX" if public_beta_orkio_only else None,
                 "bypass": "admin" if is_realtime_admin else None,
             },
         }
