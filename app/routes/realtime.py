@@ -52,6 +52,8 @@ def _rt_positive_int_env(name: str, default: int) -> int:
 # Default policy is now 120s session + 600s cooldown; production can still override via env.
 REALTIME_PUBLIC_BETA_MAX_SECONDS = _rt_positive_int_env("ORKIO_REALTIME_PUBLIC_BETA_MAX_SECONDS", 120)
 REALTIME_PUBLIC_BETA_COOLDOWN_SECONDS = _rt_positive_int_env("ORKIO_REALTIME_PUBLIC_BETA_COOLDOWN_SECONDS", 600)
+REALTIME_PUBLIC_BETA_GRACE_RESUME_SECONDS = _rt_positive_int_env("ORKIO_REALTIME_PUBLIC_BETA_GRACE_RESUME_SECONDS", 60)
+REALTIME_PUBLIC_BETA_MAX_CYCLE_SESSIONS = _rt_positive_int_env("ORKIO_REALTIME_PUBLIC_BETA_MAX_CYCLE_SESSIONS", 10)
 
 
 def _rt_is_realtime_admin(user: Any, db_user: Any = None) -> bool:
@@ -115,6 +117,174 @@ def _rt_epoch_seconds(value: Any) -> int:
         return max(0, int(number))
     except Exception:
         return 0
+
+
+# AO61A_HF2B_REALTIME_GRACE_RESUME_QUOTA
+def _rt_session_started_ended(rs: Any) -> tuple[int, int]:
+    """Return normalized (started_at, ended_at) epoch seconds for a RealtimeSession."""
+    return (
+        _rt_epoch_seconds(getattr(rs, "started_at", None)),
+        _rt_epoch_seconds(getattr(rs, "ended_at", None)),
+    )
+
+
+def _rt_session_consumed_seconds(rs: Any, max_seconds: int) -> int:
+    """Bound one session's consumed seconds to avoid bad rows inflating quota math."""
+    started_at, ended_at = _rt_session_started_ended(rs)
+    if started_at <= 0 or ended_at <= 0 or ended_at < started_at:
+        return 0
+    return max(0, min(int(max_seconds or 0), ended_at - started_at))
+
+
+def _rt_eval_public_beta_quota(
+    sessions: List[Any],
+    *,
+    now_int: int,
+    max_seconds: int,
+    cooldown_seconds: int,
+    grace_seconds: int,
+    max_cycle_sessions: int = 10,
+) -> Dict[str, Any]:
+    """Evaluate public-beta Realtime timebox with a small grace-resume window.
+
+    Product rule for AO61A-HF2B:
+    - Public users still have at most max_seconds of voice before cooldown.
+    - If they disconnect early and reconnect within grace_seconds, they may resume
+      the remaining quota from the current contiguous cycle.
+    - If they disconnect and do not return within the grace window, cooldown starts
+      from the last ended_at, preserving cost governance and avoiding infinite resets.
+    - No schema change: consumption is inferred from recent realtime_sessions.
+    """
+    max_seconds = max(1, int(max_seconds or 1))
+    cooldown_seconds = max(1, int(cooldown_seconds or 1))
+    grace_seconds = max(1, int(grace_seconds or 1))
+    max_cycle_sessions = max(1, int(max_cycle_sessions or 10))
+    now_int = _rt_epoch_seconds(now_int) or 0
+
+    if not sessions:
+        return {
+            "decision": "allow_new",
+            "remaining_seconds": max_seconds,
+            "consumed_seconds": 0,
+            "retry_after": 0,
+            "cooldown_anchor": 0,
+            "cycle_session_ids": [],
+        }
+
+    latest = sessions[0]
+    latest_started, latest_ended = _rt_session_started_ended(latest)
+
+    # Active or orphaned latest session: preserve the existing active-session guard.
+    if latest_started > 0 and latest_ended <= 0:
+        active_elapsed = max(0, now_int - latest_started)
+        if active_elapsed < max_seconds:
+            return {
+                "decision": "active_session",
+                "remaining_seconds": max(0, max_seconds - active_elapsed),
+                "consumed_seconds": active_elapsed,
+                "retry_after": max(1, max_seconds - active_elapsed),
+                "cooldown_anchor": 0,
+                "session_id": getattr(latest, "id", None),
+                "cycle_session_ids": [getattr(latest, "id", None)],
+            }
+
+        cooldown_anchor = latest_started + max_seconds
+        retry_after = cooldown_seconds - max(0, now_int - cooldown_anchor)
+        if retry_after > 0:
+            return {
+                "decision": "cooldown",
+                "remaining_seconds": 0,
+                "consumed_seconds": max_seconds,
+                "retry_after": max(1, retry_after),
+                "cooldown_anchor": cooldown_anchor,
+                "session_id": getattr(latest, "id", None),
+                "cycle_session_ids": [getattr(latest, "id", None)],
+            }
+
+        return {
+            "decision": "allow_new",
+            "remaining_seconds": max_seconds,
+            "consumed_seconds": 0,
+            "retry_after": 0,
+            "cooldown_anchor": 0,
+            "cycle_session_ids": [],
+        }
+
+    if latest_started <= 0 or latest_ended <= 0:
+        return {
+            "decision": "allow_new",
+            "remaining_seconds": max_seconds,
+            "consumed_seconds": 0,
+            "retry_after": 0,
+            "cooldown_anchor": 0,
+            "cycle_session_ids": [],
+        }
+
+    # Build a contiguous resume cycle from newest to older sessions.
+    # Older sessions are part of the same cycle only if the next session started
+    # within grace_seconds after the older one ended.
+    cycle = []
+    for idx, rs in enumerate(sessions):
+        if len(cycle) >= max_cycle_sessions:
+            break
+
+        started_at, ended_at = _rt_session_started_ended(rs)
+        if started_at <= 0 or ended_at <= 0 or ended_at < started_at:
+            break
+
+        if idx == 0:
+            cycle.append(rs)
+            continue
+
+        newer_started, _newer_ended = _rt_session_started_ended(sessions[idx - 1])
+        gap = max(0, newer_started - ended_at)
+        if gap <= grace_seconds:
+            cycle.append(rs)
+        else:
+            break
+
+    consumed_seconds = sum(_rt_session_consumed_seconds(rs, max_seconds) for rs in cycle)
+    consumed_seconds = max(0, min(max_seconds, consumed_seconds))
+    remaining_seconds = max(0, max_seconds - consumed_seconds)
+    since_latest_end = max(0, now_int - latest_ended)
+    cycle_session_ids = [getattr(rs, "id", None) for rs in cycle]
+
+    if remaining_seconds > 0 and since_latest_end <= grace_seconds:
+        return {
+            "decision": "allow_resume",
+            "remaining_seconds": remaining_seconds,
+            "consumed_seconds": consumed_seconds,
+            "retry_after": 0,
+            "cooldown_anchor": 0,
+            "session_id": getattr(latest, "id", None),
+            "cycle_session_ids": cycle_session_ids,
+            "grace_remaining_seconds": max(0, grace_seconds - since_latest_end),
+        }
+
+    # If the user did not return inside grace, or fully consumed the cycle,
+    # cooldown anchors to latest ended_at.
+    cooldown_anchor = latest_ended
+    retry_after = cooldown_seconds - max(0, now_int - cooldown_anchor)
+    if retry_after > 0:
+        return {
+            "decision": "cooldown",
+            "remaining_seconds": remaining_seconds,
+            "consumed_seconds": consumed_seconds,
+            "retry_after": max(1, retry_after),
+            "cooldown_anchor": cooldown_anchor,
+            "session_id": getattr(latest, "id", None),
+            "cycle_session_ids": cycle_session_ids,
+        }
+
+    return {
+        "decision": "allow_new",
+        "remaining_seconds": max_seconds,
+        "consumed_seconds": 0,
+        "retry_after": 0,
+        "cooldown_anchor": 0,
+        "cycle_session_ids": [],
+    }
+
 
 # ORKIO_AO60B_HF1_REALTIME_DEPENDENCY_CONTRACT
 REALTIME_ROUTER_REQUIRED_DEPS = (
@@ -550,67 +720,102 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
         )
 
         # ORKIO_AO60I_REALTIME_TIMEBOX_COOLDOWN_GUARD
+        # AO61A-HF2B: public-beta users keep a small grace-resume window if they
+        # disconnect before consuming the full Realtime quota. This remains
+        # backend-only and schema-free by inferring consumption from recent rows.
         effective_ttl_seconds = int(body.ttl_seconds or REALTIME_PUBLIC_BETA_MAX_SECONDS)
+        timebox_remaining_seconds = None
+        timebox_consumed_seconds = None
+        timebox_resume_allowed = False
+        timebox_cycle_session_ids: List[Any] = []
         if public_beta_orkio_only:
             effective_ttl_seconds = min(effective_ttl_seconds, REALTIME_PUBLIC_BETA_MAX_SECONDS)
             now_int = _rt_epoch_seconds(now_ts())
-            last_rs = db.execute(
+            recent_rs = db.execute(
                 select(RealtimeSession)
                 .where(
                     RealtimeSession.org_slug == org,
                     RealtimeSession.user_id == uid,
                 )
                 .order_by(RealtimeSession.started_at.desc())
-                .limit(1)
-            ).scalar_one_or_none()
+                .limit(20)
+            ).scalars().all()
 
-            if last_rs is not None:
-                # AO60K-HF4: normalize DB timestamps before cooldown math.
-                # Older rows can have ended_at in milliseconds from browser Date.now().
-                last_started = _rt_epoch_seconds(getattr(last_rs, "started_at", None))
-                last_ended = _rt_epoch_seconds(getattr(last_rs, "ended_at", None))
+            quota_eval = _rt_eval_public_beta_quota(
+                recent_rs,
+                now_int=now_int,
+                max_seconds=REALTIME_PUBLIC_BETA_MAX_SECONDS,
+                cooldown_seconds=REALTIME_PUBLIC_BETA_COOLDOWN_SECONDS,
+                grace_seconds=REALTIME_PUBLIC_BETA_GRACE_RESUME_SECONDS,
+            )
+            decision = str(quota_eval.get("decision") or "allow_new")
+            retry_after = int(quota_eval.get("retry_after") or 0)
+            timebox_remaining_seconds = int(quota_eval.get("remaining_seconds") or REALTIME_PUBLIC_BETA_MAX_SECONDS)
+            timebox_consumed_seconds = int(quota_eval.get("consumed_seconds") or 0)
+            timebox_cycle_session_ids = list(quota_eval.get("cycle_session_ids") or [])
+            last_rs = recent_rs[0] if recent_rs else None
+            last_started = _rt_epoch_seconds(getattr(last_rs, "started_at", None)) if last_rs is not None else 0
+            last_ended = _rt_epoch_seconds(getattr(last_rs, "ended_at", None)) if last_rs is not None else 0
 
-                cooldown_anchor = 0
-                if last_ended > 0:
-                    cooldown_anchor = last_ended
-                elif last_started > 0:
-                    active_elapsed = max(0, now_int - last_started)
-                    if active_elapsed < REALTIME_PUBLIC_BETA_MAX_SECONDS:
-                        # AO60K_HF3_BACKEND_REALTIME_429_OBSERVABILITY
-                        # Observability only: no behavior change. Logs why /api/realtime/start returned 429.
-                        logger.warning(
-                            "REALTIME_START_DENIED reason=active_session user_id=%s session_id=%s started_at=%s ended_at=%s normalized_started_at=%s normalized_ended_at=%s active_elapsed=%s retry_after=%s",
-                            uid,
-                            getattr(last_rs, "id", None),
-                            getattr(last_rs, "started_at", None),
-                            getattr(last_rs, "ended_at", None),
-                            last_started,
-                            last_ended,
-                            active_elapsed,
-                            REALTIME_PUBLIC_BETA_MAX_SECONDS - active_elapsed,
-                        )
-                        raise _rt_http_cooldown(
-                            REALTIME_PUBLIC_BETA_MAX_SECONDS - active_elapsed,
-                            "Já existe uma sessão de voz em tempo real ativa. Aguarde alguns segundos ou continue por texto.",
-                        )
-                    cooldown_anchor = last_started + REALTIME_PUBLIC_BETA_MAX_SECONDS
+            try:
+                logger.info(
+                    "REALTIME_QUOTA_EVAL user_id=%s decision=%s session_id=%s started_at=%s ended_at=%s normalized_started_at=%s normalized_ended_at=%s consumed_seconds=%s remaining_seconds=%s grace_seconds=%s retry_after=%s cycle_session_ids=%s",
+                    uid,
+                    decision,
+                    getattr(last_rs, "id", None),
+                    getattr(last_rs, "started_at", None),
+                    getattr(last_rs, "ended_at", None),
+                    last_started,
+                    last_ended,
+                    timebox_consumed_seconds,
+                    timebox_remaining_seconds,
+                    REALTIME_PUBLIC_BETA_GRACE_RESUME_SECONDS,
+                    retry_after,
+                    ",".join([str(x) for x in timebox_cycle_session_ids if x]),
+                )
+            except Exception:
+                pass
 
-                if cooldown_anchor > 0:
-                    retry_after = REALTIME_PUBLIC_BETA_COOLDOWN_SECONDS - max(0, now_int - cooldown_anchor)
-                    if retry_after > 0:
-                        # AO60K_HF3_BACKEND_REALTIME_429_OBSERVABILITY
-                        # Observability only: no behavior change. Logs why /api/realtime/start returned 429.
-                        logger.warning(
-                            "REALTIME_START_DENIED reason=cooldown user_id=%s session_id=%s started_at=%s ended_at=%s normalized_started_at=%s normalized_ended_at=%s retry_after=%s",
-                            uid,
-                            getattr(last_rs, "id", None),
-                            getattr(last_rs, "started_at", None),
-                            getattr(last_rs, "ended_at", None),
-                            last_started,
-                            last_ended,
-                            retry_after,
-                        )
-                        raise _rt_http_cooldown(retry_after)
+            if decision == "active_session":
+                logger.warning(
+                    "REALTIME_START_DENIED reason=active_session user_id=%s session_id=%s started_at=%s ended_at=%s normalized_started_at=%s normalized_ended_at=%s active_elapsed=%s retry_after=%s",
+                    uid,
+                    getattr(last_rs, "id", None),
+                    getattr(last_rs, "started_at", None),
+                    getattr(last_rs, "ended_at", None),
+                    last_started,
+                    last_ended,
+                    timebox_consumed_seconds,
+                    retry_after,
+                )
+                raise _rt_http_cooldown(
+                    retry_after or timebox_remaining_seconds,
+                    "Já existe uma sessão de voz em tempo real ativa. Aguarde alguns segundos ou continue por texto.",
+                )
+
+            if decision == "cooldown" and retry_after > 0:
+                logger.warning(
+                    "REALTIME_START_DENIED reason=cooldown user_id=%s session_id=%s started_at=%s ended_at=%s normalized_started_at=%s normalized_ended_at=%s consumed_seconds=%s remaining_seconds=%s retry_after=%s",
+                    uid,
+                    getattr(last_rs, "id", None),
+                    getattr(last_rs, "started_at", None),
+                    getattr(last_rs, "ended_at", None),
+                    last_started,
+                    last_ended,
+                    timebox_consumed_seconds,
+                    timebox_remaining_seconds,
+                    retry_after,
+                )
+                raise _rt_http_cooldown(retry_after)
+
+            if decision == "allow_resume":
+                timebox_resume_allowed = True
+                effective_ttl_seconds = max(1, min(effective_ttl_seconds, timebox_remaining_seconds))
+            else:
+                # Fresh cycle after cooldown expiry, no previous rows, or admin-equivalent reset.
+                timebox_remaining_seconds = REALTIME_PUBLIC_BETA_MAX_SECONDS
+                timebox_consumed_seconds = 0
+                effective_ttl_seconds = min(effective_ttl_seconds, REALTIME_PUBLIC_BETA_MAX_SECONDS)
 
         # Resolve thread
         tid = body.thread_id
@@ -704,6 +909,11 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
                     "timebox_policy": "public_beta_env_timebox_cooldown" if public_beta_orkio_only else "admin_bypass",
                     "timebox_max_seconds": REALTIME_PUBLIC_BETA_MAX_SECONDS if public_beta_orkio_only else None,
                     "cooldown_seconds": REALTIME_PUBLIC_BETA_COOLDOWN_SECONDS if public_beta_orkio_only else None,
+                    "grace_resume_seconds": REALTIME_PUBLIC_BETA_GRACE_RESUME_SECONDS if public_beta_orkio_only else None,
+                    "timebox_remaining_seconds": timebox_remaining_seconds if public_beta_orkio_only else None,
+                    "timebox_consumed_seconds": timebox_consumed_seconds if public_beta_orkio_only else None,
+                    "timebox_resume_allowed": bool(timebox_resume_allowed) if public_beta_orkio_only else False,
+                    "timebox_cycle_session_ids": timebox_cycle_session_ids if public_beta_orkio_only else [],
                     "requested_agent_id": str(requested_agent_id or ""),
                     "resolved_agent_id": str(agent_id or ""),
                     "resolved_agent_name": agent_name or "Orkio",
@@ -786,7 +996,14 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
             "summit_config": summit_cfg,
             "timebox": {
                 "limited": bool(public_beta_orkio_only),
-                "max_seconds": REALTIME_PUBLIC_BETA_MAX_SECONDS if public_beta_orkio_only else None,
+                # max_seconds is the active session budget returned to the client.
+                # On grace resume this equals the remaining quota, not the full policy cap.
+                "max_seconds": effective_ttl_seconds if public_beta_orkio_only else None,
+                "policy_max_seconds": REALTIME_PUBLIC_BETA_MAX_SECONDS if public_beta_orkio_only else None,
+                "remaining_seconds": timebox_remaining_seconds if public_beta_orkio_only else None,
+                "consumed_seconds": timebox_consumed_seconds if public_beta_orkio_only else None,
+                "resume_allowed": bool(timebox_resume_allowed) if public_beta_orkio_only else False,
+                "grace_resume_seconds": REALTIME_PUBLIC_BETA_GRACE_RESUME_SECONDS if public_beta_orkio_only else None,
                 "cooldown_seconds": REALTIME_PUBLIC_BETA_COOLDOWN_SECONDS if public_beta_orkio_only else None,
                 "bypass": "admin" if is_realtime_admin else None,
             },
