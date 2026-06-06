@@ -56,6 +56,10 @@ from .runtime.public_orkio_policy import (
     build_public_orkio_stream_payload,
     append_orkio_ceo_scope_overlay,
 )
+from .runtime.realtime_unlock_journey import (
+    build_realtime_unlock_journey_decision,
+    decorate_orkio_policy_decision_with_realtime_unlock,
+)
 from .runtime.public_chris_policy import (
     build_public_chris_policy_decision,
     build_public_chris_stream_payload,
@@ -39395,13 +39399,26 @@ async def chat_stream(
         # Public Orkio CEO/product behavior lives in app.runtime.public_orkio_policy.
         # Keep this hook small: decide -> persist -> emit.
         try:
-            _public_orkio_decision = build_public_orkio_policy_decision(
+            _public_orkio_decision = build_realtime_unlock_journey_decision(
                 message,
                 visible_agent=getattr(inp, "visible_agent", None),
                 target_agent_slug=getattr(inp, "target_agent_slug", None),
                 dest_mode=getattr(inp, "dest_mode", None),
                 route_plan=route_plan if isinstance(route_plan, dict) else None,
             )
+            if not (isinstance(_public_orkio_decision, dict) and _public_orkio_decision.get("handled")):
+                _public_orkio_decision = build_public_orkio_policy_decision(
+                    message,
+                    visible_agent=getattr(inp, "visible_agent", None),
+                    target_agent_slug=getattr(inp, "target_agent_slug", None),
+                    dest_mode=getattr(inp, "dest_mode", None),
+                    route_plan=route_plan if isinstance(route_plan, dict) else None,
+                )
+                _public_orkio_decision = decorate_orkio_policy_decision_with_realtime_unlock(
+                    _public_orkio_decision,
+                    message,
+                    visible_agent=getattr(inp, "visible_agent", None),
+                )
         except Exception:
             _public_orkio_decision = {"handled": False, "reason": "policy_exception"}
 
