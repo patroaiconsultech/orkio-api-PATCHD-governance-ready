@@ -59,6 +59,7 @@ from .runtime.public_orkio_policy import (
 from .runtime.realtime_unlock_journey import (
     build_realtime_unlock_journey_decision,
     decorate_orkio_policy_decision_with_realtime_unlock,
+    is_realtime_unlock_conversational_context,
 )
 from .runtime.public_chris_policy import (
     build_public_chris_policy_decision,
@@ -42269,6 +42270,7 @@ async def chat_stream(
             route_plan.get("resolved_agent") == "Orkio"
             and route_plan.get("technical_scope")
             and not route_plan.get("proposal_scope")
+            and not is_realtime_unlock_conversational_context(message)
             and not _is_internal_warroom_governed_artifact_request(message)
             and not _is_internal_warroom_governed_execution_request(message)
         ):
