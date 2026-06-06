@@ -32,6 +32,11 @@ from app.runtime.realtime_support import (
     normalize_realtime_voice,
 )
 
+from app.runtime.realtime_session_builder import (
+    build_openai_realtime_client_secret_payload,
+    realtime_session_debug_snapshot,
+)
+
 
 class RealtimeEventsBatchReq(BaseModel):
     session_id: str
@@ -629,12 +634,6 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
         # Normalize to supported voices to avoid Realtime mint failures
         voice = normalize_realtime_voice(voice_raw, default=os.getenv("OPENAI_REALTIME_VOICE_DEFAULT", "cedar"))
         resolved_language = resolve_stt_language(summit_cfg.get("transcription_language"))
-        auto_response_enabled = str(
-            os.getenv(
-                "OPENAI_REALTIME_AUTO_RESPONSE_ENABLED",
-                os.getenv("REALTIME_AUTO_RESPONSE_ENABLED", "false"),
-            )
-        ).strip().lower() not in {"0", "false", "no", "off"}
 
         summit_runtime = bool(
             mode == "summit"
@@ -642,7 +641,6 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
             or os.getenv("SUMMIT_MODE", "false").strip().lower() in {"1", "true", "yes", "on"}
             or os.getenv("ORKIO_RUNTIME_MODE", "").strip().lower() == "summit"
         )
-        resolved_create_response = False if summit_runtime else bool(auto_response_enabled)
 
         if summit_runtime:
             resolved_language = resolve_stt_language(summit_cfg.get("transcription_language") or language_profile or os.getenv("SUMMIT_DEFAULT_LANGUAGE", "pt")) or "pt"
@@ -651,29 +649,24 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
             else:
                 instructions = "Responder sempre em português do Brasil."
 
-        session_cfg: Dict[str, Any] = {
-            "type": "realtime",
-            "model": body.model,
-            "audio": {
-                "output": {"voice": voice},
-                # Let the server detect turns for lowest-latency voice UX
-                "input": {
-                    "turn_detection": {"type": "server_vad", "create_response": resolved_create_response},
-                    # Optional transcription for UI captions / logs
-                    "transcription": {
-                        **({"language": resolved_language} if resolved_language else {}),
-                        "model": os.getenv("OPENAI_REALTIME_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe"),
-                    },
-                },
-            },
-        }
-        if instructions:
-            session_cfg["instructions"] = instructions
+        # AO66R-HF5: Realtime payload is now built outside the route.
+        # Root cause fixed here: server_vad.create_response must be True for voice-to-voice.
+        payload = build_openai_realtime_client_secret_payload(
+            ttl_seconds=body.ttl_seconds,
+            model=body.model,
+            voice=voice,
+            instructions=instructions,
+            resolved_language=resolved_language,
+            summit_runtime=summit_runtime,
+        )
 
-        payload = {
-            "expires_after": {"anchor": "created_at", "seconds": body.ttl_seconds},
-            "session": session_cfg,
-        }
+        try:
+            logger.warning(
+                "AO66R_HF5_REALTIME_SESSION_CONFIG %s",
+                json.dumps(realtime_session_debug_snapshot(payload), ensure_ascii=False, sort_keys=True),
+            )
+        except Exception:
+            pass
 
         # Prefer SDK (if present), fallback to direct REST call.
         try:
@@ -1569,3 +1562,4 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
 
 
     return router
+
