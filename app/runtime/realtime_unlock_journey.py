@@ -27,7 +27,7 @@ import unicodedata
 from typing import Any, Dict, Optional
 
 
-AO67A_REALTIME_UNLOCK_VERSION = "AO67A-HF2_REALTIME_UNLOCK_PRECEDENCE"
+AO67A_REALTIME_UNLOCK_VERSION = "AO68A-HF1_CONVERSATIONAL_PROTECTION_LAYER"
 
 
 def _norm(value: Any) -> str:
@@ -259,6 +259,140 @@ def build_realtime_unlock_explanation() -> str:
     )
 
 
+def is_realtime_unlock_conversational_context(message: Any) -> bool:
+    """Return True when the user is negotiating a natural voice/realtime journey.
+
+    This is the AO68A protection layer. It prevents technical-audit templates
+    from hijacking normal user phrases that contain words like "realtime",
+    "abrir", "simular", "2 minutos" or "tempo real".
+
+    It is deliberately narrow: technical/audit/patch/github/deploy contexts
+    still remain available for AO20BC.
+    """
+
+    text = _norm(message)
+    if not text:
+        return False
+
+    hard_technical_terms = (
+        "patch",
+        "diff",
+        "arquivo completo",
+        "github",
+        "deploy",
+        "backend",
+        "frontend",
+        "main.py",
+        "appconsole",
+        "stack trace",
+        "logs",
+        "log do railway",
+        "erro 500",
+        "sse",
+        "router ao20",
+        "auditoria tecnica",
+        "auditoria técnica",
+        "war room",
+    )
+    if _contains_any(text, hard_technical_terms):
+        return False
+
+    voice_terms = (
+        "realtime",
+        "real time",
+        "tempo real",
+        "voz",
+        "audio",
+        "áudio",
+        "microfone",
+        "raiozinho",
+        "icone de voz",
+        "ícone de voz",
+        "2 minutos",
+        "dois minutos",
+    )
+    journey_terms = (
+        "simular",
+        "simulação",
+        "simulacao",
+        "conversa rapida",
+        "conversa rápida",
+        "conversarmos",
+        "conversar",
+        "abrir",
+        "abre",
+        "abrirá",
+        "abrira",
+        "liberar",
+        "libere",
+        "disponibilizar",
+        "disponibilize",
+        "apresenta a opcao",
+        "apresentar a opcao",
+        "apresenta a opção",
+        "apresentar a opção",
+        "vou dar",
+        "dar tres informacoes",
+        "dar três informações",
+        "tres informacoes",
+        "três informações",
+        "tres pontos",
+        "três pontos",
+    )
+    polite_request_terms = (
+        "por favor",
+        "poderia",
+        "pode",
+        "posso",
+        "ok",
+        "combinado",
+        "quando fizer sentido",
+    )
+
+    has_voice = _contains_any(text, voice_terms)
+    has_journey = _contains_any(text, journey_terms)
+    has_polite_request = _contains_any(text, polite_request_terms)
+
+    # Direct voice request.
+    if has_voice and (has_journey or has_polite_request):
+        return True
+
+    # Continuation after Orkio invited the user to provide context.
+    if has_journey and _contains_any(text, ("vou dar", "tres informacoes", "três informações", "tres pontos", "três pontos")):
+        return True
+
+    return False
+
+
+def _realtime_unlock_direct_answer(message: Any) -> str:
+    """Friendly Orkio response for direct Realtime journey requests."""
+
+    text = _norm(message)
+
+    if _contains_any(text, ("vou dar", "tres informacoes", "três informações", "tres pontos", "três pontos")):
+        return (
+            "Perfeito. Me envie essas três informações, uma por vez ou todas juntas.\n\n"
+            "Depois disso eu organizo rapidamente o contexto e te oriento a usar o ícone de voz para abrirmos uma conversa em tempo real. "
+            "Quando iniciar, teremos até 2 minutos para aproveitar bem esse momento e depois seguimos pelo chat com tudo preservado."
+        )
+
+    if _contains_any(text, ("disponibilizar", "disponibilize", "liberar", "libere", "abrir", "abre", "2 minutos", "dois minutos")):
+        return (
+            "Sim. Podemos usar uma conversa em tempo real como próximo passo.\n\n"
+            "Para funcionar bem, primeiro me dê um pouco de contexto por texto. Em seguida, clique no ícone de voz/raiozinho para iniciar. "
+            "Quando a sessão abrir, teremos até 2 minutos para absorver o máximo de informação possível; depois continuamos normalmente pelo chat."
+        )
+
+    if _contains_any(text, ("simular", "simulação", "simulacao")):
+        return (
+            "Claro. Vamos simular essa jornada.\n\n"
+            "Primeiro trocamos algumas mensagens por texto para eu entender o contexto. Depois eu te convido a usar o ícone de voz para uma conversa em tempo real. "
+            "Quando ela iniciar, teremos até 2 minutos para aproveitar bem a troca; ao final, seguimos pelo chat com o contexto organizado."
+        )
+
+    return build_realtime_unlock_explanation()
+
+
 def _is_direct_realtime_journey_question(message: Any) -> bool:
     text = _norm(message)
     if not text:
@@ -279,8 +413,7 @@ def _is_direct_realtime_journey_question(message: Any) -> bool:
         "recursos serao liberados",
         "recursos serão liberados",
     )
-    return _contains_any(text, direct_terms)
-
+    return _contains_any(text, direct_terms) or is_realtime_unlock_conversational_context(message)
 
 def build_realtime_unlock_journey_decision(
     message: Any,
@@ -304,7 +437,7 @@ def build_realtime_unlock_journey_decision(
         return {
             "handled": True,
             "reason": "ao67a_realtime_unlock_explanation",
-            "answer": build_realtime_unlock_explanation(),
+            "answer": _realtime_unlock_direct_answer(message),
             "agent_name": "Orkio",
             "visible_agent": "Orkio",
             "final_speaker": "Orkio",
@@ -405,3 +538,4 @@ def decorate_orkio_policy_decision_with_realtime_unlock(
     })
     decorated["runtime_hints"] = hints
     return decorated
+
