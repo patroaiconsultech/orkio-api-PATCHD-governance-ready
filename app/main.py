@@ -7022,11 +7022,32 @@ def _ao20bc_resolve_route(text: Any, requested_agent: Optional[str] = None, sour
 
     technical_markers = [
         "auditoria", "auditar", "readonly", "read only", "read-only", "war room",
-        "realtime", "voice", "voz", "sse", "stream", "runtime", "router",
+        "sse", "runtime", "router",
         "proposal builder", "proposal_only", "proposal only", "backend", "frontend",
         "guard", "events batch", "events:batch", "orquestracao", "orquestracao real",
         "orquestracao", "orquestracao", "execution graph", "child_execution_graphs",
         "ao20", "ao 20", "patch minimo", "patch minimo", "diff preview",
+    ]
+    # AO68A-HF2:
+    # "realtime", "voice", "voz" e "stream" tambem aparecem em pedidos naturais
+    # de conversa por voz. Esses termos nao devem, sozinhos, capturar o usuario
+    # para AUDITORIA FOCADA / AO20BC.
+    realtime_conversation_markers = [
+        "conversa rapida por voz", "conversa rápida por voz",
+        "conversar por voz", "falar por voz", "abrir voz",
+        "chamada de voz", "sessao de voz", "sessão de voz",
+        "conversa em tempo real", "voz em tempo real",
+        "dois minutos", "2 minutos", "ate dois minutos", "até dois minutos",
+        "simular a experiencia", "simular a experiência",
+        "experiencia de conversa natural", "experiência de conversa natural",
+        "transicao para voz", "transição para voz",
+    ]
+    technical_denial_markers = [
+        "nao preciso de auditoria", "não preciso de auditoria",
+        "sem auditoria tecnica", "sem auditoria técnica",
+        "nao quero auditoria", "não quero auditoria",
+        "nao preciso de analise tecnica", "não preciso de análise técnica",
+        "apenas quero simular", "quero simular a experiencia", "quero simular a experiência",
     ]
     orchestration_markers = [
         "orquestracao", "orquestrar", "child_execution_graphs", "dispatch_executed",
@@ -7044,9 +7065,18 @@ def _ao20bc_resolve_route(text: Any, requested_agent: Optional[str] = None, sour
     ]
 
     has_technical = any(m in raw for m in technical_markers)
+    has_realtime_conversation = any(m in raw for m in realtime_conversation_markers)
+    has_technical_denial = any(m in raw for m in technical_denial_markers)
     has_orchestration = any(m in raw for m in orchestration_markers)
     has_proposal = any(m in raw for m in proposal_markers)
     has_valuation = any(m in raw for m in valuation_markers)
+
+    # AO68A-HF2: conversa natural sobre voz/realtime tem precedencia sobre AO20BC.
+    # Mantem auditoria tecnica quando houver pedido tecnico real, mas libera a jornada
+    # quando o usuario explicitamente pede experiencia/conversa natural e nega auditoria.
+    if explicit_agent in (None, "Orkio") and has_realtime_conversation and has_technical_denial:
+        has_technical = False
+
     requested_patch_id = _ao20bc_requested_patch_id(text)
 
     blocked_routes: List[str] = []
@@ -47887,3 +47917,5 @@ def public_enterprise_lead(payload: PublicEnterpriseLeadIn, request: Request):
 
 
 # METATRON_APPEND_MATERIALIZE_FINAL_TEST: append_unique must materialize the complete app/main.py before guard validation.
+
+        
