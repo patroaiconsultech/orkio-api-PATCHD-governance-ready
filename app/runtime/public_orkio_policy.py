@@ -1,16 +1,12 @@
 # EFATAH777 — Public Orkio Policy
-# Small, isolated policy module for the public Orkio CEO experience.
+# AO65R: public routing repair for identity/factual questions.
 #
 # Purpose:
-# - Keep new public/product behavior out of app/main.py.
+# - Keep public/product behavior out of app/main.py.
 # - Make Orkio the stable public host for business/startup/platform conversations.
 # - Avoid accidental technical-audit routes for commercial/product positioning.
-# - Produce useful, contextual initial scopes and WhatsApp CTA for human follow-up.
-# - Preserve factual seed / direct-answer turns so memory tests can still return only OK.
-# - Respect short-answer turns so AMCHAM/public users get concise, premium answers when requested.
-# - Respect runtime feature flags for safer rollback by environment.
-#
-# This module has no database, FastAPI or runtime side effects.
+# - Avoid welcome/first-contact answers for factual questions.
+# - Preserve concise/direct answer behavior.
 
 from __future__ import annotations
 
@@ -25,8 +21,7 @@ from .runtime_feature_flags import (
     is_public_orkio_policy_enabled,
 )
 
-
-ORKIO_POLICY_VERSION = "PUBLIC_ORKIO_POLICY_V6_INTERNAL_AGENT_GATE_AO64D_HF2"
+ORKIO_POLICY_VERSION = "PUBLIC_ORKIO_POLICY_V7_AO65R_PUBLIC_ROUTING_REPAIR"
 
 
 def _consultive_cta_text() -> str:
@@ -45,9 +40,7 @@ def _consultive_overlay_text() -> str:
         return ""
     return """
 Equipe consultiva premium:
-Sempre que houver demanda concreta, interesse comercial, necessidade de automação,
-criação de agentes, diagnóstico empresarial, Business Plan, implantação ou acompanhamento,
-explique que a ORKIO/PATROAI atua por meio de uma equipe consultiva premium para:
+Sempre que houver demanda concreta, interesse comercial, necessidade de automação, criação de agentes, diagnóstico empresarial, Business Plan, implantação ou acompanhamento, explique que a ORKIO/PATROAI atua por meio de uma equipe consultiva premium para:
 - mapear a realidade da empresa;
 - desenhar agentes personalizados;
 - implantar com governança;
@@ -55,8 +48,7 @@ explique que a ORKIO/PATROAI atua por meio de uma equipe consultiva premium para
 - ajustar o roadmap conforme resultados reais.
 
 CTA obrigatório quando houver oportunidade real:
-"Nossa equipe consultiva premium pode transformar esse escopo em implantação acompanhada,
-com governança e foco no sucesso do projeto."
+"Nossa equipe consultiva premium pode transformar esse escopo em implantação acompanhada, com governança e foco no sucesso do projeto."
 Depois inclua somente a URL do WhatsApp, sem frase extra antes da URL.
 """.strip()
 
@@ -66,9 +58,7 @@ ORKIO_PUBLIC_CEO_MODE — contrato de resposta pública, comercial e consultiva
 
 Você é Orkio, o agente principal e CEO digital da plataforma ORKIO OS / PATROAI.
 
-Sua função pública é entender dores reais de empreendedores, empresários, executivos e
-investidores, organizar essas dores em uma visão executiva e sugerir uma primeira
-arquitetura de agentes personalizados.
+Sua função pública é entender dores reais de empreendedores, empresários, executivos e investidores, organizar essas dores em uma visão executiva e sugerir uma primeira arquitetura de agentes personalizados.
 
 Competências executivas que você deve simular com maturidade:
 - CFO/financeiro: caixa, custos, margem, indicadores, inadimplência, valuation, captação e previsibilidade.
@@ -81,11 +71,9 @@ Competências executivas que você deve simular com maturidade:
 Posicionamento premium:
 - A metodologia PatroAI/ORKIO deve ser apresentada como proprietária, consultiva e altamente diferenciada.
 - Evite afirmar "única no mercado" de forma absoluta sem pesquisa competitiva formal.
-- Prefira: "metodologia proprietária e altamente diferenciada por integrar Business Plan vivo,
-  agentes personalizados, execução tecnológica sob demanda, governança e acompanhamento consultivo premium."
+- Prefira: "metodologia proprietária e altamente diferenciada por integrar Business Plan vivo, agentes personalizados, execução tecnológica sob demanda, governança e acompanhamento consultivo premium."
 
-Quando o usuário trouxer uma dor de negócio, não responda de forma genérica.
-Entregue um ESCOPO INICIAL claro, curto e útil, preferencialmente com:
+Quando o usuário trouxer uma dor de negócio, não responda de forma genérica. Entregue um ESCOPO INICIAL claro, curto e útil, preferencialmente com:
 1. Dor identificada
 2. Impacto provável no negócio
 3. Agentes personalizados recomendados
@@ -96,12 +84,10 @@ Entregue um ESCOPO INICIAL claro, curto e útil, preferencialmente com:
 
 Regras de verdade operacional:
 - Não diga que todos os especialistas multiagente estão plenamente liberados para o público.
-- Explique, se necessário, que o ORKIO OS foi desenhado para arquitetura multiagente e que
-  a ativação de agentes personalizados é feita de forma progressiva, conforme a necessidade de cada empresa.
+- Explique, se necessário, que o ORKIO OS foi desenhado para arquitetura multiagente e que a ativação de agentes personalizados é feita de forma progressiva, conforme a necessidade de cada empresa.
 - Não prometa integrações, automações, auditorias ou execuções que não tenham sido confirmadas.
 - Não exponha logs, runtime, GitHub, patches, terminal guard ou detalhes internos para usuário público.
 - Respeite comandos de seed/fato/contexto como "Responda apenas: OK"; nesses casos, não aplique o modo comercial.
-- Respeite pedidos de resposta curta, uma frase ou resumo simples; nesses casos, não aplique CTA nem escopo longo.
 - Fale em pt-BR, com tom premium, claro, humano, executivo e confiante.
 - Seja consultivo: entenda, estruture, proponha e conduza para o próximo passo humano quando houver oportunidade real.
 """.strip()
@@ -191,18 +177,8 @@ def _is_factual_seed_or_direct_answer_constraint(normalized: str) -> bool:
 
 
 def _has_short_answer_constraint(normalized: str) -> bool:
-    """
-    AO64C — keep the public premium fastpath, but respect concise user commands.
-
-    Examples:
-    - "Orkio, me responda em uma frase..."
-    - "resuma em uma frase"
-    - "resposta curta"
-    - "me dê uma resposta objetiva"
-    """
     if not normalized:
         return False
-
     short_markers = [
         "em uma frase",
         "em 1 frase",
@@ -226,14 +202,6 @@ def _has_short_answer_constraint(normalized: str) -> bool:
 
 
 def _is_internal_agent_access_request(normalized: str) -> bool:
-    """
-    AO64D-HF2 — Public users must not enter internal audit/governance flows.
-
-    This catches indirect requests such as:
-    - "Quero falar com o agente interno de auditoria técnica."
-    - "Quero acessar o Orion."
-    - "Quero falar com o auditor técnico."
-    """
     if not normalized:
         return False
 
@@ -280,6 +248,38 @@ def _is_internal_agent_access_request(normalized: str) -> bool:
         return True
 
     return False
+
+
+def _is_orkio_created_question(normalized: str) -> bool:
+    if not normalized:
+        return False
+
+    has_orkio = bool(re.search(r"(^|\s)(orkio|orquio|orkio,|@orkio)\b", normalized)) or "orkio" in normalized
+    if not has_orkio:
+        return False
+
+    creation_markers = [
+        "quando foi criado",
+        "quando vc foi criado",
+        "quando voce foi criado",
+        "quando você foi criado",
+        "quando nasceu",
+        "quando surgiu",
+        "data de criacao",
+        "data de criação",
+        "foi criado quando",
+        "desde quando existe",
+        "quando comecou",
+        "quando começou",
+    ]
+    return _contains_any(normalized, creation_markers)
+
+
+def _orkio_created_answer() -> str:
+    return (
+        "O Orkio foi criado como copiloto inteligente da PatroAI/ORKIO durante a evolução da plataforma de agentes, "
+        "ainda em fase beta, para apoiar planejamento, diagnóstico, organização de escopo e execução assistida com governança."
+    )
 
 
 def _is_site_access_question(normalized: str) -> bool:
@@ -473,11 +473,9 @@ def _needs_for_message(normalized: str) -> List[str]:
         ("Governança e rastreabilidade", ["governanca", "governança", "rastreabilidade", "precisao", "compliance"]),
         ("Implantação e acompanhamento", ["implantacao", "implantação", "acompanhamento", "sucesso do cliente", "consultiva", "consultivo"]),
     ]
-
     for label, markers in mapping:
         if _contains_any(normalized, markers):
             needs.append(label)
-
     return list(dict.fromkeys(needs))[:5]
 
 
@@ -503,7 +501,6 @@ def _agents_for_needs(needs: List[str]) -> List[str]:
             suggestions.extend(["Agente de Governança", "Agente de Rastreabilidade e Decisões"])
         elif "Implantação" in need:
             suggestions.extend(["Agente de Implantação", "Agente de Sucesso e Acompanhamento"])
-
     return list(dict.fromkeys(suggestions))[:6]
 
 
@@ -517,10 +514,6 @@ def _join_with_cta(body: str) -> str:
 
 
 def _short_answer(normalized: str) -> str:
-    """
-    Short, premium public answer. No CTA, no scope list.
-    This is intentionally deterministic for AMCHAM/demo stability.
-    """
     if _contains_any(normalized, ["objetivo da plataforma", "objetivo do orkio", "objetivo da orkio"]):
         return (
             "O objetivo da plataforma é transformar ideias, processos e desafios empresariais "
@@ -544,6 +537,9 @@ def _short_answer(normalized: str) -> str:
             "Agentes personalizados são especialistas digitais desenhados para apoiar áreas específicas "
             "do negócio, como vendas, financeiro, marketing, operações, produto e governança."
         )
+
+    if _is_orkio_created_question(normalized):
+        return _orkio_created_answer()
 
     return (
         "A ORKIO/PATROAI organiza demandas de negócio em estratégia, agentes personalizados, "
@@ -662,13 +658,10 @@ def _startup_studio_answer(normalized: str) -> str:
 def _entrepreneur_pain_answer(normalized: str) -> str:
     needs = _needs_for_message(normalized)
     agents = _agents_for_needs(needs)
-
     needs_text = "\n".join(
-        f"- {item}"
-        for item in (needs or ["Estratégia do negócio", "Operação e execução", "Tecnologia e agentes personalizados"])
+        f"- {item}" for item in (needs or ["Estratégia do negócio", "Operação e execução", "Tecnologia e agentes personalizados"])
     )
     agents_text = "\n".join(f"- {item}" for item in agents)
-
     return _join_with_cta(
         "Entendi a dor. Eu olharia isso primeiro como problema de gestão, não como simples pedido de ferramenta.\n\n"
         "Escopo inicial:\n\n"
@@ -692,10 +685,8 @@ def _entrepreneur_pain_answer(normalized: str) -> str:
 def _generic_product_answer(normalized: str) -> str:
     needs = _needs_for_message(normalized)
     agents = _agents_for_needs(needs)
-
     needs_text = "\n".join(
-        f"- {item}"
-        for item in (
+        f"- {item}" for item in (
             needs
             or [
                 "Estratégia do negócio",
@@ -748,7 +739,12 @@ def _build_scope_answer(message: Any, normalized: str) -> str:
     return _generic_product_answer(normalized)
 
 
-def _base_runtime_hints(reason: str, public_intent: str, *, route_family: str = "public_product_ceo") -> Dict[str, Any]:
+def _base_runtime_hints(
+    reason: str,
+    public_intent: str,
+    *,
+    route_family: str = "public_product_ceo",
+) -> Dict[str, Any]:
     return {
         "routing": {
             "routing_source": "public_orkio_policy_module",
@@ -793,6 +789,27 @@ def build_public_orkio_policy_decision(
 
     if _is_factual_seed_or_direct_answer_constraint(normalized):
         return {"handled": False, "reason": "factual_seed_or_direct_answer_constraint"}
+
+    # AO65R: factual questions must be answered before first-contact/welcome
+    # and before product-ceo scoping.
+    if _is_orkio_created_question(normalized):
+        reason = "public_orkio_factual_created_at"
+        public_intent = "factual_identity"
+        return {
+            "handled": True,
+            "reason": reason,
+            "agent_id": "orkio",
+            "agent_name": "Orkio",
+            "final_speaker": "Orkio",
+            "visible_agent": "Orkio",
+            "answer": _orkio_created_answer(),
+            "routing_source": "public_orkio_policy_module",
+            "runtime_hints": _base_runtime_hints(
+                reason,
+                public_intent,
+                route_family="public_factual_answer",
+            ),
+        }
 
     if _is_internal_agent_access_request(normalized):
         reason = "internal_agent_access_public_block"
@@ -859,7 +876,6 @@ def build_public_orkio_policy_decision(
     answer = _build_scope_answer(message, normalized)
     public_intent = _classify_public_intent(normalized)
     reason = "site_access_limitation" if public_intent == "site_access" else f"public_product_ceo_{public_intent}"
-
     return {
         "handled": True,
         "reason": reason,
@@ -880,7 +896,6 @@ def build_public_orkio_stream_payload(
 ) -> Dict[str, Any]:
     data = dict(persisted or {})
     final_text = str(decision.get("answer") or "").strip()
-
     data.update(
         {
             "ok": True,
@@ -926,11 +941,8 @@ def append_orkio_ceo_scope_overlay(
     base = str(system_prompt or "").strip()
     names = [str(agent_name or "").strip().lower(), str(final_speaker or "").strip().lower()]
     is_orkio = any(name in {"orkio", "@orkio", "orkio (ceo)"} for name in names)
-
     if not is_orkio:
         return base
-
     if "ORKIO_PUBLIC_CEO_MODE" in base:
         return base
-
     return (base + "\n\n" + ORKIO_CEO_SCOPE_OVERLAY).strip() if base else ORKIO_CEO_SCOPE_OVERLAY
