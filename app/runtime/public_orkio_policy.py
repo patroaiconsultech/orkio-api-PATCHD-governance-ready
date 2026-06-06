@@ -26,7 +26,7 @@ from .runtime_feature_flags import (
 )
 
 
-ORKIO_POLICY_VERSION = "PUBLIC_ORKIO_POLICY_V5_SHORT_ANSWER_AO64C"
+ORKIO_POLICY_VERSION = "PUBLIC_ORKIO_POLICY_V6_INTERNAL_AGENT_GATE_AO64D_HF2"
 
 
 def _consultive_cta_text() -> str:
@@ -223,6 +223,63 @@ def _has_short_answer_constraint(normalized: str) -> bool:
         "defina em uma frase",
     ]
     return _contains_any(normalized, short_markers)
+
+
+def _is_internal_agent_access_request(normalized: str) -> bool:
+    """
+    AO64D-HF2 — Public users must not enter internal audit/governance flows.
+
+    This catches indirect requests such as:
+    - "Quero falar com o agente interno de auditoria técnica."
+    - "Quero acessar o Orion."
+    - "Quero falar com o auditor técnico."
+    """
+    if not normalized:
+        return False
+
+    internal_agent_markers = [
+        "agente interno",
+        "agentes internos",
+        "auditor interno",
+        "auditoria interna",
+        "auditoria tecnica",
+        "auditoria técnica",
+        "auditor tecnico",
+        "auditor técnico",
+        "governanca tecnica",
+        "governança técnica",
+        "equipe interna",
+        "time interno",
+        "orion",
+        "@orion",
+    ]
+    access_markers = [
+        "quero falar",
+        "falar com",
+        "conversar com",
+        "acessar",
+        "liberar",
+        "usar",
+        "chamar",
+        "acionar",
+        "executar",
+        "me conecte",
+        "me conecta",
+        "me leve",
+        "preciso do",
+        "preciso da",
+    ]
+
+    if _contains_any(normalized, internal_agent_markers) and _contains_any(normalized, access_markers):
+        return True
+
+    if _contains_any(normalized, ["agente interno", "auditoria tecnica", "auditoria técnica"]) and _contains_any(
+        normalized,
+        ["realtime", "router", "runtime", "logs", "patch", "deploy", "governanca", "governança"],
+    ):
+        return True
+
+    return False
 
 
 def _is_site_access_question(normalized: str) -> bool:
@@ -506,6 +563,16 @@ def _site_access_answer() -> str:
     )
 
 
+def _internal_agent_access_answer() -> str:
+    return (
+        "Orion faz parte da equipe interna de auditoria e governança técnica da ORKIO/PATROAI "
+        "e ainda não está liberado para usuários públicos.\n\n"
+        "Neste ambiente, eu, Orkio, conduzo o planejamento, organizo o escopo inicial e preparo "
+        "a execução necessária. Quando o projeto exigir, agentes internos especializados podem "
+        "ser acionados pela equipe para apoiar a implantação com segurança e governança."
+    )
+
+
 def _methodology_answer(normalized: str) -> str:
     return _join_with_cta(
         "Sim — a metodologia PatroAI/ORKIO pode ser posicionada como proprietária e altamente diferenciada.\n\n"
@@ -726,6 +793,25 @@ def build_public_orkio_policy_decision(
 
     if _is_factual_seed_or_direct_answer_constraint(normalized):
         return {"handled": False, "reason": "factual_seed_or_direct_answer_constraint"}
+
+    if _is_internal_agent_access_request(normalized):
+        reason = "internal_agent_access_public_block"
+        public_intent = "internal_agent_access_request"
+        return {
+            "handled": True,
+            "reason": reason,
+            "agent_id": "orkio",
+            "agent_name": "Orkio",
+            "final_speaker": "Orkio",
+            "visible_agent": "Orkio",
+            "answer": _internal_agent_access_answer(),
+            "routing_source": "public_orkio_policy_module",
+            "runtime_hints": _base_runtime_hints(
+                reason,
+                public_intent,
+                route_family="agent_access_policy",
+            ),
+        }
 
     if _has_explicit_specialist_mention(normalized):
         return {"handled": False, "reason": "explicit_specialist_mention"}
