@@ -27,7 +27,7 @@ import unicodedata
 from typing import Any, Dict, Optional
 
 
-AO67A_REALTIME_UNLOCK_VERSION = "AO67A-HF1_REALTIME_UNLOCK_JOURNEY"
+AO67A_REALTIME_UNLOCK_VERSION = "AO67A-HF2_REALTIME_UNLOCK_PRECEDENCE"
 
 
 def _norm(value: Any) -> str:
@@ -290,11 +290,14 @@ def build_realtime_unlock_journey_decision(
     dest_mode: Optional[str] = None,
     route_plan: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
-    """Optional standalone decision.
+    """Standalone AO67A journey decision.
 
-    This can be used before/inside public_orkio_policy if desired. It returns
-    handled=True only for direct questions about the Realtime journey. For normal
-    conversations, prefer decorate_orkio_policy_decision_with_realtime_unlock().
+    HF2 upgrade:
+    - Direct questions about voice/realtime are still answered immediately.
+    - Conversational unlock candidates now become a handled Orkio response
+      before Chris/valuation fast-path can capture the turn.
+    - Technical/audit/internal messages remain untouched because
+      should_offer_realtime_unlock() explicitly rejects them.
     """
 
     if _is_direct_realtime_journey_question(message):
@@ -308,10 +311,43 @@ def build_realtime_unlock_journey_decision(
             "runtime_hints": {
                 "ao67a_realtime_unlock": True,
                 "journey_version": AO67A_REALTIME_UNLOCK_VERSION,
+                "precedence": "before_chris_fastpath",
             },
         }
 
-    return {"handled": False, "reason": "ao67a_no_direct_realtime_question"}
+    candidate = should_offer_realtime_unlock(message, visible_agent=visible_agent)
+    if candidate.get("offer"):
+        answer = (
+            "Entendi. Antes de tentar resolver tudo de uma vez, eu organizaria isso em uma primeira camada simples: "
+            "quais são os três projetos, qual deles está mais urgente e qual decisão precisa ficar clara agora.\n\n"
+            "Podemos começar por texto com uma visão rápida de prioridade e, se fizer sentido, acelerar com voz.\n"
+            + build_realtime_unlock_invite()
+        )
+        return {
+            "handled": True,
+            "reason": "ao67a_realtime_unlock_candidate",
+            "answer": answer,
+            "agent_name": "Orkio",
+            "visible_agent": "Orkio",
+            "final_speaker": "Orkio",
+            "runtime_hints": {
+                "ao67a_realtime_unlock": True,
+                "ao67a_realtime_unlock_candidate": candidate,
+                "journey_version": AO67A_REALTIME_UNLOCK_VERSION,
+                "precedence": "before_chris_fastpath",
+                "write_executed": False,
+            },
+        }
+
+    return {
+        "handled": False,
+        "reason": candidate.get("reason") or "ao67a_no_realtime_unlock_candidate",
+        "runtime_hints": {
+            "ao67a_realtime_unlock_checked": True,
+            "ao67a_realtime_unlock_candidate": candidate,
+            "journey_version": AO67A_REALTIME_UNLOCK_VERSION,
+        },
+    }
 
 
 def decorate_orkio_policy_decision_with_realtime_unlock(
