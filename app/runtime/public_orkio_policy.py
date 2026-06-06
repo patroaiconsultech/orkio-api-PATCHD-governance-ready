@@ -7,6 +7,7 @@
 # - Avoid accidental technical-audit routes for commercial/product positioning.
 # - Produce useful, contextual initial scopes and WhatsApp CTA for human follow-up.
 # - Preserve factual seed / direct-answer turns so memory tests can still return only OK.
+# - Respect short-answer turns so AMCHAM/public users get concise, premium answers when requested.
 # - Respect runtime feature flags for safer rollback by environment.
 #
 # This module has no database, FastAPI or runtime side effects.
@@ -25,13 +26,12 @@ from .runtime_feature_flags import (
 )
 
 
-ORKIO_POLICY_VERSION = "PUBLIC_ORKIO_POLICY_V4_FEATURE_FLAGS_PREMIUM"
+ORKIO_POLICY_VERSION = "PUBLIC_ORKIO_POLICY_V5_SHORT_ANSWER_AO64C"
 
 
 def _consultive_cta_text() -> str:
     if not is_consultive_success_enabled():
         return ""
-
     label = get_consultive_team_label()
     return (
         f"Nossa {label} pode transformar esse escopo em implantação acompanhada, "
@@ -43,10 +43,11 @@ def _consultive_cta_text() -> str:
 def _consultive_overlay_text() -> str:
     if not is_consultive_success_enabled():
         return ""
-
     return """
 Equipe consultiva premium:
-Sempre que houver demanda concreta, interesse comercial, necessidade de automação, criação de agentes, diagnóstico empresarial, Business Plan, implantação ou acompanhamento, explique que a ORKIO/PATROAI atua por meio de uma equipe consultiva premium para:
+Sempre que houver demanda concreta, interesse comercial, necessidade de automação,
+criação de agentes, diagnóstico empresarial, Business Plan, implantação ou acompanhamento,
+explique que a ORKIO/PATROAI atua por meio de uma equipe consultiva premium para:
 - mapear a realidade da empresa;
 - desenhar agentes personalizados;
 - implantar com governança;
@@ -54,7 +55,8 @@ Sempre que houver demanda concreta, interesse comercial, necessidade de automaç
 - ajustar o roadmap conforme resultados reais.
 
 CTA obrigatório quando houver oportunidade real:
-"Nossa equipe consultiva premium pode transformar esse escopo em implantação acompanhada, com governança e foco no sucesso do projeto."
+"Nossa equipe consultiva premium pode transformar esse escopo em implantação acompanhada,
+com governança e foco no sucesso do projeto."
 Depois inclua somente a URL do WhatsApp, sem frase extra antes da URL.
 """.strip()
 
@@ -64,7 +66,9 @@ ORKIO_PUBLIC_CEO_MODE — contrato de resposta pública, comercial e consultiva
 
 Você é Orkio, o agente principal e CEO digital da plataforma ORKIO OS / PATROAI.
 
-Sua função pública é entender dores reais de empreendedores, empresários, executivos e investidores, organizar essas dores em uma visão executiva e sugerir uma primeira arquitetura de agentes personalizados.
+Sua função pública é entender dores reais de empreendedores, empresários, executivos e
+investidores, organizar essas dores em uma visão executiva e sugerir uma primeira
+arquitetura de agentes personalizados.
 
 Competências executivas que você deve simular com maturidade:
 - CFO/financeiro: caixa, custos, margem, indicadores, inadimplência, valuation, captação e previsibilidade.
@@ -77,7 +81,8 @@ Competências executivas que você deve simular com maturidade:
 Posicionamento premium:
 - A metodologia PatroAI/ORKIO deve ser apresentada como proprietária, consultiva e altamente diferenciada.
 - Evite afirmar "única no mercado" de forma absoluta sem pesquisa competitiva formal.
-- Prefira: "metodologia proprietária e altamente diferenciada por integrar Business Plan vivo, agentes personalizados, execução tecnológica sob demanda, governança e acompanhamento consultivo premium."
+- Prefira: "metodologia proprietária e altamente diferenciada por integrar Business Plan vivo,
+  agentes personalizados, execução tecnológica sob demanda, governança e acompanhamento consultivo premium."
 
 Quando o usuário trouxer uma dor de negócio, não responda de forma genérica.
 Entregue um ESCOPO INICIAL claro, curto e útil, preferencialmente com:
@@ -91,10 +96,12 @@ Entregue um ESCOPO INICIAL claro, curto e útil, preferencialmente com:
 
 Regras de verdade operacional:
 - Não diga que todos os especialistas multiagente estão plenamente liberados para o público.
-- Explique, se necessário, que o ORKIO OS foi desenhado para arquitetura multiagente e que a ativação de agentes personalizados é feita de forma progressiva, conforme a necessidade de cada empresa.
+- Explique, se necessário, que o ORKIO OS foi desenhado para arquitetura multiagente e que
+  a ativação de agentes personalizados é feita de forma progressiva, conforme a necessidade de cada empresa.
 - Não prometa integrações, automações, auditorias ou execuções que não tenham sido confirmadas.
 - Não exponha logs, runtime, GitHub, patches, terminal guard ou detalhes internos para usuário público.
 - Respeite comandos de seed/fato/contexto como "Responda apenas: OK"; nesses casos, não aplique o modo comercial.
+- Respeite pedidos de resposta curta, uma frase ou resumo simples; nesses casos, não aplique CTA nem escopo longo.
 - Fale em pt-BR, com tom premium, claro, humano, executivo e confiante.
 - Seja consultivo: entenda, estruture, proponha e conduza para o próximo passo humano quando houver oportunidade real.
 """.strip()
@@ -108,7 +115,7 @@ def normalize_text(value: Any) -> str:
     except Exception:
         pass
     raw = raw.lower()
-    raw = re.sub(r"[^a-z0-9@:/.\-_\s]+", " ", raw, flags=re.I)
+    raw = re.sub(r"[^a-z0-9@:/\.\-_\s]+", " ", raw, flags=re.I)
     return re.sub(r"\s+", " ", raw).strip()
 
 
@@ -120,11 +127,17 @@ def _has_explicit_specialist_mention(normalized: str) -> bool:
     return bool(re.search(r"(^|\s)@(chris|cris|orion)\b", normalized))
 
 
-def _explicit_orkio_or_team(normalized: str, visible_agent: Any = None, target_agent_slug: Any = None) -> bool:
+def _explicit_orkio_or_team(
+    normalized: str,
+    visible_agent: Any = None,
+    target_agent_slug: Any = None,
+) -> bool:
     visible = normalize_text(visible_agent)
     target = normalize_text(target_agent_slug)
 
     if re.search(r"(^|\s)@(orkio|team)\b", normalized):
+        return True
+    if re.search(r"(^|\s)(orkio|team)\b", normalized):
         return True
     if visible in {"orkio", "team", "@orkio", "@team"}:
         return True
@@ -162,14 +175,54 @@ def _is_factual_seed_or_direct_answer_constraint(normalized: str) -> bool:
         "guarde nesta conversa",
         "pedi para guardar",
     ]
-
-    if _contains_any(normalized, memory_seed_markers) and _contains_any(normalized, ["responda", "guardar", "guarde", "palavra"]):
+    if _contains_any(normalized, memory_seed_markers) and _contains_any(
+        normalized,
+        ["responda", "guardar", "guarde", "palavra"],
+    ):
         return True
 
-    if _contains_any(normalized, ["meu nome e", "meu nome é"]) and _contains_any(normalized, ["minha empresa e", "minha empresa é"]):
+    if _contains_any(normalized, ["meu nome e", "meu nome é"]) and _contains_any(
+        normalized,
+        ["minha empresa e", "minha empresa é"],
+    ):
         return True
 
     return False
+
+
+def _has_short_answer_constraint(normalized: str) -> bool:
+    """
+    AO64C — keep the public premium fastpath, but respect concise user commands.
+
+    Examples:
+    - "Orkio, me responda em uma frase..."
+    - "resuma em uma frase"
+    - "resposta curta"
+    - "me dê uma resposta objetiva"
+    """
+    if not normalized:
+        return False
+
+    short_markers = [
+        "em uma frase",
+        "em 1 frase",
+        "uma frase",
+        "1 frase",
+        "frase curta",
+        "resposta curta",
+        "responda curto",
+        "responda de forma curta",
+        "responda de forma objetiva",
+        "resposta objetiva",
+        "seja objetivo",
+        "seja objetiva",
+        "resuma em uma frase",
+        "resuma em 1 frase",
+        "resumo em uma frase",
+        "explique em uma frase",
+        "defina em uma frase",
+    ]
+    return _contains_any(normalized, short_markers)
 
 
 def _is_site_access_question(normalized: str) -> bool:
@@ -310,9 +363,7 @@ def _classify_public_intent(normalized: str) -> str:
         "posicionamento",
         "mercado",
     ]
-
     business_plan_terms = ["business plan", "plano de negocio", "plano de negocios", "plano vivo"]
-
     startup_studio_terms = [
         "criacao de startups",
         "criar startups",
@@ -326,7 +377,6 @@ def _classify_public_intent(normalized: str) -> str:
         "executar esse business plan",
         "executaremos esse business plan",
     ]
-
     pain_terms = [
         "estou perdido",
         "preciso vender",
@@ -366,9 +416,11 @@ def _needs_for_message(normalized: str) -> List[str]:
         ("Governança e rastreabilidade", ["governanca", "governança", "rastreabilidade", "precisao", "compliance"]),
         ("Implantação e acompanhamento", ["implantacao", "implantação", "acompanhamento", "sucesso do cliente", "consultiva", "consultivo"]),
     ]
+
     for label, markers in mapping:
         if _contains_any(normalized, markers):
             needs.append(label)
+
     return list(dict.fromkeys(needs))[:5]
 
 
@@ -394,6 +446,7 @@ def _agents_for_needs(needs: List[str]) -> List[str]:
             suggestions.extend(["Agente de Governança", "Agente de Rastreabilidade e Decisões"])
         elif "Implantação" in need:
             suggestions.extend(["Agente de Implantação", "Agente de Sucesso e Acompanhamento"])
+
     return list(dict.fromkeys(suggestions))[:6]
 
 
@@ -406,12 +459,50 @@ def _join_with_cta(body: str) -> str:
     return (str(body or "").strip() + ("\n\n" + cta if cta else "")).strip()
 
 
+def _short_answer(normalized: str) -> str:
+    """
+    Short, premium public answer. No CTA, no scope list.
+    This is intentionally deterministic for AMCHAM/demo stability.
+    """
+    if _contains_any(normalized, ["objetivo da plataforma", "objetivo do orkio", "objetivo da orkio"]):
+        return (
+            "O objetivo da plataforma é transformar ideias, processos e desafios empresariais "
+            "em soluções com agentes inteligentes, estratégia clara, execução acompanhada e governança."
+        )
+
+    if _contains_any(normalized, ["o que e a plataforma", "o que é a plataforma", "o que e o orkio", "o que é o orkio"]):
+        return (
+            "A ORKIO/PATROAI é uma plataforma consultiva de IA que estrutura negócios, "
+            "desenha agentes personalizados e apoia a evolução da estratégia à execução."
+        )
+
+    if _contains_any(normalized, ["diferencial", "diferenciais", "metodologia"]):
+        return (
+            "O diferencial da ORKIO/PATROAI está em unir Business Plan vivo, agentes personalizados, "
+            "execução tecnológica sob demanda e acompanhamento consultivo premium."
+        )
+
+    if _contains_any(normalized, ["agentes personalizados", "agente personalizado", "criar agentes"]):
+        return (
+            "Agentes personalizados são especialistas digitais desenhados para apoiar áreas específicas "
+            "do negócio, como vendas, financeiro, marketing, operações, produto e governança."
+        )
+
+    return (
+        "A ORKIO/PATROAI organiza demandas de negócio em estratégia, agentes personalizados, "
+        "roadmap de execução e acompanhamento consultivo orientado a resultados."
+    )
+
+
 def _site_access_answer() -> str:
     return _join_with_cta(
         "Eu não consigo confirmar navegação direta em sites externos a partir desta conversa.\n\n"
         "Mas consigo avançar de duas formas úteis:\n\n"
-        "1. Se você colar aqui o conteúdo do site, eu organizo a leitura em posicionamento, proposta de valor, oferta, público-alvo, diferenciais e próximos passos.\n"
-        "2. Se a ideia for transformar o site em um projeto real de agentes, nossa equipe consultiva premium pode fazer o mapeamento humano, desenhar o escopo inicial e acompanhar a implantação até os primeiros resultados."
+        "1. Se você colar aqui o conteúdo do site, eu organizo a leitura em posicionamento, "
+        "proposta de valor, oferta, público-alvo, diferenciais e próximos passos.\n"
+        "2. Se a ideia for transformar o site em um projeto real de agentes, nossa equipe "
+        "consultiva premium pode fazer o mapeamento humano, desenhar o escopo inicial e "
+        "acompanhar a implantação até os primeiros resultados."
     )
 
 
@@ -419,20 +510,25 @@ def _methodology_answer(normalized: str) -> str:
     return _join_with_cta(
         "Sim — a metodologia PatroAI/ORKIO pode ser posicionada como proprietária e altamente diferenciada.\n\n"
         "Eu evitaria afirmar, sem pesquisa competitiva formal, que ela é absolutamente a única do mercado. "
-        "A formulação mais forte e segura é: a PatroAI/ORKIO combina elementos que raramente aparecem integrados em uma única jornada operacional.\n\n"
+        "A formulação mais forte e segura é: a PatroAI/ORKIO combina elementos que raramente aparecem "
+        "integrados em uma única jornada operacional.\n\n"
         "O diferencial está na combinação de cinco camadas:\n\n"
         "1. Business Plan vivo\n"
         "- O plano não nasce como PDF estático. Ele vira base de decisão, acompanhamento, indicadores e evolução.\n\n"
         "2. Agentes personalizados por demanda\n"
-        "- A metodologia não entrega um agente genérico. Ela desenha agentes conforme a dor real: CFO, vendas, marketing, operações, produto, governança e atendimento.\n\n"
+        "- A metodologia não entrega um agente genérico. Ela desenha agentes conforme a dor real: CFO, vendas, "
+        "marketing, operações, produto, governança e atendimento.\n\n"
         "3. Execução tecnológica sob demanda\n"
         "- Quando o cliente quiser avançar, a equipe pode sair do diagnóstico para app, plataforma, automações e integrações.\n\n"
         "4. Governança e rastreabilidade\n"
         "- A proposta organiza decisões, versões, responsáveis, próximos passos e critérios de sucesso.\n\n"
         "5. Equipe consultiva premium\n"
-        "- A implantação não é largada na mão do cliente. A ORKIO/PATROAI atua com equipe consultiva para mapear, implantar, acompanhar indicadores, ajustar agentes e aumentar a chance de sucesso.\n\n"
+        "- A implantação não é largada na mão do cliente. A ORKIO/PATROAI atua com equipe consultiva para mapear, "
+        "implantar, acompanhar indicadores, ajustar agentes e aumentar a chance de sucesso.\n\n"
         "Então a narrativa correta é:\n"
-        "A PatroAI/ORKIO possui uma metodologia proprietária, consultiva e altamente diferenciada para transformar ideias, empresas e processos em negócios digitais estruturados com IA, agentes personalizados, execução tecnológica e acompanhamento orientado a sucesso."
+        "A PatroAI/ORKIO possui uma metodologia proprietária, consultiva e altamente diferenciada para transformar "
+        "ideias, empresas e processos em negócios digitais estruturados com IA, agentes personalizados, execução "
+        "tecnológica e acompanhamento orientado a sucesso."
     )
 
 
@@ -473,7 +569,8 @@ def _startup_studio_answer(normalized: str) -> str:
     return _join_with_cta(
         "Agora a tese ficou mais forte: a PatroAI/ORKIO pode ser apresentada como uma fábrica inteligente de negócios digitais — da estratégia à execução.\n\n"
         "A narrativa central seria:\n"
-        "A empresa ajuda empreendedores e organizações a sair da ideia solta para um negócio estruturado, com Business Plan vivo, governança, rastreabilidade, agentes personalizados, execução tecnológica e acompanhamento consultivo premium.\n\n"
+        "A empresa ajuda empreendedores e organizações a sair da ideia solta para um negócio estruturado, com Business Plan vivo, "
+        "governança, rastreabilidade, agentes personalizados, execução tecnológica e acompanhamento consultivo premium.\n\n"
         "Escopo inicial da oferta:\n\n"
         "1. Diagnóstico da oportunidade\n"
         "- Entender a dor, o mercado, o público, o modelo de receita e o potencial de escala.\n\n"
@@ -490,14 +587,19 @@ def _startup_studio_answer(normalized: str) -> str:
         "- Quando o contratante quiser, a equipe pode avançar para app, plataforma, automações e integrações, sempre com governança e rastreabilidade.\n\n"
         "5. Acompanhamento consultivo premium\n"
         "- A implantação é acompanhada por equipe humana para ajustar prioridades, medir evolução e conduzir o cliente aos primeiros resultados.\n\n"
-        "Esse posicionamento é muito mais premium do que “criamos business plans”. A mensagem correta é: criamos a estratégia, estruturamos o plano vivo, implantamos agentes personalizados e acompanhamos a execução para aumentar a chance de sucesso."
+        "Esse posicionamento é muito mais premium do que “criamos business plans”. A mensagem correta é: criamos a estratégia, "
+        "estruturamos o plano vivo, implantamos agentes personalizados e acompanhamos a execução para aumentar a chance de sucesso."
     )
 
 
 def _entrepreneur_pain_answer(normalized: str) -> str:
     needs = _needs_for_message(normalized)
     agents = _agents_for_needs(needs)
-    needs_text = "\n".join(f"- {item}" for item in (needs or ["Estratégia do negócio", "Operação e execução", "Tecnologia e agentes personalizados"]))
+
+    needs_text = "\n".join(
+        f"- {item}"
+        for item in (needs or ["Estratégia do negócio", "Operação e execução", "Tecnologia e agentes personalizados"])
+    )
     agents_text = "\n".join(f"- {item}" for item in agents)
 
     return _join_with_cta(
@@ -523,7 +625,20 @@ def _entrepreneur_pain_answer(normalized: str) -> str:
 def _generic_product_answer(normalized: str) -> str:
     needs = _needs_for_message(normalized)
     agents = _agents_for_needs(needs)
-    needs_text = "\n".join(f"- {item}" for item in (needs or ["Estratégia do negócio", "Produto ou serviço principal", "Modelo de receita", "Operação e execução", "Tecnologia e agentes personalizados"]))
+
+    needs_text = "\n".join(
+        f"- {item}"
+        for item in (
+            needs
+            or [
+                "Estratégia do negócio",
+                "Produto ou serviço principal",
+                "Modelo de receita",
+                "Operação e execução",
+                "Tecnologia e agentes personalizados",
+            ]
+        )
+    )
     agents_text = "\n".join(f"- {item}" for item in agents)
 
     return _join_with_cta(
@@ -566,6 +681,34 @@ def _build_scope_answer(message: Any, normalized: str) -> str:
     return _generic_product_answer(normalized)
 
 
+def _base_runtime_hints(reason: str, public_intent: str, *, route_family: str = "public_product_ceo") -> Dict[str, Any]:
+    return {
+        "routing": {
+            "routing_source": "public_orkio_policy_module",
+            "route_applied": True,
+            "execution_lifecycle": "completed",
+            "final_speaker": "Orkio",
+            "visible_agent": "Orkio",
+            "policy_module": "app.runtime.public_orkio_policy",
+            "policy_reason": reason,
+            "policy_version": ORKIO_POLICY_VERSION,
+            "public_intent": public_intent,
+            "route_family": route_family,
+            "consultive_success_enabled": is_consultive_success_enabled(),
+            "write_executed": False,
+            "proposal_created": False,
+            "dispatch_executed": False,
+            "branch_created": False,
+            "pr_created": False,
+            "blocked_routes": [
+                "chris_business_plan_fastpath",
+                "chris_ao45a_context_continuation",
+                "ao20bc_technical_audit_for_business_positioning",
+            ],
+        }
+    }
+
+
 def build_public_orkio_policy_decision(
     message: Any,
     *,
@@ -578,7 +721,6 @@ def build_public_orkio_policy_decision(
         return {"handled": False, "reason": "public_orkio_policy_disabled"}
 
     normalized = normalize_text(message)
-
     if not normalized:
         return {"handled": False, "reason": "empty"}
 
@@ -593,7 +735,31 @@ def build_public_orkio_policy_decision(
 
     site_question = _is_site_access_question(normalized)
     product_intent = _has_product_ceo_intent(normalized)
-    orkio_or_team = _explicit_orkio_or_team(normalized, visible_agent=visible_agent, target_agent_slug=target_agent_slug)
+    orkio_or_team = _explicit_orkio_or_team(
+        normalized,
+        visible_agent=visible_agent,
+        target_agent_slug=target_agent_slug,
+    )
+
+    if _has_short_answer_constraint(normalized) and (site_question or product_intent or orkio_or_team):
+        reason = "public_orkio_short_answer"
+        public_intent = "short_answer"
+        answer = _short_answer(normalized)
+        return {
+            "handled": True,
+            "reason": reason,
+            "agent_id": "orkio",
+            "agent_name": "Orkio",
+            "final_speaker": "Orkio",
+            "visible_agent": "Orkio",
+            "answer": answer,
+            "routing_source": "public_orkio_policy_module",
+            "runtime_hints": _base_runtime_hints(
+                reason,
+                public_intent,
+                route_family="short_answer",
+            ),
+        }
 
     if not site_question and not product_intent:
         return {"handled": False, "reason": "no_public_product_intent"}
@@ -614,29 +780,10 @@ def build_public_orkio_policy_decision(
         "agent_id": "orkio",
         "agent_name": "Orkio",
         "final_speaker": "Orkio",
+        "visible_agent": "Orkio",
         "answer": answer,
         "routing_source": "public_orkio_policy_module",
-        "runtime_hints": {
-            "routing": {
-                "routing_source": "public_orkio_policy_module",
-                "route_applied": True,
-                "execution_lifecycle": "completed",
-                "final_speaker": "Orkio",
-                "policy_module": "app.runtime.public_orkio_policy",
-                "policy_reason": reason,
-                "policy_version": ORKIO_POLICY_VERSION,
-                "public_intent": public_intent,
-                "consultive_success_enabled": is_consultive_success_enabled(),
-                "write_executed": False,
-                "proposal_created": False,
-                "dispatch_executed": False,
-                "blocked_routes": [
-                    "chris_business_plan_fastpath",
-                    "chris_ao45a_context_continuation",
-                    "ao20bc_technical_audit_for_business_positioning",
-                ],
-            }
-        },
+        "runtime_hints": _base_runtime_hints(reason, public_intent),
     }
 
 
@@ -648,30 +795,36 @@ def build_public_orkio_stream_payload(
     data = dict(persisted or {})
     final_text = str(decision.get("answer") or "").strip()
 
-    data.update({
-        "ok": True,
-        "answer": final_text,
-        "message": final_text,
-        "final_text": final_text,
-        "content": final_text,
-        "text": final_text,
-        "agent_id": "orkio",
-        "agent_name": "Orkio",
-        "final_speaker": "Orkio",
-        "service": "public_orkio_policy_module",
-        "provider": "platform",
-        "status": "done",
-        "runtime_hints": decision.get("runtime_hints") or {
-            "routing": {
-                "routing_source": "public_orkio_policy_module",
-                "route_applied": True,
-                "execution_lifecycle": "completed",
-                "final_speaker": "Orkio",
-                "write_executed": False,
-            }
-        },
-    })
-
+    data.update(
+        {
+            "ok": True,
+            "answer": final_text,
+            "message": final_text,
+            "final_text": final_text,
+            "content": final_text,
+            "text": final_text,
+            "agent_id": "orkio",
+            "agent_name": "Orkio",
+            "final_speaker": "Orkio",
+            "visible_agent": "Orkio",
+            "service": "public_orkio_policy_module",
+            "provider": "platform",
+            "status": "done",
+            "runtime_hints": decision.get("runtime_hints")
+            or {
+                "routing": {
+                    "routing_source": "public_orkio_policy_module",
+                    "route_applied": True,
+                    "execution_lifecycle": "completed",
+                    "final_speaker": "Orkio",
+                    "visible_agent": "Orkio",
+                    "write_executed": False,
+                    "branch_created": False,
+                    "pr_created": False,
+                }
+            },
+        }
+    )
     return data
 
 
