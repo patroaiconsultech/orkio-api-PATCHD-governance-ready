@@ -39318,6 +39318,47 @@ async def chat_stream(
                     pass
                 # If this fast-path fails, existing guarded rails still protect the UI.
 
+        # AO67A-HF2_REALTIME_UNLOCK_PRECEDENCE_FASTPATH
+        # Conversational journey/voice unlock must run before Chris valuation fast-path.
+        # This preserves Chris for explicit Chris/investor/valuation cases, but lets Orkio
+        # conduct high-context onboarding and Realtime unlock moments.
+        try:
+            _ao67a_unlock_decision = build_realtime_unlock_journey_decision(
+                message,
+                visible_agent=getattr(inp, "visible_agent", None),
+                target_agent_slug=getattr(inp, "target_agent_slug", None),
+                dest_mode=getattr(inp, "dest_mode", None),
+                route_plan=route_plan if isinstance(route_plan, dict) else None,
+            )
+        except Exception:
+            _ao67a_unlock_decision = {"handled": False, "reason": "ao67a_policy_exception"}
+
+        if isinstance(_ao67a_unlock_decision, dict) and _ao67a_unlock_decision.get("handled"):
+            try:
+                final_text = str(_ao67a_unlock_decision.get("answer") or "").strip()
+                persisted = await asyncio.to_thread(
+                    _persist_assistant_message,
+                    text=final_text,
+                    thread_id=tid_seed,
+                    agent_id=None,
+                    agent_name="Orkio",
+                )
+                payload = build_public_orkio_stream_payload(_ao67a_unlock_decision, persisted=persisted)
+                logger.warning(
+                    "AO67A_REALTIME_UNLOCK_PRECEDENCE_FASTPATH trace_id=%s thread_id=%s reason=%s",
+                    trace_id,
+                    tid_seed,
+                    _ao67a_unlock_decision.get("reason"),
+                )
+                async for ev in _emit_result_payload(payload, routing_source="ao67a_realtime_unlock_precedence"):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception("AO67A_REALTIME_UNLOCK_PRECEDENCE_FASTPATH_FAILED trace_id=%s", trace_id)
+                except Exception:
+                    pass
+
         # CHRIS_ORION_PUBLIC_POLICY_MODULE_FASTPATH
         # Chris/Orion public policies live outside app/main.py to reduce fragility.
         # Keep this hook small: explicit target -> decide -> persist -> emit.
