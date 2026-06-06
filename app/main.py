@@ -43723,51 +43723,81 @@ async def tts_endpoint(
                 tts_thread_id,
             )
 
+    # AO65V-BE1 — Voice Identity Alignment for /api/tts.
+    # Explicit inp.voice must win over message_id/agent_id/database voice.
+    # This keeps the message playback button aligned with the intended Orkio voice.
     default_tts_voice = _normalize_voice_id(
-        (os.getenv("OPENAI_TTS_VOICE_DEFAULT", "") or os.getenv("OPENAI_REALTIME_VOICE_DEFAULT", "cedar")),
+        (
+            os.getenv("OPENAI_TTS_VOICE_DEFAULT", "")
+            or os.getenv("OPENAI_REALTIME_VOICE_DEFAULT", "")
+            or os.getenv("ORKIO_VOICE_ID", "")
+            or "cedar"
+        ),
         default="cedar",
     )
-    voice = _normalize_voice_id(inp.voice or default_tts_voice, default=default_tts_voice)
     _VALID_VOICES = ("alloy","ash","ballad","cedar","coral","echo","fable","marin","nova","onyx","sage","shimmer","verse")
-    resolved_via = "default"
+
+    requested_voice_raw = str(getattr(inp, "voice", "") or "").strip()
+    requested_voice = (
+        _normalize_voice_id(requested_voice_raw, default=default_tts_voice)
+        if requested_voice_raw
+        else ""
+    )
+
+    voice = requested_voice or default_tts_voice
+    resolved_via = "inp.voice" if requested_voice else "default"
     fallback_used = False
+
     try:
-        if inp.message_id:
-            msg = db.execute(select(Message).where(
-                Message.org_slug == org, Message.id == inp.message_id
-            )).scalar_one_or_none()
-            if msg and msg.agent_id:
+        # AO65V-BE1:
+        # If the frontend explicitly sends a voice, do not let message_id/agent_id
+        # or Agent.voice_id override it. This is required for voice identity lock.
+        if not requested_voice:
+            if inp.message_id:
+                msg = db.execute(select(Message).where(
+                    Message.org_slug == org, Message.id == inp.message_id
+                )).scalar_one_or_none()
+                if msg and msg.agent_id:
+                    agent = db.execute(select(Agent).where(
+                        Agent.org_slug == org, Agent.id == msg.agent_id
+                    )).scalar_one_or_none()
+                    if agent:
+                        voice = resolve_agent_voice(agent)
+                        resolved_via = f"message_id→agent:{agent.name}"
+            elif inp.agent_id:
                 agent = db.execute(select(Agent).where(
-                    Agent.org_slug == org, Agent.id == msg.agent_id
+                    Agent.org_slug == org, Agent.id == inp.agent_id
                 )).scalar_one_or_none()
                 if agent:
                     voice = resolve_agent_voice(agent)
-                    resolved_via = f"message_id→agent:{agent.name}"
-        elif inp.agent_id:
-            agent = db.execute(select(Agent).where(
-                Agent.org_slug == org, Agent.id == inp.agent_id
-            )).scalar_one_or_none()
-            if agent:
-                voice = resolve_agent_voice(agent)
-                resolved_via = f"agent_id:{agent.name}"
-        elif inp.voice:
-            voice = _normalize_voice_id(inp.voice, default=default_tts_voice)
-            resolved_via = "inp.voice"
+                    resolved_via = f"agent_id:{agent.name}"
     except Exception:
         logger.exception("TTS_VOICE_RESOLVE_FAILED trace_id=%s", trace_id)
 
     if voice not in _VALID_VOICES:
         voice = default_tts_voice if default_tts_voice in _VALID_VOICES else "cedar"
+        resolved_via = f"{resolved_via}|invalid_voice_default"
+
     safe_resolved_via = _ascii_safe_text(resolved_via) or "default"
     speed = max(0.25, min(4.0, inp.speed))
+    # Keep the legacy browser-safe format unless the endpoint is deliberately
+    # refactored to negotiate media type per format.
+    tts_format = "mp3"
     tts_input = _sanitize_tts_text(inp.text)
     if not tts_input:
         raise HTTPException(status_code=400, detail="TTS text is empty after sanitization")
 
     tts_model = os.getenv("OPENAI_TTS_MODEL", "gpt-4o-mini-tts").strip() or "gpt-4o-mini-tts"
     logger.info(
-        "v2v_play_start trace_id=%s org=%s voice=%s resolved_via=%s chars=%d model=%s",
-        trace_id, org, voice, resolved_via, len(tts_input), tts_model,
+        "v2v_play_start trace_id=%s org=%s requested_voice=%s resolved_voice=%s resolved_via=%s chars=%d model=%s format=%s",
+        trace_id,
+        org,
+        requested_voice or "",
+        voice,
+        resolved_via,
+        len(tts_input),
+        tts_model,
+        tts_format,
     )
 
     try:
@@ -43777,7 +43807,7 @@ async def tts_endpoint(
             voice=voice,
             input=tts_input,
             speed=speed,
-            response_format="mp3",
+            response_format=tts_format,
         )
         from fastapi.responses import StreamingResponse
         import io
@@ -43794,24 +43824,63 @@ async def tts_endpoint(
                 "Cache-Control": "no-cache",
                 "X-Trace-Id": trace_id,
                 "X-V2V-Voice": voice,
+                "X-V2V-Requested-Voice": requested_voice or "",
+                "X-V2V-Resolved-Voice": voice,
                 "X-V2V-Resolved-Via": safe_resolved_via,
+                "X-V2V-TTS-Format": tts_format,
+                "X-V2V-Fallback-Used": "false",
             },
         )
     except Exception as e:
+        # AO65V-BE1:
+        # If the caller explicitly requested a voice, never silently switch to a
+        # different voice. A 502 is safer than speaking with the wrong identity.
+        if requested_voice:
+            logger.exception(
+                "v2v_tts_fail trace_id=%s model=%s requested_voice=%s resolved_voice=%s resolved_via=%s fallback_used=%s error=%s",
+                trace_id,
+                tts_model,
+                requested_voice,
+                voice,
+                resolved_via,
+                False,
+                str(e),
+            )
+            raise HTTPException(status_code=502, detail=f"TTS generation failed for requested voice {voice}: {str(e)}")
+
+        fallback_used = True
         fallback_voice = {"cedar": "nova", "marin": "alloy"}.get(voice, "nova")
-        logger.warning("v2v_tts_fallback trace_id=%s org=%s original_model=%s original_voice=%s fallback_model=%s fallback_voice=%s error=%s", trace_id, org, tts_model, voice, "gpt-4o-mini-tts", fallback_voice, str(e))
+        logger.warning(
+            "v2v_tts_fallback trace_id=%s org=%s original_model=%s original_voice=%s fallback_model=%s fallback_voice=%s requested_voice=%s resolved_via=%s error=%s",
+            trace_id,
+            org,
+            tts_model,
+            voice,
+            "gpt-4o-mini-tts",
+            fallback_voice,
+            requested_voice or "",
+            resolved_via,
+            str(e),
+        )
         try:
             response = client.audio.speech.create(
                 model="gpt-4o-mini-tts",
                 voice=fallback_voice,
                 input=tts_input,
                 speed=speed,
-                response_format="mp3",
+                response_format=tts_format,
             )
             from fastapi.responses import StreamingResponse
             import io
             audio_bytes = _read_audio_bytes(response)
-            logger.info("v2v_tts_ok trace_id=%s org=%s voice=%s bytes=%d fallback_used=%s", trace_id, org, fallback_voice, len(audio_bytes), True)
+            logger.info(
+                "v2v_tts_ok trace_id=%s org=%s voice=%s bytes=%d fallback_used=%s",
+                trace_id,
+                org,
+                fallback_voice,
+                len(audio_bytes),
+                fallback_used,
+            )
             return StreamingResponse(
                 io.BytesIO(audio_bytes),
                 media_type="audio/mpeg",
@@ -43820,7 +43889,10 @@ async def tts_endpoint(
                     "Cache-Control": "no-cache",
                     "X-Trace-Id": trace_id,
                     "X-V2V-Voice": fallback_voice,
+                    "X-V2V-Requested-Voice": requested_voice or "",
+                    "X-V2V-Resolved-Voice": fallback_voice,
                     "X-V2V-Resolved-Via": safe_resolved_via,
+                    "X-V2V-TTS-Format": tts_format,
                     "X-V2V-Fallback-Used": "true",
                 },
             )
