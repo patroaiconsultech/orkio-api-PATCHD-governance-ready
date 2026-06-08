@@ -201,8 +201,50 @@ def _has_short_answer_constraint(normalized: str) -> bool:
     return _contains_any(normalized, short_markers)
 
 
+
+def _is_natural_voice_no_audit_request(normalized: str) -> bool:
+    if not normalized:
+        return False
+    voice_terms = [
+        "conversa rapida por voz",
+        "conversa rápida por voz",
+        "conversa por voz",
+        "conversar por voz",
+        "falar por voz",
+        "chamada de voz",
+        "conversa em tempo real",
+        "tempo real",
+        "realtime",
+        "dois minutos",
+        "2 minutos",
+        "simular a experiencia",
+        "simular a experiência",
+        "experiencia natural",
+        "experiência natural",
+        "transicao",
+        "transição",
+    ]
+    denial_terms = [
+        "nao preciso de auditoria",
+        "não preciso de auditoria",
+        "sem auditoria tecnica",
+        "sem auditoria técnica",
+        "nao quero auditoria",
+        "não quero auditoria",
+        "nao preciso de analise",
+        "não preciso de análise",
+        "nem de analise de arquitetura",
+        "nem de análise de arquitetura",
+        "apenas quero simular",
+        "quero apenas simular",
+    ]
+    return _contains_any(normalized, voice_terms) and _contains_any(normalized, denial_terms)
+
+
 def _is_internal_agent_access_request(normalized: str) -> bool:
     if not normalized:
+        return False
+    if _is_natural_voice_no_audit_request(normalized):
         return False
 
     internal_agent_markers = [
@@ -789,6 +831,9 @@ def build_public_orkio_policy_decision(
 
     if _is_factual_seed_or_direct_answer_constraint(normalized):
         return {"handled": False, "reason": "factual_seed_or_direct_answer_constraint"}
+
+    if _is_natural_voice_no_audit_request(normalized):
+        return {"handled": False, "reason": "natural_voice_no_audit_passthrough"}
 
     # AO65R: factual questions must be answered before first-contact/welcome
     # and before product-ceo scoping.
