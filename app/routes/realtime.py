@@ -754,6 +754,106 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
         if public_beta_orkio_only:
             effective_ttl_seconds = min(effective_ttl_seconds, REALTIME_PUBLIC_BETA_MAX_SECONDS)
             now_int = _rt_epoch_seconds(now_ts())
+
+            # AO-01 HF6R14 — REALTIME ORPHAN ACTIVE SESSION SWEEP
+            # If WebRTC/start creates a session but the browser never sends any
+            # activation evidence, an ended_at=None row can later be interpreted
+            # as an active/exhausted session and trigger cooldown.
+            # Before quota evaluation, convert stale non-activated active rows
+            # into zero-duration rows so existing quota logic ignores them.
+            try:
+                orphan_candidates = db.execute(
+                    select(RealtimeSession)
+                    .where(
+                        RealtimeSession.org_slug == org,
+                        RealtimeSession.user_id == uid,
+                        RealtimeSession.ended_at.is_(None),
+                    )
+                    .order_by(RealtimeSession.started_at.desc())
+                    .limit(10)
+                ).scalars().all()
+
+                orphan_zeroed = 0
+                for orphan in orphan_candidates:
+                    orphan_started_at = _rt_epoch_seconds(getattr(orphan, "started_at", None))
+                    if orphan_started_at <= 0:
+                        continue
+
+                    orphan_age_seconds = max(0, now_int - orphan_started_at)
+                    if orphan_age_seconds < 20:
+                        # Preserve very fresh sessions so double-clicks do not
+                        # cancel a handshake that may still be establishing.
+                        continue
+
+                    activation_event_id = db.execute(
+                        select(RealtimeEvent.id)
+                        .where(
+                            RealtimeEvent.org_slug == org,
+                            RealtimeEvent.session_id == orphan.id,
+                            RealtimeEvent.event_type.in_(
+                                [
+                                    "transcript.final",
+                                    "response.final",
+                                    "telemetry.session_activated",
+                                    "telemetry.assistant_audio_started",
+                                    "telemetry.datachannel_open",
+                                    "telemetry.greeting_sent",
+                                ]
+                            ),
+                        )
+                        .limit(1)
+                    ).scalar_one_or_none()
+
+                    if activation_event_id:
+                        continue
+
+                    try:
+                        orphan_meta = json.loads(orphan.meta) if orphan.meta else {}
+                        if not isinstance(orphan_meta, dict):
+                            orphan_meta = {}
+                    except Exception:
+                        orphan_meta = {}
+
+                    orphan_meta.update(
+                        {
+                            "ao01_hf6r14": "orphan_active_session_zeroed_before_quota",
+                            "activation_state": "failed_orphan_warmup",
+                            "activated": False,
+                            "cooldown_billable": False,
+                            "quota_billable": False,
+                            "forced_zero_duration": True,
+                            "orphan_age_seconds": orphan_age_seconds,
+                        }
+                    )
+                    orphan.ended_at = orphan_started_at
+                    orphan.meta = json.dumps(orphan_meta, ensure_ascii=False)
+                    db.add(orphan)
+                    orphan_zeroed += 1
+
+                if orphan_zeroed:
+                    db.commit()
+                    try:
+                        logger.warning(
+                            "AO01_HF6R14_REALTIME_ORPHAN_ACTIVE_SESSIONS_ZEROED user_id=%s count=%s",
+                            uid,
+                            orphan_zeroed,
+                        )
+                    except Exception:
+                        pass
+            except Exception:
+                try:
+                    db.rollback()
+                except Exception:
+                    pass
+                try:
+                    logger.exception(
+                        "AO01_HF6R14_REALTIME_ORPHAN_SWEEP_FAILED user_id=%s org=%s",
+                        uid,
+                        org,
+                    )
+                except Exception:
+                    pass
+
             recent_rs = db.execute(
                 select(RealtimeSession)
                 .where(
@@ -1498,7 +1598,6 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
         if (
             not has_activation_evidence
             and started_at_norm > 0
-            and session_age_seconds <= 20
         ):
             rs.ended_at = started_at_norm
             cur.update(
