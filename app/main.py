@@ -21656,6 +21656,45 @@ def chat(
             "diagnóstico",
         )
 
+        # AO68A-HF3:
+        # Natural voice/realtime UX requests often contain technical-looking words
+        # only to deny them ("não preciso de auditoria técnica"). In that case,
+        # route must stay with Orkio and skip heavy dispatch/readonly planner.
+        ao37_voice_conversation_terms = (
+            "conversa rápida por voz",
+            "conversa rapida por voz",
+            "conversa por voz",
+            "conversar por voz",
+            "falar por voz",
+            "chamada de voz",
+            "conversa em tempo real",
+            "tempo real",
+            "dois minutos",
+            "2 minutos",
+            "simular a experiência",
+            "simular a experiencia",
+            "experiência natural",
+            "experiencia natural",
+            "transição",
+            "transicao",
+        )
+        ao37_technical_denial_terms = (
+            "não preciso de auditoria",
+            "nao preciso de auditoria",
+            "sem auditoria técnica",
+            "sem auditoria tecnica",
+            "não quero auditoria",
+            "nao quero auditoria",
+            "não preciso de análise",
+            "nao preciso de analise",
+            "apenas quero simular",
+            "quero apenas simular",
+        )
+        ao37_is_natural_voice_conversation_no_audit = bool(
+            any(term in ao37_raw_lower for term in ao37_voice_conversation_terms)
+            and any(term in ao37_raw_lower for term in ao37_technical_denial_terms)
+        )
+
         ao37_is_plain_conversation = bool(
             ao37_raw_text
             and "@" not in ao37_raw_text
@@ -21665,16 +21704,16 @@ def chat(
             and not ao37_target_agent_slug
             and not ao37_visible_agent
             and not ao37_raw_lower.startswith(("team", "time"))
-            and not any(term in ao37_raw_lower for term in ao37_governed_terms)
-            and not _is_team_technical_audit_request(ao37_raw_text)
-            and not _is_execution_bridge_readonly_diagnostic_request(ao37_raw_text)
+            and (ao37_is_natural_voice_conversation_no_audit or not any(term in ao37_raw_lower for term in ao37_governed_terms))
+            and (ao37_is_natural_voice_conversation_no_audit or not _is_team_technical_audit_request(ao37_raw_text))
+            and (ao37_is_natural_voice_conversation_no_audit or not _is_execution_bridge_readonly_diagnostic_request(ao37_raw_text))
             # AO01_AO37_EXPLICIT_MENTION_GUARD:
             # Conversa com @mention explícito não é plain conversation.
             # Não pode ser reescrita para Orkio.
             and not any(x in str(ao37_raw_text or "").lower() for x in ("@orion", "@chris", "@team", "@orkio"))
-            and not _ao37_flag_requested("_runtime_orion_dispatch_request_flags")
-            and not _ao37_flag_requested("_orion_self_knowledge_request_flags")
-            and not _ao37_flag_requested("_orion_operational_maturity_request_flags")
+            and (ao37_is_natural_voice_conversation_no_audit or not _ao37_flag_requested("_runtime_orion_dispatch_request_flags"))
+            and (ao37_is_natural_voice_conversation_no_audit or not _ao37_flag_requested("_orion_self_knowledge_request_flags"))
+            and (ao37_is_natural_voice_conversation_no_audit or not _ao37_flag_requested("_orion_operational_maturity_request_flags"))
         )
     except Exception:
         ao37_is_plain_conversation = False
@@ -44117,6 +44156,10 @@ def _detect_excluded_agent_names(message: str) -> List[str]:
         "orkio": [r"@orkio\b", r"\borkio\b"],
         "chris": [r"@chris\b", r"\bchris\b", r"\bcfo\b"],
         "orion": [r"@orion\b", r"\borion\b", r"\bcto\b"],
+        # AO68A-HF3:
+        # Negative mentions such as "não preciso de auditoria técnica" must not
+        # be interpreted as an explicit request for the Auditor agent.
+        "auditor": [r"@auditor\b", r"\bauditor\b", r"auditoria\s+t[ée]cnica", r"technical\s+auditor", r"runtime\s+audit"],
     }
 
     pre_negation = r"(?:sem|exceto|exclude|excluding|without|bloque(?:ar|ie)|remov(?:er|a)|nao\s+incluir|não\s+incluir|nao\s+chamar|não\s+chamar|nao\s+usar|não\s+usar)"
@@ -47917,5 +47960,3 @@ def public_enterprise_lead(payload: PublicEnterpriseLeadIn, request: Request):
 
 
 # METATRON_APPEND_MATERIALIZE_FINAL_TEST: append_unique must materialize the complete app/main.py before guard validation.
-
-        
