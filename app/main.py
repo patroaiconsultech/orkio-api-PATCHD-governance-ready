@@ -23806,6 +23806,7 @@ def chat(
             )
             _ao43a_cv_requested = (
                 not blocked_reply
+                and not _ao68a_is_natural_voice_conversation_no_audit_text(inp.message)
                 and _ao43a_scope
                 and any(
                     _ao43a_key in _ao43a_text
@@ -23874,6 +23875,7 @@ def chat(
             )
             _ao43c_profile_requested = (
                 not blocked_reply
+                and not _ao68a_is_natural_voice_conversation_no_audit_text(inp.message)
                 and _ao43c_scope
                 and any(
                     _ao43c_key in _ao43c_text
@@ -33248,6 +33250,8 @@ async def chat_stream(
         normalized = _normalize_router_text(text)
         if not normalized:
             return False
+        if _ao68a_is_natural_voice_conversation_no_audit_text(text):
+            return False
 
         # Este trilho existe para impedir que pedidos de autoavaliação
         # ampla da plataforma sejam engolidos pelo fast-path de UX frontend.
@@ -33350,9 +33354,62 @@ async def chat_stream(
             "Se esta mensagem aparecer em produção, o SELF EVALUATION GOVERNED READONLY V2 está ativo."
         )
 
+
+    # AO68A-HF4: shared guard for natural voice/realtime UX requests.
+    # These prompts often contain words like "auditoria", "arquitetura", "voz",
+    # "tempo real" and "experiência", but only to explicitly deny technical audit.
+    # They must not be captured by war-room/readonly/founder-CV fast paths.
+    def _ao68a_is_natural_voice_conversation_no_audit_text(text: str) -> bool:
+        try:
+            normalized = _normalize_router_text(text)
+        except Exception:
+            normalized = str(text or "").strip().lower()
+        if not normalized:
+            return False
+
+        voice_terms = (
+            "conversa rapida por voz",
+            "conversa rápida por voz",
+            "conversa por voz",
+            "conversar por voz",
+            "falar por voz",
+            "chamada de voz",
+            "conversa em tempo real",
+            "tempo real",
+            "realtime",
+            "dois minutos",
+            "2 minutos",
+            "simular a experiencia",
+            "simular a experiência",
+            "experiencia natural",
+            "experiência natural",
+            "transicao",
+            "transição",
+        )
+        denial_terms = (
+            "nao preciso de auditoria",
+            "não preciso de auditoria",
+            "sem auditoria tecnica",
+            "sem auditoria técnica",
+            "nao quero auditoria",
+            "não quero auditoria",
+            "nao preciso de analise",
+            "não preciso de análise",
+            "nem de analise de arquitetura",
+            "nem de análise de arquitetura",
+            "apenas quero simular",
+            "quero apenas simular",
+        )
+        return bool(
+            any(term in normalized for term in voice_terms)
+            and any(term in normalized for term in denial_terms)
+        )
+
     def _is_internal_warroom_governed_surgical_request(text: str) -> bool:
         normalized = _normalize_router_text(text)
         if not normalized:
+            return False
+        if _ao68a_is_natural_voice_conversation_no_audit_text(text):
             return False
 
         # AO20E: explicit Orkio orchestration audits must not be captured by the generic
@@ -33517,6 +33574,8 @@ async def chat_stream(
         normalized = _normalize_router_text(text)
         if not normalized:
             return False
+        if _ao68a_is_natural_voice_conversation_no_audit_text(text):
+            return False
 
         execution_markers = [
             "vamos ao patch",
@@ -33656,6 +33715,8 @@ async def chat_stream(
     def _is_internal_warroom_governed_artifact_request(text: str) -> bool:
         normalized = _normalize_router_text(text)
         if not normalized:
+            return False
+        if _ao68a_is_natural_voice_conversation_no_audit_text(text):
             return False
 
         # Blindagem para impedir que conversas comuns entrem no trilho de artifact.
