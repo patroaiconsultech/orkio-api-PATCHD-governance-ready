@@ -1,5 +1,5 @@
-# ORKIO_AO64D_BACKEND_REALTIME_RECOVERY_SAFE
-# Emergency recovery for backend/app/routes/realtime.py
+# ORKIO_AO64D_HF2_BACKEND_REALTIME_CLIENT_SECRET_PAYLOAD_SAFE
+# Backend recovery + Realtime client_secret GA payload alignment for app/routes/realtime.py
 #
 # PURPOSE
 # Restore Python syntax and FastAPI router boot after a frontend React hook was
@@ -226,7 +226,12 @@ def _build_basic_realtime_payload(
     instructions: Optional[str],
     resolved_language: Optional[str],
 ) -> Dict[str, Any]:
-    # Fallback payload. Prefer app.runtime.realtime_session_builder when present.
+    # AO64D-HF2_REALTIME_CLIENT_SECRET_GA_PAYLOAD
+    # Fallback payload aligned with the GA Realtime client_secrets shape:
+    # - expires_after at the top level
+    # - session.type = "realtime"
+    # - output voice under session.audio.output.voice
+    # - VAD/transcription under session.audio.input
     selected_model = (
         str(model or "").strip()
         or os.getenv("OPENAI_REALTIME_MODEL", "").strip()
@@ -236,31 +241,96 @@ def _build_basic_realtime_payload(
         voice or os.getenv("OPENAI_REALTIME_VOICE_DEFAULT", "cedar"),
         default=os.getenv("OPENAI_REALTIME_VOICE_DEFAULT", "cedar"),
     )
-    ttl = max(60, min(1800, int(ttl_seconds or 120)))
-    language = str(resolved_language or "pt").strip() or "pt"
+    ttl = max(10, min(7200, int(ttl_seconds or 120)))
+    language = str(resolved_language or "pt").strip().lower() or "pt"
 
     return {
+        "expires_after": {
+            "anchor": "created_at",
+            "seconds": ttl,
+        },
         "session": {
             "type": "realtime",
             "model": selected_model,
-            "voice": selected_voice,
             "instructions": instructions
             or "Você é Orkio, agente executivo da PatroAI. Responda em português do Brasil, com objetividade e segurança.",
-            "modalities": ["audio", "text"],
-            "turn_detection": {
-                "type": "server_vad",
-                "threshold": 0.72,
-                "prefix_padding_ms": 500,
-                "silence_duration_ms": 1800,
-                "create_response": True,
-            },
-            "input_audio_transcription": {
-                "model": "gpt-4o-mini-transcribe",
-                "language": language,
+            "output_modalities": ["audio"],
+            "audio": {
+                "output": {
+                    "voice": selected_voice,
+                },
+                "input": {
+                    "turn_detection": {
+                        "type": "server_vad",
+                        "threshold": 0.72,
+                        "prefix_padding_ms": 500,
+                        "silence_duration_ms": 1800,
+                        "create_response": True,
+                        "interrupt_response": True,
+                    },
+                    "transcription": {
+                        "model": "gpt-4o-mini-transcribe",
+                        "language": language,
+                    },
+                },
             },
         },
-        "ttl_seconds": ttl,
     }
+
+
+def _payload_looks_ga_compatible(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+
+    session = payload.get("session")
+    if not isinstance(session, dict):
+        return False
+
+    audio = session.get("audio")
+    if not isinstance(audio, dict):
+        return False
+
+    audio_input = audio.get("input")
+    audio_output = audio.get("output")
+    if not isinstance(audio_input, dict) or not isinstance(audio_output, dict):
+        return False
+
+    if not audio_output.get("voice"):
+        return False
+
+    if not isinstance(audio_input.get("turn_detection"), dict):
+        return False
+
+    # expires_after is the GA client secret TTL contract. Without it, the SDK/REST
+    # may still default, but for this recovery patch we keep it explicit.
+    if not isinstance(payload.get("expires_after"), dict):
+        return False
+
+    return True
+
+
+def _normalize_realtime_payload_for_ga(
+    payload: Any,
+    *,
+    model: Optional[str],
+    voice: Optional[str],
+    ttl_seconds: Optional[int],
+    instructions: Optional[str],
+    resolved_language: Optional[str],
+) -> Dict[str, Any]:
+    # If a local builder already emits a GA-compatible payload, keep it.
+    if _payload_looks_ga_compatible(payload):
+        return payload
+
+    # Otherwise, rebuild the minimal known-good GA shape. This protects recovery
+    # from stale beta/legacy builders or the simplified ttl_seconds/modalities shape.
+    return _build_basic_realtime_payload(
+        model=model,
+        voice=voice,
+        ttl_seconds=ttl_seconds,
+        instructions=instructions,
+        resolved_language=resolved_language,
+    )
 
 
 def _extract_secret_value(secret_obj: Any) -> tuple[Optional[str], Any]:
@@ -368,9 +438,18 @@ async def _mint_client_secret(
             resolved_language=resolved_language,
         )
 
+    payload = _normalize_realtime_payload_for_ga(
+        payload,
+        model=model,
+        voice=voice,
+        ttl_seconds=ttl_seconds,
+        instructions=instructions,
+        resolved_language=resolved_language,
+    )
+
     try:
         logger.warning(
-            "AO64D_REALTIME_RECOVERY_SESSION_CONFIG %s",
+            "AO64D_HF2_REALTIME_CLIENT_SECRET_GA_PAYLOAD %s",
             json.dumps(realtime_session_debug_snapshot(payload), ensure_ascii=False, sort_keys=True),
         )
     except Exception:
