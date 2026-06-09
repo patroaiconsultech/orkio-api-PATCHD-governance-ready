@@ -1,5 +1,5 @@
-# ORKIO_AO64D_HF3_BACKEND_REALTIME_JSON_RESPONSE_SERIALIZATION_SAFE
-# Backend recovery + Realtime client_secret GA payload + JSON serialization safe for app/routes/realtime.py
+# ORKIO_AO64D_HF4_BACKEND_REALTIME_NO_HARD_TIMEBOX_ESG_ADVISORY_SAFE
+# Backend recovery + Realtime client_secret GA payload + JSON serialization + no hard public timebox for app/routes/realtime.py
 #
 # PURPOSE
 # Restore Python syntax and FastAPI router boot after a frontend React hook was
@@ -8,9 +8,10 @@
 # SCOPE
 # - Backend only.
 # - Exposes build_realtime_router(deps), expected by app/main.py.
-# - Keeps /api/realtime/start, /api/realtime/end, /api/realtime/events:batch and
-#   /api/realtime/guard alive.
-# - Does not modify frontend, AppConsole, WebRTC, SDP, DataChannel or quota schema.
+# - Keeps /api/realtime/start, /api/realtime/end, /api/realtime/events:batch,
+#   /api/realtime/guard and /api/realtime/{session_id} alive.
+# - Does not modify frontend, AppConsole, WebRTC, SDP or DataChannel.
+# - Converts hard public timebox/cooldown into advisory-only ESG guidance.
 #
 # IMPORTANT
 # This is a safe recovery router, not a premium refactor. Its first job is to
@@ -150,6 +151,20 @@ REALTIME_PUBLIC_BETA_COOLDOWN_SECONDS = _positive_int_env(
     600,
 )
 
+# AO64D-HF4:
+# Public/user time limits are no longer enforced as hard blockers in this recovery
+# router. We still expose advisory metadata so the frontend/product can recommend
+# shorter sessions for cost, data, battery and ESG efficiency without interrupting
+# a useful voice conversation.
+REALTIME_ADVISORY_RECOMMENDED_SECONDS = _positive_int_env(
+    "ORKIO_REALTIME_ADVISORY_RECOMMENDED_SECONDS",
+    120,
+)
+REALTIME_CLIENT_SECRET_TTL_SECONDS = _positive_int_env(
+    "ORKIO_REALTIME_CLIENT_SECRET_TTL_SECONDS",
+    3600,
+)
+
 
 def _safe_getattr(obj: Any, name: str, default: Any = None) -> Any:
     try:
@@ -163,7 +178,7 @@ def _safe_getattr(obj: Any, name: str, default: Any = None) -> Any:
 def _json_safe(value: Any) -> Any:
     """Convert SDK/Pydantic/SQLAlchemy-ish objects into JSON-safe primitives.
 
-    AO64D-HF3:
+    AO64D-HF4:
     FastAPI/Pydantic v2 can crash during response serialization when an SDK model
     or partially mocked serializer object is returned inside a dict:
     TypeError: 'MockValSer' object cannot be converted to 'SchemaSerializer'.
@@ -221,6 +236,29 @@ def _json_safe(value: Any) -> Any:
 
 def _json_response(payload: Dict[str, Any], status_code: int = 200) -> JSONResponse:
     return JSONResponse(content=_json_safe(payload), status_code=status_code)
+
+
+def _build_esg_usage_advisory() -> Dict[str, Any]:
+    recommended = max(30, int(REALTIME_ADVISORY_RECOMMENDED_SECONDS or 120))
+    return {
+        "enabled": True,
+        "mode": "advisory_only",
+        "recommended_seconds": recommended,
+        "hard_limit_enforced": False,
+        "cooldown_enforced": False,
+        "title": "Uso consciente da voz em tempo real",
+        "message": (
+            "Para economizar créditos, dados móveis, bateria e energia, recomendamos "
+            f"sessões de voz objetivas de até {recommended} segundos quando possível. "
+            "A conversa não será interrompida automaticamente por essa recomendação."
+        ),
+        "esg": {
+            "cost_efficiency": True,
+            "data_saving": True,
+            "battery_saving": True,
+            "energy_saving": True,
+        },
+    }
 
 
 def _is_admin_user(user: Any, db_user: Any = None) -> bool:
@@ -545,7 +583,7 @@ async def _mint_client_secret(
 
     try:
         logger.warning(
-            "AO64D_HF3_REALTIME_CLIENT_SECRET_GA_PAYLOAD %s",
+            "AO64D_HF4_REALTIME_CLIENT_SECRET_GA_PAYLOAD %s",
             json.dumps(realtime_session_debug_snapshot(payload), ensure_ascii=False, sort_keys=True),
         )
     except Exception:
@@ -747,7 +785,7 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
             **_json_safe(secret),
             "org": org,
             "recovery_router": True,
-            "serialization_safe": "AO64D_HF3",
+            "serialization_safe": "AO64D_HF4",
         })
 
     @router.post("/api/realtime/start")
@@ -770,8 +808,14 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
             or "pt"
         ).strip().lower() or "pt"
 
-        ttl_requested = int(_safe_getattr(body, "ttl_seconds", None) or REALTIME_PUBLIC_BETA_MAX_SECONDS)
-        effective_ttl = ttl_requested if is_admin else min(ttl_requested, REALTIME_PUBLIC_BETA_MAX_SECONDS)
+        # AO64D-HF4_NO_HARD_TIMEBOX_ESG_ADVISORY
+        # The Realtime client secret still needs a practical TTL, but the product
+        # no longer enforces a hard user-facing session timebox/cooldown here.
+        ttl_requested = int(
+            _safe_getattr(body, "ttl_seconds", None)
+            or REALTIME_CLIENT_SECRET_TTL_SECONDS
+        )
+        effective_ttl = max(60, min(ttl_requested, REALTIME_CLIENT_SECRET_TTL_SECONDS))
 
         # Mutate body only when possible, preserving existing Pydantic object contract.
         try:
@@ -810,28 +854,25 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
             mode=mode,
         )
 
-        if is_admin:
-            timebox = {
-                "limited": False,
-                "admin_bypass": True,
-                "bypass": "admin",
-                "max_seconds": None,
-                "remaining_seconds": None,
-                "cooldown_seconds": 0,
-            }
-        else:
-            timebox = {
-                "limited": True,
-                "admin_bypass": False,
-                "bypass": None,
-                "max_seconds": REALTIME_PUBLIC_BETA_MAX_SECONDS,
-                "remaining_seconds": effective_ttl,
-                "cooldown_seconds": REALTIME_PUBLIC_BETA_COOLDOWN_SECONDS,
-            }
+        # AO64D-HF4:
+        # Hard timebox/cooldown disabled for all users in this recovery router.
+        # Admin is still identified for logs/governance, but non-admin users are
+        # no longer interrupted by max_seconds/cooldown here.
+        timebox = {
+            "limited": False,
+            "admin_bypass": bool(is_admin),
+            "bypass": "admin" if is_admin else "no_hard_timebox",
+            "max_seconds": None,
+            "remaining_seconds": None,
+            "cooldown_seconds": 0,
+            "advisory_only": True,
+            "recommended_seconds": REALTIME_ADVISORY_RECOMMENDED_SECONDS,
+        }
+        usage_advisory = _build_esg_usage_advisory()
 
         try:
             logger.warning(
-                "AO64D_REALTIME_RECOVERY_START_OK user_id=%s org=%s session_id=%s thread_id=%s admin=%s timebox=%s",
+                "AO64D_HF4_REALTIME_START_OK_NO_HARD_TIMEBOX user_id=%s org=%s session_id=%s thread_id=%s admin=%s timebox=%s",
                 uid,
                 org,
                 session_id,
@@ -851,9 +892,11 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
             "client_secret_value": safe_secret.get("value") if isinstance(safe_secret, dict) else None,
             "value": safe_secret.get("value") if isinstance(safe_secret, dict) else None,
             "timebox": _json_safe(timebox),
+            "usage_advisory": _json_safe(usage_advisory),
             "started_at": started_at,
             "recovery_router": True,
-            "serialization_safe": "AO64D_HF3",
+            "serialization_safe": "AO64D_HF4",
+            "timebox_policy": "advisory_only_esg",
         })
 
     @router.post("/api/realtime/events:batch")
@@ -893,6 +936,61 @@ def build_realtime_router(deps: SimpleNamespace) -> APIRouter:
             "received": len(events),
             "recovery_router": True,
         }
+
+    @router.get("/api/realtime/{session_id}")
+    def realtime_get_session(
+        session_id: str,
+        finals_only: Optional[bool] = False,
+        x_org_slug: Optional[str] = Header(default=None),
+        user: Any = Depends(get_current_user),
+        db: Any = Depends(get_db),
+    ) -> JSONResponse:
+        """Compatibility read endpoint used by the frontend after Realtime close.
+
+        The recovery router may not have access to the full persisted event/final
+        transcript model. Returning 200 prevents noisy 405 loops while preserving
+        a safe empty structure. Full transcript recovery should be restored from
+        the last known-good router in a later premium patch.
+        """
+        org = _resolve_org_safe(deps, user, x_org_slug)
+        session_id_clean = str(session_id or "").strip()
+        snapshot = None
+
+        try:
+            snapshot_fn = getattr(deps, "get_realtime_session_snapshot", None)
+            if callable(snapshot_fn):
+                snapshot = snapshot_fn(session_id_clean, org=org, db=db)
+        except Exception:
+            snapshot = None
+
+        payload = {
+            "ok": True,
+            "session_id": session_id_clean,
+            "org": org,
+            "finals_only": bool(finals_only),
+            "session": _json_safe(snapshot) if snapshot else None,
+            "finals": {
+                "user_text": "",
+                "assistant_text": "",
+                "turns": [],
+            },
+            "recovery_router": True,
+            "serialization_safe": "AO64D_HF4",
+            "compatibility_endpoint": "GET /api/realtime/{session_id}",
+        }
+
+        try:
+            logger.warning(
+                "AO64D_HF4_REALTIME_GET_SESSION_COMPAT org=%s session_id=%s finals_only=%s has_snapshot=%s",
+                org,
+                session_id_clean,
+                bool(finals_only),
+                bool(snapshot),
+            )
+        except Exception:
+            pass
+
+        return _json_response(payload)
 
     @router.post("/api/realtime/end")
     def realtime_end(
