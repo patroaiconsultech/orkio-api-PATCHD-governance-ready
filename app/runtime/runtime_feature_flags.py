@@ -54,6 +54,10 @@ def is_public_orion_policy_enabled() -> bool:
     return env_bool("ORKIO_PUBLIC_ORION_POLICY_ENABLED", True)
 
 
+def is_amcham_public_journey_enabled() -> bool:
+    return env_bool("ORKIO_AMCHAM_PUBLIC_JOURNEY_ENABLED", True)
+
+
 def is_orion_technical_squad_enabled() -> bool:
     return env_bool("ORKIO_ORION_TECH_SQUAD_ENABLED", True)
 
@@ -132,6 +136,7 @@ def runtime_feature_flags_snapshot() -> dict[str, Any]:
         "public_orkio_policy_enabled": is_public_orkio_policy_enabled(),
         "public_chris_policy_enabled": is_public_chris_policy_enabled(),
         "public_orion_policy_enabled": is_public_orion_policy_enabled(),
+        "amcham_public_journey_enabled": is_amcham_public_journey_enabled(),
         "orion_technical_squad_enabled": is_orion_technical_squad_enabled(),
         "platform_self_improvement_enabled": is_platform_self_improvement_enabled(),
         "chris_business_squad_enabled": is_chris_business_squad_enabled(),
