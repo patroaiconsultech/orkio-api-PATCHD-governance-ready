@@ -61,6 +61,10 @@ from .runtime.realtime_unlock_journey import (
     decorate_orkio_policy_decision_with_realtime_unlock,
     is_realtime_unlock_conversational_context,
 )
+from .runtime.amcham_public_journey_policy import (
+    build_amcham_public_journey_decision,
+    build_amcham_public_journey_stream_payload,
+)
 from .runtime.public_chris_policy import (
     build_public_chris_policy_decision,
     build_public_chris_stream_payload,
@@ -21607,6 +21611,64 @@ def chat(
     except Exception:
         pass
 
+    # AO66B-HF1_AMCHAM_PUBLIC_JOURNEY_FASTPATH_WIRE_DIRECT
+    # Same policy as stream path for direct /api/chat fallback.
+    try:
+        _amcham_direct_decision = build_amcham_public_journey_decision(
+            inp.message,
+            visible_agent=getattr(inp, "visible_agent", None),
+            target_agent_slug=getattr(inp, "target_agent_slug", None),
+            dest_mode=getattr(inp, "dest_mode", None),
+            route_plan=None,
+        )
+    except Exception:
+        _amcham_direct_decision = {
+            "handled": False,
+            "reason": "amcham_public_journey_policy_exception",
+        }
+
+    if isinstance(_amcham_direct_decision, dict) and _amcham_direct_decision.get("handled"):
+        final_text = str(_amcham_direct_decision.get("answer") or "").strip()
+        assistant_message_id = None
+        try:
+            persisted = _persist_assistant_message(
+                text=final_text,
+                thread_id=tid,
+                agent_id=None,
+                agent_name="Orkio",
+            )
+            assistant_message_id = persisted.get("assistant_message_id")
+            tid = persisted.get("thread_id") or tid
+        except Exception:
+            try:
+                logger.exception(
+                    "AO66B_AMCHAM_PUBLIC_JOURNEY_DIRECT_PERSIST_FAILED trace_id=%s thread_id=%s",
+                    ao32_trace_id,
+                    tid,
+                )
+            except Exception:
+                pass
+
+        try:
+            logger.warning(
+                "AO66B_AMCHAM_PUBLIC_JOURNEY_DIRECT_FASTPATH trace_id=%s thread_id=%s reason=%s assistant_message_id=%s",
+                ao32_trace_id,
+                tid,
+                _amcham_direct_decision.get("reason"),
+                assistant_message_id,
+            )
+        except Exception:
+            pass
+
+        return ChatOut(
+            thread_id=tid,
+            answer=final_text,
+            citations=[],
+            agent_id=None,
+            agent_name="Orkio",
+            runtime_hints=_amcham_direct_decision.get("runtime_hints") or {},
+        )
+
     # AO-37: deterministic Orkio target for plain conversation.
     # Plain conversation must not traverse heavy dispatch before target_agents resolution.
     ao37_skip_heavy_dispatch = False
@@ -39448,6 +39510,63 @@ async def chat_stream(
                 except Exception:
                     pass
                 # If this fast-path fails, existing guarded rails still protect the UI.
+
+        # AO66B-HF1_AMCHAM_PUBLIC_JOURNEY_FASTPATH_WIRE
+        # AMCHAM/Efatà 777 public journey must run before realtime unlock,
+        # Chris, Orion and generic Orkio public policy.
+        # It prevents premature specialist/agent offering and keeps Orkio
+        # as the only visible public guide.
+        try:
+            _amcham_public_journey_decision = build_amcham_public_journey_decision(
+                message,
+                visible_agent=getattr(inp, "visible_agent", None),
+                target_agent_slug=getattr(inp, "target_agent_slug", None),
+                dest_mode=getattr(inp, "dest_mode", None),
+                route_plan=route_plan if isinstance(route_plan, dict) else None,
+            )
+        except Exception:
+            _amcham_public_journey_decision = {
+                "handled": False,
+                "reason": "amcham_public_journey_policy_exception",
+            }
+
+        if (
+            isinstance(_amcham_public_journey_decision, dict)
+            and _amcham_public_journey_decision.get("handled")
+        ):
+            try:
+                final_text = str(_amcham_public_journey_decision.get("answer") or "").strip()
+                persisted = await asyncio.to_thread(
+                    _persist_assistant_message,
+                    text=final_text,
+                    thread_id=tid_seed,
+                    agent_id=None,
+                    agent_name="Orkio",
+                )
+                payload = build_amcham_public_journey_stream_payload(
+                    _amcham_public_journey_decision,
+                    persisted=persisted,
+                )
+                logger.warning(
+                    "AO66B_AMCHAM_PUBLIC_JOURNEY_FASTPATH trace_id=%s thread_id=%s reason=%s",
+                    trace_id,
+                    tid_seed,
+                    _amcham_public_journey_decision.get("reason"),
+                )
+                async for ev in _emit_result_payload(
+                    payload,
+                    routing_source="amcham_public_journey_policy_module",
+                ):
+                    yield ev
+                return
+            except Exception:
+                try:
+                    logger.exception(
+                        "AO66B_AMCHAM_PUBLIC_JOURNEY_FASTPATH_FAILED trace_id=%s",
+                        trace_id,
+                    )
+                except Exception:
+                    pass
 
         # AO67A-HF2_REALTIME_UNLOCK_PRECEDENCE_FASTPATH
         # Conversational journey/voice unlock must run before Chris valuation fast-path.
